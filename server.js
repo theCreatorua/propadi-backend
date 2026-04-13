@@ -303,13 +303,21 @@ app.put('/api/admin/withdrawals/:id', async (req, res) => {
         `,
       };
 
-      await transporter.sendMail(mailOptions);
-      console.log(`✅ Receipt successfully sent to ${userEmail}`);
+      // TRY to send the email, but don't crash if Render blocks it
+      try {
+        await transporter.sendMail(mailOptions);
+        console.log(`✅ Receipt successfully sent to ${userEmail}`);
+      } catch (emailErr) {
+        console.error(
+          '⚠️ Email failed to send (Render block):',
+          emailErr.message,
+        );
+      }
     }
 
     res.json({
       success: true,
-      message: 'Withdrawal marked as paid and email sent!',
+      message: 'Withdrawal marked as paid!',
     });
   } catch (err) {
     console.error('Update Status & Email Error:', err.message);
