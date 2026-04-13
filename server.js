@@ -276,7 +276,7 @@ app.put('/api/admin/withdrawals/:id', async (req, res) => {
       `
       SELECT users.email, withdrawals.amount 
       FROM withdrawals 
-      JOIN users ON withdrawals.user_id = users.id 
+      JOIN users ON withdrawals.user_id = users.user_id 
       WHERE withdrawals.id = $1
     `,
       [id],
