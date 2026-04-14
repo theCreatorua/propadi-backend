@@ -1,6 +1,7 @@
 require('dotenv').config();
 
-const nodemailer = require('nodemailer');
+const { Resend } = require('resend');
+const resend = new Resend(process.env.RESEND_API_KEY);
 const express = require('express');
 const { Pool } = require('pg');
 const cors = require('cors');
@@ -19,13 +20,13 @@ const pool = new Pool({
 // ==========================================================
 // EMAIL ENGINE SETUP
 // ==========================================================
-const transporter = nodemailer.createTransport({
-  service: 'gmail',
-  auth: {
-    user: process.env.EMAIL_USER,
-    pass: process.env.EMAIL_PASS,
-  },
-});
+// const transporter = nodemailer.createTransport({
+//   service: 'gmail',
+//   auth: {
+//     user: process.env.EMAIL_USER,
+//     pass: process.env.EMAIL_PASS,
+//   },
+// });
 
 // Test the engine when the server starts
 transporter.verify((error, success) => {
@@ -287,31 +288,37 @@ app.put('/api/admin/withdrawals/:id', async (req, res) => {
       const userEmail = withdrawalDetails.rows[0].email;
       const amount = withdrawalDetails.rows[0].amount;
 
-      const mailOptions = {
-        from: `"Propadi Admin" <${process.env.EMAIL_USER}>`,
-        to: userEmail,
-        subject: 'Withdrawal Processed Successfully! 🎉',
-        html: `
-          <div style="font-family: Arial, sans-serif; padding: 20px; color: #0A2E51; max-width: 600px; border: 1px solid #e0e0e0; border-radius: 8px;">
-            <h2 style="color: #F79F1B;">Great news from Propadi!</h2>
-            <p>Hello Padi,</p>
-            <p>Your withdrawal request for <strong>₦${amount}</strong> has been successfully processed and sent to your bank account.</p>
-            <p>Thank you for trusting Propadi!</p>
-            <br/>
-            <p style="font-size: 12px; color: #888;">This is an automated message. Please do not reply directly to this email.</p>
-          </div>
-        `,
-      };
-
-      // TRY to send the email, but don't crash if Render blocks it
+      // =========================================================
+      // RESEND EMAIL ENGINE
+      // =========================================================
       try {
-        await transporter.sendMail(mailOptions);
-        console.log(`✅ Receipt successfully sent to ${userEmail}`);
+        const { data, error } = await resend.emails.send({
+          // CRITICAL: On Resend's free tier, you MUST use this exact 'from' address
+          from: 'Propadi Admin <onboarding@resend.dev>',
+          to: userEmail,
+          subject: 'Withdrawal Processed Successfully! 🎉',
+          html: `
+            <div style="font-family: Arial, sans-serif; padding: 20px; color: #0A2E51; max-width: 600px; border: 1px solid #e0e0e0; border-radius: 8px;">
+              <h2 style="color: #F79F1B;">Great news from Propadi!</h2>
+              <p>Hello Padi,</p>
+              <p>Your withdrawal request for <strong>₦${amount}</strong> has been successfully processed and sent to your bank account.</p>
+              <p>Thank you for trusting Propadi!</p>
+              <br/>
+              <p style="font-size: 12px; color: #888;">This is an automated message. Please do not reply directly to this email.</p>
+            </div>
+          `,
+        });
+
+        if (error) {
+          console.error('⚠️ Resend API Error:', error.message);
+        } else {
+          console.log(
+            `✅ Receipt successfully sent to ${userEmail} via Resend! ID:`,
+            data.id,
+          );
+        }
       } catch (emailErr) {
-        console.error(
-          '⚠️ Email failed to send (Render block):',
-          emailErr.message,
-        );
+        console.error('⚠️ Email execution failed:', emailErr.message);
       }
     }
 
