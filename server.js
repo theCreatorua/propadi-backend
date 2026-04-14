@@ -1,48 +1,28 @@
 require('dotenv').config();
-
-const { Resend } = require('resend');
-const resend = new Resend(process.env.RESEND_API_KEY);
 const express = require('express');
-const { Pool } = require('pg');
 const cors = require('cors');
+const { Pool } = require('pg');
+const { Resend } = require('resend');
 
 const app = express();
-const port = process.env.PORT || 3000;
+const port = process.env.PORT || 5000;
 
+// ==========================================================
+// MIDDLEWARE & SETUP
+// ==========================================================
 app.use(cors());
 app.use(express.json());
 
-// 👇 1. PASTE YOUR SUPABASE CONNECTION HERE
+// Database Setup (Supabase)
 const pool = new Pool({
   connectionString: process.env.DATABASE_URL,
+  ssl: { rejectUnauthorized: false },
 });
 
-// ==========================================================
-// EMAIL ENGINE SETUP
-// ==========================================================
-// const transporter = nodemailer.createTransport({
-//   service: 'gmail',
-//   auth: {
-//     user: process.env.EMAIL_USER,
-//     pass: process.env.EMAIL_PASS,
-//   },
-// });
+// Email Engine Setup (Resend)
+const resend = new Resend(process.env.RESEND_API_KEY);
 
-// Test the engine when the server starts
-transporter.verify((error, success) => {
-  if (error) {
-    console.log('Email engine error: ', error);
-  } else {
-    console.log('📧 Email engine is ready to send messages!');
-  }
-});
-
-// 👇 2. PASTE YOUR PAYSTACK TEST KEY HERE
-const PAYSTACK_SECRET_KEY = 'sk_test_09753d3f12b336a60d9b89cf9d506335fcd7c961';
-
-app.get('/', (req, res) => {
-  res.send('Welcome to the Propadi API!');
-});
+// ... [Keep your original Routes 1, 2, 3, 4 here] ...
 
 // --- ROUTE 1: USER LOGIN (POST) ---
 app.post('/api/login', async (req, res) => {
@@ -271,30 +251,26 @@ app.put('/api/admin/withdrawals/:id', async (req, res) => {
       id,
     ]);
 
-    // 2. Fetch the user's email and withdrawal amount from the database
-    // (This uses a standard SQL JOIN to connect the withdrawal to the user)
+    // 2. Fetch the user's email and withdrawal amount
+    // NOTE: Make sure 'users.id' matches your actual Supabase column (e.g., users.user_id if you changed it earlier)
     const withdrawalDetails = await pool.query(
       `
       SELECT users.email, withdrawals.amount 
       FROM withdrawals 
-      JOIN users ON withdrawals.user_id = users.user_id 
+      JOIN users ON withdrawals.user_id = users.id 
       WHERE withdrawals.id = $1
     `,
       [id],
     );
 
-    // 3. If we found the user, send the email
+    // 3. Send Email Receipt via Resend API
     if (withdrawalDetails.rows.length > 0) {
       const userEmail = withdrawalDetails.rows[0].email;
       const amount = withdrawalDetails.rows[0].amount;
 
-      // =========================================================
-      // RESEND EMAIL ENGINE
-      // =========================================================
       try {
         const { data, error } = await resend.emails.send({
-          // CRITICAL: On Resend's free tier, you MUST use this exact 'from' address
-          from: 'Propadi Admin <onboarding@resend.dev>',
+          from: 'Propadi Admin <onboarding@resend.dev>', // Keep this exact email for Resend free tier testing
           to: userEmail,
           subject: 'Withdrawal Processed Successfully! 🎉',
           html: `
@@ -313,8 +289,7 @@ app.put('/api/admin/withdrawals/:id', async (req, res) => {
           console.error('⚠️ Resend API Error:', error.message);
         } else {
           console.log(
-            `✅ Receipt successfully sent to ${userEmail} via Resend! ID:`,
-            data.id,
+            `✅ Receipt successfully sent to ${userEmail} via Resend!`,
           );
         }
       } catch (emailErr) {
@@ -322,16 +297,17 @@ app.put('/api/admin/withdrawals/:id', async (req, res) => {
       }
     }
 
-    res.json({
-      success: true,
-      message: 'Withdrawal marked as paid!',
-    });
+    // 4. Instantly tell React to refresh the screen
+    res.json({ success: true, message: 'Withdrawal marked as paid!' });
   } catch (err) {
-    console.error('Update Status & Email Error:', err.message);
+    console.error('Update Status Error:', err.message);
     res.status(500).json({ error: 'Server Error processing request' });
   }
 });
 
+// ==========================================================
+// START SERVER
+// ==========================================================
 app.listen(port, () => {
   console.log(`Propadi Server running on port ${port}`);
 });
