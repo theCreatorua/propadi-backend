@@ -315,7 +315,7 @@ app.get('/api/user/dashboard/:userId', async (req, res) => {
     // 1. Get the user's specific wallet balance
     // ⚠️ CRITICAL: Make sure 'id' matches your Supabase users table primary column!
     const userQuery = await pool.query(
-      'SELECT wallet_balance FROM users WHERE id = $1',
+      'SELECT wallet_balance FROM users WHERE user_id = $1',
       [userId],
     );
 
