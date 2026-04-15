@@ -306,6 +306,38 @@ app.put('/api/admin/withdrawals/:id', async (req, res) => {
 });
 
 // ==========================================================
+// ROUTE 7: PADI'S PERSONAL DASHBOARD DATA (GET)
+// ==========================================================
+app.get('/api/user/dashboard/:userId', async (req, res) => {
+  const { userId } = req.params;
+
+  try {
+    // 1. Get the user's specific wallet balance
+    // ⚠️ CRITICAL: Make sure 'id' matches your Supabase users table primary column!
+    const userQuery = await pool.query(
+      'SELECT wallet_balance FROM users WHERE id = $1',
+      [userId],
+    );
+
+    // 2. Get ONLY their specific withdrawal history
+    // ⚠️ CRITICAL: Make sure 'user_id' matches the column in your withdrawals table!
+    const historyQuery = await pool.query(
+      'SELECT * FROM withdrawals WHERE user_id = $1 ORDER BY created_at DESC',
+      [userId],
+    );
+
+    // 3. Send it all back to their React app
+    res.json({
+      balance: userQuery.rows.length > 0 ? userQuery.rows[0].wallet_balance : 0,
+      withdrawals: historyQuery.rows,
+    });
+  } catch (err) {
+    console.error('User Dashboard Error:', err.message);
+    res.status(500).json({ error: 'Server Error fetching user data' });
+  }
+});
+
+// ==========================================================
 // START SERVER
 // ==========================================================
 app.listen(port, () => {
