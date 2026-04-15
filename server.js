@@ -19,7 +19,18 @@ const pool = new Pool({
   ssl: { rejectUnauthorized: false },
 });
 
-// Email Engine Setup (Resend)
+// Add these three diagnostic lines:
+console.log('=== API KEY DIAGNOSTIC ===');
+console.log(
+  'Does Render see the key?:',
+  process.env.RESEND_API_KEY ? 'YES' : 'NO',
+);
+console.log(
+  'Key Length:',
+  process.env.RESEND_API_KEY ? process.env.RESEND_API_KEY.length : 0,
+);
+
+// Your existing Resend initialization:
 const resend = new Resend(process.env.RESEND_API_KEY);
 
 // ... [Keep your original Routes 1, 2, 3, 4 here] ...
