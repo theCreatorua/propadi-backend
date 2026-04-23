@@ -92,7 +92,7 @@ app.put('/api/admin/withdrawals/:id', async (req, res) => {
     if (status === 'Paid') {
       const emailResult = await resend.emails.send({
         from: 'Propadi <onboarding@resend.dev>',
-        to: withdrawal.email || 'test@example.com',
+        to: 'propadi.admin@gmail.com',
         subject: 'Propadi Withdrawal Successful',
         html: `<h3>Great news!</h3><p>Your withdrawal of ₦${withdrawal.amount.toLocaleString()} has been processed and sent to your account.</p>`,
       });
