@@ -53,6 +53,30 @@ app.get('/api/user/dashboard/:id', async (req, res) => {
   }
 });
 
+// Request a new withdrawal
+app.post('/api/user/withdrawals', async (req, res) => {
+  const { user_id, amount, email } = req.body;
+
+  try {
+    // Insert the new request into the database with a 'Pending' status
+    const result = await pool.query(
+      "INSERT INTO withdrawals (user_id, amount, status, email) VALUES ($1, $2, 'Pending', $3) RETURNING *",
+      [user_id, amount, email],
+    );
+
+    res.json({
+      success: true,
+      message: 'Withdrawal requested successfully',
+      data: result.rows[0],
+    });
+  } catch (err) {
+    console.error('Error creating withdrawal:', err);
+    res
+      .status(500)
+      .json({ success: false, error: 'Failed to request withdrawal' });
+  }
+});
+
 // ======== ADMIN ROUTES ========
 // 1. Get all withdrawals (TYPO FIXED HERE: 'withdrawals')
 app.get('/api/admin/withdrawals', async (req, res) => {
