@@ -88,13 +88,21 @@ app.put('/api/admin/withdrawals/:id', async (req, res) => {
     const withdrawal = result.rows[0];
 
     // Send Email via Resend if marked as Paid
+    // Send Email via Resend if marked as Paid
     if (status === 'Paid') {
-      await resend.emails.send({
+      const emailResult = await resend.emails.send({
         from: 'Propadi <onboarding@resend.dev>',
         to: withdrawal.email || 'test@example.com',
         subject: 'Propadi Withdrawal Successful',
         html: `<h3>Great news!</h3><p>Your withdrawal of ₦${withdrawal.amount.toLocaleString()} has been processed and sent to your account.</p>`,
       });
+
+      // NEW: Force the server to print exactly what Resend says!
+      if (emailResult.error) {
+        console.error('RESEND BLOCKED THE EMAIL:', emailResult.error);
+      } else {
+        console.log('RESEND SUCCESS:', emailResult.data);
+      }
     }
 
     res.json({
