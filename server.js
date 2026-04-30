@@ -34,7 +34,7 @@ app.get('/api/user/dashboard/:id', async (req, res) => {
   try {
     const { id } = req.params;
     const balanceResult = await pool.query(
-      'SELECT balance FROM users WHERE id = $1',
+      'SELECT balance FROM users WHERE user_id = $1',
       [id],
     );
     const withdrawalsResult = await pool.query(
