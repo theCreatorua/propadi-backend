@@ -92,47 +92,54 @@ app.get('/api/admin/withdrawals', async (req, res) => {
 });
 
 // 2. Mark withdrawal as Paid and send email
+// 2. Mark withdrawal as Paid, DEDUCT BALANCE, and send email
 app.put('/api/admin/withdrawals/:id', async (req, res) => {
   const { id } = req.params;
   const { status } = req.body;
 
   try {
-    // Update database
-    const result = await pool.query(
-      'UPDATE withdrawals SET status = $1 WHERE id = $2 RETURNING *',
-      [status, id],
+    // 1. Get the withdrawal details FIRST so we know how much to deduct
+    const checkResult = await pool.query(
+      'SELECT * FROM withdrawals WHERE id = $1',
+      [id],
     );
 
-    if (result.rows.length === 0) {
+    if (checkResult.rows.length === 0) {
       return res
         .status(404)
         .json({ success: false, error: 'Withdrawal not found' });
     }
 
-    const withdrawal = result.rows[0];
+    const withdrawal = checkResult.rows[0];
 
-    // Send Email via Resend if marked as Paid
-    // Send Email via Resend if marked as Paid
+    // 2. Update the withdrawal status in the database
+    const updateResult = await pool.query(
+      'UPDATE withdrawals SET status = $1 WHERE id = $2 RETURNING *',
+      [status, id],
+    );
+
+    // 3. THE BUSINESS LOGIC: Deduct money ONLY if marked as 'Paid'
     if (status === 'Paid') {
-      const emailResult = await resend.emails.send({
-        from: 'Propadi <onboarding@resend.dev>',
-        to: 'propadi.admin@gmail.com',
-        subject: 'Propadi Withdrawal Successful',
-        html: `<h3>Great news!</h3><p>Your withdrawal of ₦${withdrawal.amount.toLocaleString()} has been processed and sent to your account.</p>`,
-      });
+      // Deduct the exact amount from the user's vault balance
+      // (Using user_id to find the correct user account)
+      await pool.query(
+        'UPDATE users SET balance = balance - $1 WHERE user_id = $2',
+        [withdrawal.amount, withdrawal.user_id],
+      );
 
-      // NEW: Force the server to print exactly what Resend says!
-      if (emailResult.error) {
-        console.error('RESEND BLOCKED THE EMAIL:', emailResult.error);
-      } else {
-        console.log('RESEND SUCCESS:', emailResult.data);
-      }
+      // Send the beautiful success email
+      await resend.emails.send({
+        from: 'Propadi <onboarding@resend.dev>',
+        to: withdrawal.email || 'test@example.com',
+        subject: 'Propadi Withdrawal Successful',
+        html: `<h3>Great news!</h3><p>Your withdrawal of ₦${Number(withdrawal.amount).toLocaleString('en-US')} has been processed and sent to your account.</p>`,
+      });
     }
 
     res.json({
       success: true,
-      message: 'Status updated and email sent!',
-      data: withdrawal,
+      message: 'Status updated, balance adjusted, and email sent!',
+      data: updateResult.rows[0],
     });
   } catch (err) {
     console.error('Update Status Error:', err);
