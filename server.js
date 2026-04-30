@@ -29,6 +29,70 @@ const pool = new Pool({
 });
 
 // ======== USER ROUTES ========
+// ==========================================
+// AUTHENTICATION ROUTES
+// ==========================================
+
+// 1. Sign Up a New User
+app.post('/api/auth/register', async (req, res) => {
+  const { email, password, name } = req.body;
+
+  try {
+    // Check if the email is already taken
+    const userCheck = await pool.query('SELECT * FROM users WHERE email = $1', [
+      email,
+    ]);
+    if (userCheck.rows.length > 0) {
+      return res
+        .status(400)
+        .json({ success: false, error: 'Email is already registered' });
+    }
+
+    // Create the new user with a starting balance of ₦0
+    const newUser = await pool.query(
+      'INSERT INTO users (email, password, name, balance) VALUES ($1, $2, $3, 0) RETURNING user_id, email, name, balance',
+      [email, password, name],
+    );
+
+    res.json({
+      success: true,
+      message: 'Welcome to Propadi!',
+      user: newUser.rows[0],
+    });
+  } catch (err) {
+    console.error('Sign Up Error:', err);
+    res.status(500).json({ success: false, error: 'Failed to create account' });
+  }
+});
+
+// 2. Log In an Existing User
+app.post('/api/auth/login', async (req, res) => {
+  const { email, password } = req.body;
+
+  try {
+    // Find the user with the matching email and password
+    const result = await pool.query(
+      'SELECT user_id, email, name, balance FROM users WHERE email = $1 AND password = $2',
+      [email, password],
+    );
+
+    if (result.rows.length === 0) {
+      return res
+        .status(401)
+        .json({ success: false, error: 'Invalid email or password' });
+    }
+
+    // Success! Send the user data back to the mobile app
+    res.json({
+      success: true,
+      message: 'Login successful',
+      user: result.rows[0],
+    });
+  } catch (err) {
+    console.error('Login Error:', err);
+    res.status(500).json({ success: false, error: 'Failed to log in' });
+  }
+});
 // Get user dashboard data
 app.get('/api/user/dashboard/:id', async (req, res) => {
   try {
