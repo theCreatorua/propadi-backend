@@ -128,6 +128,52 @@ app.post('/api/user/deposit', async (req, res) => {
       .json({ success: false, error: 'Failed to process deposit' });
   }
 });
+
+// 4. Request Withdrawal
+app.post('/api/user/withdraw', async (req, res) => {
+  const { userId, amount, email } = req.body; // We pass the email so the Admin knows who it is!
+
+  if (!amount || isNaN(amount) || amount <= 0) {
+    return res
+      .status(400)
+      .json({ success: false, error: 'Please enter a valid amount' });
+  }
+
+  try {
+    // 1. Check if the user has enough money in their vault
+    const userResult = await pool.query(
+      'SELECT balance FROM users WHERE user_id = $1',
+      [userId],
+    );
+    if (userResult.rows.length === 0) {
+      return res.status(404).json({ success: false, error: 'User not found' });
+    }
+
+    const currentBalance = parseFloat(userResult.rows[0].balance);
+    if (currentBalance < amount) {
+      return res
+        .status(400)
+        .json({ success: false, error: 'Insufficient funds in vault' });
+    }
+
+    // 2. Create the Pending Withdrawal for the Admin to see
+    const insertResult = await pool.query(
+      'INSERT INTO withdrawals (user_id, email, amount, status) VALUES ($1, $2, $3, $4) RETURNING *',
+      [userId, email, amount, 'Pending'],
+    );
+
+    res.json({
+      success: true,
+      message: 'Withdrawal requested successfully!',
+      withdrawal: insertResult.rows[0],
+    });
+  } catch (err) {
+    console.error('Withdraw Error:', err);
+    res
+      .status(500)
+      .json({ success: false, error: 'Failed to process withdrawal request' });
+  }
+});
 // Get user dashboard data
 app.get('/api/user/dashboard/:id', async (req, res) => {
   try {
