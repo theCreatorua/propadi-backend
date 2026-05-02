@@ -95,10 +95,10 @@ app.post('/api/auth/login', async (req, res) => {
 });
 
 // 3. Deposit / Fund Vault
+// 3. Deposit / Fund Vault
 app.post('/api/user/deposit', async (req, res) => {
   const { userId, amount } = req.body;
 
-  // Make sure the amount is a valid number greater than 0
   if (!amount || isNaN(amount) || amount <= 0) {
     return res
       .status(400)
@@ -106,7 +106,7 @@ app.post('/api/user/deposit', async (req, res) => {
   }
 
   try {
-    // Add the money directly to the user's current balance
+    // 1. Add money to the user's balance
     const updateResult = await pool.query(
       'UPDATE users SET balance = balance + $1 WHERE user_id = $2 RETURNING balance',
       [amount, userId],
@@ -116,10 +116,17 @@ app.post('/api/user/deposit', async (req, res) => {
       return res.status(404).json({ success: false, error: 'User not found' });
     }
 
+    // 2. NEW: Log this deposit in the master ledger!
+    const insertResult = await pool.query(
+      'INSERT INTO withdrawals (user_id, amount, status, type) VALUES ($1, $2, $3, $4) RETURNING *',
+      [userId, amount, 'Paid', 'Deposit'],
+    );
+
     res.json({
       success: true,
       message: 'Vault funded successfully!',
       newBalance: updateResult.rows[0].balance,
+      transaction: insertResult.rows[0], // Send the new receipt back to the app
     });
   } catch (err) {
     console.error('Deposit Error:', err);
