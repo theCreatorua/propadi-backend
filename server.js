@@ -93,6 +93,41 @@ app.post('/api/auth/login', async (req, res) => {
     res.status(500).json({ success: false, error: 'Failed to log in' });
   }
 });
+
+// 3. Deposit / Fund Vault
+app.post('/api/user/deposit', async (req, res) => {
+  const { userId, amount } = req.body;
+
+  // Make sure the amount is a valid number greater than 0
+  if (!amount || isNaN(amount) || amount <= 0) {
+    return res
+      .status(400)
+      .json({ success: false, error: 'Please enter a valid amount' });
+  }
+
+  try {
+    // Add the money directly to the user's current balance
+    const updateResult = await pool.query(
+      'UPDATE users SET balance = balance + $1 WHERE user_id = $2 RETURNING balance',
+      [amount, userId],
+    );
+
+    if (updateResult.rows.length === 0) {
+      return res.status(404).json({ success: false, error: 'User not found' });
+    }
+
+    res.json({
+      success: true,
+      message: 'Vault funded successfully!',
+      newBalance: updateResult.rows[0].balance,
+    });
+  } catch (err) {
+    console.error('Deposit Error:', err);
+    res
+      .status(500)
+      .json({ success: false, error: 'Failed to process deposit' });
+  }
+});
 // Get user dashboard data
 app.get('/api/user/dashboard/:id', async (req, res) => {
   try {
