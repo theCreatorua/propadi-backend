@@ -137,8 +137,10 @@ app.post('/api/user/deposit', async (req, res) => {
 });
 
 // 4. Request Withdrawal
+// 4. Request Withdrawal (UPGRADED WITH BANK DETAILS)
 app.post('/api/user/withdraw', async (req, res) => {
-  const { userId, amount, email } = req.body; // We pass the email so the Admin knows who it is!
+  // Catch the new bankName and accountNumber from the app
+  const { userId, amount, email, bankName, accountNumber } = req.body;
 
   if (!amount || isNaN(amount) || amount <= 0) {
     return res
@@ -146,8 +148,14 @@ app.post('/api/user/withdraw', async (req, res) => {
       .json({ success: false, error: 'Please enter a valid amount' });
   }
 
+  // Safety check: ensure bank details were actually sent
+  if (!bankName || !accountNumber) {
+    return res
+      .status(400)
+      .json({ success: false, error: 'Bank details are required' });
+  }
+
   try {
-    // 1. Check if the user has enough money in their vault
     const userResult = await pool.query(
       'SELECT balance FROM users WHERE user_id = $1',
       [userId],
@@ -163,10 +171,12 @@ app.post('/api/user/withdraw', async (req, res) => {
         .json({ success: false, error: 'Insufficient funds in vault' });
     }
 
-    // 2. Create the Pending Withdrawal for the Admin to see
+    // Insert the new bank details into the database!
     const insertResult = await pool.query(
-      'INSERT INTO withdrawals (user_id, email, amount, status) VALUES ($1, $2, $3, $4) RETURNING *',
-      [userId, email, amount, 'Pending'],
+      `INSERT INTO withdrawals 
+      (user_id, email, amount, bank_name, account_number, status, type) 
+      VALUES ($1, $2, $3, $4, $5, $6, $7) RETURNING *`,
+      [userId, email, amount, bankName, accountNumber, 'Pending', 'Withdrawal'],
     );
 
     res.json({
