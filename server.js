@@ -233,8 +233,10 @@ app.post('/api/user/withdrawals', async (req, res) => {
 // 1. Get all withdrawals (TYPO FIXED HERE: 'withdrawals')
 app.get('/api/admin/withdrawals', async (req, res) => {
   try {
+    // Find your Admin fetch route and update the pool.query to this:
+
     const result = await pool.query(
-      'SELECT * FROM withdrawals ORDER BY created_at DESC',
+      "SELECT * FROM withdrawals WHERE type = 'Withdrawal' ORDER BY created_at DESC",
     );
     res.json(result.rows);
   } catch (err) {
