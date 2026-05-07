@@ -215,6 +215,31 @@ app.get('/api/user/dashboard/:id', async (req, res) => {
   }
 });
 
+// Get User Profile Details
+app.get('/api/user/profile/:userId', async (req, res) => {
+  const { userId } = req.params;
+
+  try {
+    // We fetch the email and balance directly from the users table
+    const result = await pool.query(
+      'SELECT email, balance FROM users WHERE user_id = $1',
+      [userId],
+    );
+
+    if (result.rows.length === 0) {
+      return res.status(404).json({ success: false, error: 'User not found' });
+    }
+
+    res.json({
+      success: true,
+      user: result.rows[0],
+    });
+  } catch (err) {
+    console.error('Profile Fetch Error:', err);
+    res.status(500).json({ success: false, error: 'Failed to fetch profile' });
+  }
+});
+
 // Request a new withdrawal
 app.post('/api/user/withdrawals', async (req, res) => {
   const { user_id, amount, email } = req.body;
