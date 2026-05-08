@@ -264,6 +264,7 @@ app.post('/api/user/withdrawals', async (req, res) => {
   }
 });
 
+// ======== PROPERTIES ROUTES ========
 // Get all properties for a specific user (including their amenities)
 app.get('/api/properties/:userId', async (req, res) => {
   const { userId } = req.params;
@@ -290,6 +291,59 @@ app.get('/api/properties/:userId', async (req, res) => {
     res
       .status(500)
       .json({ success: false, error: 'Failed to fetch properties' });
+  }
+});
+
+// Add a new Property
+app.post('/api/properties', async (req, res) => {
+  const {
+    owner_id,
+    title,
+    description,
+    category,
+    furnishing_status,
+    rent_price,
+    rent_period,
+    total_beds,
+    total_baths,
+    address_street,
+    address_city,
+    address_lga,
+    address_state,
+    main_image_url,
+  } = req.body;
+
+  try {
+    const result = await pool.query(
+      `INSERT INTO properties (
+        owner_id, title, description, category, furnishing_status,
+        rent_price, rent_period, total_beds, total_baths,
+        address_street, address_city, address_lga, address_state, main_image_url
+      ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14) RETURNING *`,
+      [
+        owner_id || '00000000-0000-0000-0000-000000000000', // Fallback dummy ID for testing
+        title,
+        description,
+        category,
+        furnishing_status,
+        rent_price,
+        rent_period,
+        total_beds,
+        total_baths,
+        address_street,
+        address_city,
+        address_lga,
+        address_state,
+        // Provide a beautiful default house image if they leave the URL blank
+        main_image_url ||
+          'https://images.unsplash.com/photo-1560518883-ce09059eeffa?auto=format&fit=crop&w=800&q=80',
+      ],
+    );
+
+    res.json({ success: true, property: result.rows[0] });
+  } catch (err) {
+    console.error('Error adding property:', err);
+    res.status(500).json({ success: false, error: 'Failed to add property' });
   }
 });
 
