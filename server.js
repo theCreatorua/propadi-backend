@@ -294,7 +294,7 @@ app.get('/api/properties/:userId', async (req, res) => {
   }
 });
 
-// Add a new Property
+// Add a new Property WITH Amenities
 app.post('/api/properties', async (req, res) => {
   const {
     owner_id,
@@ -313,10 +313,12 @@ app.post('/api/properties', async (req, res) => {
     address_lga,
     address_state,
     main_image_url,
+    amenities, // NEW: Catch the array of amenities from the mobile app
   } = req.body;
 
   try {
-    const result = await pool.query(
+    // 1. Insert the main property
+    const propertyResult = await pool.query(
       `INSERT INTO properties (
         owner_id, title, description, category, furnishing_status,
         rent_price, rent_period, total_beds, total_baths, total_kitchens, total_stores,
@@ -343,7 +345,20 @@ app.post('/api/properties', async (req, res) => {
       ],
     );
 
-    res.json({ success: true, property: result.rows[0] });
+    const newProperty = propertyResult.rows[0];
+
+    // 2. Insert the amenities (if any were selected)
+    if (amenities && amenities.length > 0) {
+      const amenityQueries = amenities.map((amenity) => {
+        return pool.query(
+          `INSERT INTO properties_amenities (property_id, amenity_name) VALUES ($1, $2)`,
+          [newProperty.property_id, amenity],
+        );
+      });
+      await Promise.all(amenityQueries); // Wait for all amenities to save
+    }
+
+    res.json({ success: true, property: newProperty });
   } catch (err) {
     console.error('Error adding property:', err);
     res.status(500).json({ success: false, error: 'Failed to add property' });
