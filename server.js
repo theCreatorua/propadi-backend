@@ -311,6 +311,8 @@ app.post('/api/properties', async (req, res) => {
     address_lga,
     address_state,
     main_image_url,
+    total_kitchens,
+    total_stores,
   } = req.body;
 
   try {
@@ -330,6 +332,8 @@ app.post('/api/properties', async (req, res) => {
         rent_period,
         total_beds,
         total_baths,
+        total_kitchens,
+        total_stores,
         address_street,
         address_city,
         address_lga,
