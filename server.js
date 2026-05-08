@@ -264,6 +264,35 @@ app.post('/api/user/withdrawals', async (req, res) => {
   }
 });
 
+// Get all properties for a specific user (including their amenities)
+app.get('/api/properties/:userId', async (req, res) => {
+  const { userId } = req.params;
+
+  try {
+    const result = await pool.query(
+      `SELECT 
+        p.*, 
+        COALESCE(
+          json_agg(a.amenity_name) FILTER (WHERE a.amenity_name IS NOT NULL), 
+          '[]'
+        ) as amenities 
+       FROM properties p 
+       LEFT JOIN properties_amenities a ON p.property_id = a.property_id 
+       -- WHERE p.owner_id = $1 -- Uncomment this later to filter by actual owner!
+       GROUP BY p.property_id 
+       ORDER BY p.date_listed DESC`,
+      // [userId] -- Uncomment this when you start filtering by owner!
+    );
+
+    res.json({ success: true, properties: result.rows });
+  } catch (err) {
+    console.error('Error fetching properties:', err);
+    res
+      .status(500)
+      .json({ success: false, error: 'Failed to fetch properties' });
+  }
+});
+
 // ======== ADMIN ROUTES ========
 // 1. Get all withdrawals (TYPO FIXED HERE: 'withdrawals')
 app.get('/api/admin/withdrawals', async (req, res) => {
