@@ -273,6 +273,22 @@ app.post('/api/user/withdrawals', async (req, res) => {
 });
 
 // ======== PROPERTIES ROUTES ========
+// GET ALL PROPERTIES (For the Public Home Feed)
+app.get('/api/properties', async (req, res) => {
+  try {
+    // Fetches all properties, newest first. Limit to 50 to keep the app blazing fast.
+    const result = await pool.query(
+      `SELECT * FROM properties ORDER BY property_id DESC LIMIT 50`,
+    );
+
+    res.json({ success: true, properties: result.rows });
+  } catch (err) {
+    console.error('Error fetching all properties:', err);
+    res
+      .status(500)
+      .json({ success: false, error: 'Failed to fetch properties' });
+  }
+});
 // Get all properties for a specific user (including their amenities)
 app.get('/api/properties/:userId', async (req, res) => {
   const { userId } = req.params;
