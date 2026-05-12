@@ -4,7 +4,7 @@ const { createClient } = require('@supabase/supabase-js');
 // Initialize Supabase for Storage uploads
 const supabase = createClient(
   process.env.SUPABASE_URL,
-  process.env.SUPABASE_ANON_KEY,
+  process.env.SUPABASE_SERVICE_ROLE_KEY, // <-- The VIP Admin Key!
 );
 const express = require('express');
 const cors = require('cors');
