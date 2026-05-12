@@ -317,7 +317,27 @@ app.get('/api/properties/:userId', async (req, res) => {
       .json({ success: false, error: 'Failed to fetch properties' });
   }
 });
+// GET A SINGLE PROPERTY BY ID
+app.get('/api/properties/:id', async (req, res) => {
+  try {
+    const { id } = req.params;
+    const result = await pool.query(
+      'SELECT * FROM properties WHERE property_id = $1',
+      [id],
+    );
 
+    if (result.rows.length === 0) {
+      return res
+        .status(404)
+        .json({ success: false, error: 'Property not found' });
+    }
+
+    res.json({ success: true, property: result.rows[0] });
+  } catch (err) {
+    console.error('Error fetching single property:', err);
+    res.status(500).json({ success: false, error: 'Failed to fetch property' });
+  }
+});
 // Add a new Property WITH Image Upload & Amenities
 app.post('/api/properties', async (req, res) => {
   const {
