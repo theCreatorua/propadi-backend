@@ -1,4 +1,11 @@
 require('dotenv').config();
+const { createClient } = require('@supabase/supabase-js');
+
+// Initialize Supabase for Storage uploads
+const supabase = createClient(
+  process.env.SUPABASE_URL,
+  process.env.SUPABASE_ANON_KEY,
+);
 const express = require('express');
 const cors = require('cors');
 const { Pool } = require('pg');
@@ -294,7 +301,7 @@ app.get('/api/properties/:userId', async (req, res) => {
   }
 });
 
-// Add a new Property WITH Amenities
+// Add a new Property WITH Image Upload & Amenities
 app.post('/api/properties', async (req, res) => {
   const {
     owner_id,
@@ -312,12 +319,36 @@ app.post('/api/properties', async (req, res) => {
     address_city,
     address_lga,
     address_state,
-    main_image_url,
-    amenities, // NEW: Catch the array of amenities from the mobile app
+    amenities,
+    image_base64, // <-- NEW: Catching the image data
   } = req.body;
 
   try {
-    // 1. Insert the main property
+    let finalImageUrl =
+      'https://images.unsplash.com/photo-1560518883-ce09059eeffa?auto=format&fit=crop&w=800&q=80'; // Fallback
+
+    // 1. IF AN IMAGE WAS UPLOADED, SAVE IT TO SUPABASE STORAGE FIRST
+    if (image_base64) {
+      // Convert the base64 string back into a real file buffer
+      const buffer = Buffer.from(image_base64, 'base64');
+      const fileName = `prop_${Date.now()}.jpg`; // Creates a unique name
+
+      // Upload to the bucket we just created
+      const { data: uploadData, error: uploadError } = await supabase.storage
+        .from('property-images')
+        .upload(fileName, buffer, { contentType: 'image/jpeg' });
+
+      if (uploadError) throw uploadError;
+
+      // Get the public URL of the uploaded image
+      const { data: publicUrlData } = supabase.storage
+        .from('property-images')
+        .getPublicUrl(fileName);
+
+      finalImageUrl = publicUrlData.publicUrl;
+    }
+
+    // 2. INSERT THE PROPERTY INTO THE DATABASE (Now using finalImageUrl)
     const propertyResult = await pool.query(
       `INSERT INTO properties (
         owner_id, title, description, category, furnishing_status,
@@ -340,14 +371,13 @@ app.post('/api/properties', async (req, res) => {
         address_city,
         address_lga,
         address_state,
-        main_image_url ||
-          'https://images.unsplash.com/photo-1560518883-ce09059eeffa?auto=format&fit=crop&w=800&q=80',
+        finalImageUrl,
       ],
     );
 
     const newProperty = propertyResult.rows[0];
 
-    // 2. Insert the amenities (if any were selected)
+    // 3. INSERT AMENITIES
     if (amenities && amenities.length > 0) {
       const amenityQueries = amenities.map((amenity) => {
         return pool.query(
@@ -355,7 +385,7 @@ app.post('/api/properties', async (req, res) => {
           [newProperty.property_id, amenity],
         );
       });
-      await Promise.all(amenityQueries); // Wait for all amenities to save
+      await Promise.all(amenityQueries);
     }
 
     res.json({ success: true, property: newProperty });
