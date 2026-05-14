@@ -318,7 +318,7 @@ app.get('/api/properties/:userId', async (req, res) => {
   }
 });
 // GET A SINGLE PROPERTY BY ID
-app.get('/api/properties/:id', async (req, res) => {
+app.get('/api/properties/detail/:id', async (req, res) => {
   try {
     const { id } = req.params;
     const result = await pool.query(
