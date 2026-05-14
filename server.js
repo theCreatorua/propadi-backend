@@ -504,6 +504,48 @@ app.put('/api/admin/withdrawals/:id', async (req, res) => {
   }
 });
 
+// --- MESSAGING ROUTES ---
+
+// 1. Send a new message
+app.post('/api/messages', async (req, res) => {
+  try {
+    const { property_id, sender_id, receiver_id, content } = req.body;
+
+    const result = await pool.query(
+      `INSERT INTO messages (property_id, sender_id, receiver_id, content) 
+       VALUES ($1, $2, $3, $4) RETURNING *`,
+      [property_id, sender_id, receiver_id, content],
+    );
+
+    res.json({ success: true, message: result.rows[0] });
+  } catch (err) {
+    console.error('Error sending message:', err);
+    res.status(500).json({ success: false, error: 'Failed to send message' });
+  }
+});
+
+// 2. Get chat history between two users for a specific property
+app.get('/api/messages/:property_id/:user1_id/:user2_id', async (req, res) => {
+  try {
+    const { property_id, user1_id, user2_id } = req.params;
+
+    const result = await pool.query(
+      `SELECT * FROM messages 
+       WHERE property_id = $1 
+       AND ((sender_id = $2 AND receiver_id = $3) OR (sender_id = $3 AND receiver_id = $2))
+       ORDER BY created_at ASC`,
+      [property_id, user1_id, user2_id, user1_id, user2_id],
+    );
+
+    res.json({ success: true, messages: result.rows });
+  } catch (err) {
+    console.error('Error fetching messages:', err);
+    res
+      .status(500)
+      .json({ success: false, error: 'Failed to fetch chat history' });
+  }
+});
+
 // ======== SERVER SETUP ========
 const PORT = process.env.PORT || 5000;
 app.listen(PORT, () => {
