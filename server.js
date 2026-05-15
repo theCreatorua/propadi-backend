@@ -587,6 +587,34 @@ app.get('/api/inbox/:userId', async (req, res) => {
   }
 });
 
+// POST: Create a new property listing
+app.post('/api/properties', async (req, res) => {
+  try {
+    const { owner_id, title, price, location, main_image_url } = req.body;
+
+    const query = `
+      INSERT INTO properties (owner_id, title, price, location, main_image_url)
+      VALUES ($1, $2, $3, $4, $5)
+      RETURNING *;
+    `;
+
+    const result = await pool.query(query, [
+      owner_id,
+      title,
+      price,
+      location,
+      main_image_url,
+    ]);
+
+    res.json({ success: true, property: result.rows[0] });
+  } catch (err) {
+    console.error('Error creating property:', err);
+    res
+      .status(500)
+      .json({ success: false, error: 'Failed to publish property listing' });
+  }
+});
+
 // ======== SERVER SETUP ========
 const PORT = process.env.PORT || 5000;
 app.listen(PORT, () => {
