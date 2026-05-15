@@ -534,7 +534,7 @@ app.get('/api/messages/:property_id/:user1_id/:user2_id', async (req, res) => {
        WHERE property_id = $1 
        AND ((sender_id = $2 AND receiver_id = $3) OR (sender_id = $3 AND receiver_id = $2))
        ORDER BY created_at ASC`,
-      [property_id, user1_id, user2_id, user1_id, user2_id],
+      [property_id, user1_id, user2_id], // EXACTLY 3 VARIABLES TO MATCH $1, $2, $3
     );
 
     res.json({ success: true, messages: result.rows });
