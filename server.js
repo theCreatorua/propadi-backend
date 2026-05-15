@@ -545,6 +545,47 @@ app.get('/api/messages/:property_id/:user1_id/:user2_id', async (req, res) => {
       .json({ success: false, error: 'Failed to fetch chat history' });
   }
 });
+// 3. GET INBOX (Latest message per conversation for a specific user)
+app.get('/api/inbox/:userId', async (req, res) => {
+  try {
+    const { userId } = req.params;
+
+    // This query grabs the single latest message for every unique property + tenant combo
+    const query = `
+      SELECT DISTINCT ON (
+        m.property_id, 
+        CASE WHEN m.sender_id = $1 THEN m.receiver_id ELSE m.sender_id END
+      )
+        m.id,
+        m.property_id,
+        m.content as last_message,
+        m.created_at,
+        m.sender_id,
+        m.receiver_id,
+        p.title as property_title,
+        p.main_image_url
+      FROM messages m
+      JOIN properties p ON m.property_id = p.property_id
+      WHERE m.sender_id = $1 OR m.receiver_id = $1
+      ORDER BY 
+        m.property_id, 
+        CASE WHEN m.sender_id = $1 THEN m.receiver_id ELSE m.sender_id END,
+        m.created_at DESC;
+    `;
+
+    const result = await pool.query(query, [userId]);
+
+    // Sort the final inbox by newest message overall
+    const sortedConversations = result.rows.sort(
+      (a, b) => new Date(b.created_at) - new Date(a.created_at),
+    );
+
+    res.json({ success: true, conversations: sortedConversations });
+  } catch (err) {
+    console.error('Error fetching inbox:', err);
+    res.status(500).json({ success: false, error: 'Failed to fetch inbox' });
+  }
+});
 
 // ======== SERVER SETUP ========
 const PORT = process.env.PORT || 5000;
