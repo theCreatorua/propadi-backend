@@ -592,8 +592,9 @@ app.post('/api/properties', async (req, res) => {
   try {
     const { owner_id, title, price, location, main_image_url } = req.body;
 
+    // Notice we are now specifically targeting "rent_price" in the database
     const query = `
-      INSERT INTO properties (owner_id, title, price, location, main_image_url)
+      INSERT INTO properties (owner_id, title, rent_price, location, main_image_url)
       VALUES ($1, $2, $3, $4, $5)
       RETURNING *;
     `;
@@ -602,7 +603,7 @@ app.post('/api/properties', async (req, res) => {
       owner_id,
       title,
       price,
-      location,
+      address,
       main_image_url,
     ]);
 
