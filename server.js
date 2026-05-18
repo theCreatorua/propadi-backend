@@ -587,6 +587,24 @@ app.get('/api/inbox/:userId', async (req, res) => {
   }
 });
 
+// GET: Fetch all available properties for the Renter's Feed
+app.get('/api/properties', async (req, res) => {
+  try {
+    // We only want available properties, and we want the newest ones at the top!
+    const query = `
+      SELECT * FROM properties 
+      WHERE status = 'Available' 
+      ORDER BY date_listed DESC;
+    `;
+
+    const result = await pool.query(query);
+    res.json({ success: true, properties: result.rows });
+  } catch (err) {
+    console.error('Error fetching properties:', err);
+    res.status(500).json({ success: false, error: 'Failed to load the feed' });
+  }
+});
+
 // POST: Create a new property listing AND its visually verified amenities
 app.post('/api/properties', async (req, res) => {
   const client = await pool.connect(); // We open a dedicated connection for the transaction
