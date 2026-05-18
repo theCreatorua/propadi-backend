@@ -587,9 +587,13 @@ app.get('/api/inbox/:userId', async (req, res) => {
   }
 });
 
-// POST: Create a new property listing (Strict Property Model)
+// POST: Create a new property listing AND its visually verified amenities
 app.post('/api/properties', async (req, res) => {
+  const client = await pool.connect(); // We open a dedicated connection for the transaction
+
   try {
+    await client.query('BEGIN'); // START TRANSACTION
+
     const {
       owner_id,
       status,
@@ -608,9 +612,11 @@ app.post('/api/properties', async (req, res) => {
       main_image_url,
       total_kitchens,
       total_stores,
+      visually_verified_amenities, // NEW: The array of amenity objects!
     } = req.body;
 
-    const query = `
+    // 1. Save the core property to the 'properties' table
+    const propQuery = `
       INSERT INTO properties (
         owner_id, status, category, furnishing_status, title, description,
         rent_price, rent_period, total_beds, total_baths, address_street,
@@ -624,7 +630,7 @@ app.post('/api/properties', async (req, res) => {
       RETURNING *;
     `;
 
-    const values = [
+    const propValues = [
       owner_id,
       status || 'Available',
       category,
@@ -644,13 +650,35 @@ app.post('/api/properties', async (req, res) => {
       total_stores || 0,
     ];
 
-    const result = await pool.query(query, values);
-    res.json({ success: true, property: result.rows[0] });
+    const propResult = await client.query(propQuery, propValues);
+    const savedProperty = propResult.rows[0];
+
+    // 2. Loop through the amenities array and save them to 'properties_amenities'
+    if (visually_verified_amenities && visually_verified_amenities.length > 0) {
+      for (const amenity of visually_verified_amenities) {
+        await client.query(
+          `INSERT INTO properties_amenities (property_id, amenity_name, verification_url, media_type)
+           VALUES ($1, $2, $3, $4)`,
+          [
+            savedProperty.property_id,
+            amenity.amenity_name,
+            amenity.verification_url,
+            amenity.media_type,
+          ],
+        );
+      }
+    }
+
+    await client.query('COMMIT'); // SUCCESS! Lock it all into the database.
+    res.json({ success: true, property: savedProperty });
   } catch (err) {
-    console.error('Error creating property:', err);
+    await client.query('ROLLBACK'); // CRASH! Delete the partial save and abort.
+    console.error('Transaction Error:', err);
     res
       .status(500)
-      .json({ success: false, error: 'Failed to publish property listing' });
+      .json({ success: false, error: 'Failed to publish verified listing' });
+  } finally {
+    client.release();
   }
 });
 
