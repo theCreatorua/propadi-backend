@@ -587,48 +587,47 @@ app.get('/api/inbox/:userId', async (req, res) => {
   }
 });
 
-// GET: Fetch all available properties for the Renter's Feed
+// =======================================================================
+// 1. GET ALL ROUTE (For the Renter's Home Feed)
+// =======================================================================
 app.get('/api/properties', async (req, res) => {
   try {
-    // We only want available properties, and we want the newest ones at the top!
-    const query = `
-      SELECT * FROM properties 
-      WHERE status = 'Available' 
-      ORDER BY date_listed DESC;
-    `;
-
+    const query = `SELECT * FROM properties WHERE status = 'Available' ORDER BY date_listed DESC;`;
     const result = await pool.query(query);
+    // Notice this returns "properties" (plural)
     res.json({ success: true, properties: result.rows });
   } catch (err) {
-    console.error('Error fetching properties:', err);
+    console.error('Error fetching feed:', err);
     res.status(500).json({ success: false, error: 'Failed to load the feed' });
   }
 });
 
-// GET: Fetch a single property by ID (Including Verified Amenities)
+// =======================================================================
+// 2. GET SINGLE ROUTE (For the Property Details & Visual Verification)
+// =======================================================================
 app.get('/api/properties/:id', async (req, res) => {
   try {
     const { id } = req.params;
 
-    // 1. Get the core property
+    // Step A: Get the core property
     const propQuery = `SELECT * FROM properties WHERE property_id = $1;`;
     const propResult = await pool.query(propQuery, [id]);
 
     if (propResult.rows.length === 0) {
       return res
         .status(404)
-        .json({ success: false, error: 'Property not found' });
+        .json({ success: false, error: 'Property not found in database' });
     }
 
     const property = propResult.rows[0];
 
-    // 2. Get the visually verified amenities linked to this property
+    // Step B: Get the visually verified amenities
     const amenitiesQuery = `SELECT * FROM properties_amenities WHERE property_id = $1;`;
     const amenitiesResult = await pool.query(amenitiesQuery, [id]);
 
-    // Attach the amenities to the property object
     property.visually_verified_amenities = amenitiesResult.rows;
 
+    // Notice this returns "property" (singular)
     res.json({ success: true, property });
   } catch (err) {
     console.error('Error fetching single property:', err);
