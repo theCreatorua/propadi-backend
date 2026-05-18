@@ -605,6 +605,39 @@ app.get('/api/properties', async (req, res) => {
   }
 });
 
+// GET: Fetch a single property by ID (Including Verified Amenities)
+app.get('/api/properties/:id', async (req, res) => {
+  try {
+    const { id } = req.params;
+
+    // 1. Get the core property
+    const propQuery = `SELECT * FROM properties WHERE property_id = $1;`;
+    const propResult = await pool.query(propQuery, [id]);
+
+    if (propResult.rows.length === 0) {
+      return res
+        .status(404)
+        .json({ success: false, error: 'Property not found' });
+    }
+
+    const property = propResult.rows[0];
+
+    // 2. Get the visually verified amenities linked to this property
+    const amenitiesQuery = `SELECT * FROM properties_amenities WHERE property_id = $1;`;
+    const amenitiesResult = await pool.query(amenitiesQuery, [id]);
+
+    // Attach the amenities to the property object
+    property.visually_verified_amenities = amenitiesResult.rows;
+
+    res.json({ success: true, property });
+  } catch (err) {
+    console.error('Error fetching single property:', err);
+    res
+      .status(500)
+      .json({ success: false, error: 'Failed to load property details' });
+  }
+});
+
 // POST: Create a new property listing AND its visually verified amenities
 app.post('/api/properties', async (req, res) => {
   const client = await pool.connect(); // We open a dedicated connection for the transaction
