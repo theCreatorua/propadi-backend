@@ -587,26 +587,64 @@ app.get('/api/inbox/:userId', async (req, res) => {
   }
 });
 
-// POST: Create a new property listing
+// POST: Create a new property listing (Strict Property Model)
 app.post('/api/properties', async (req, res) => {
   try {
-    const { owner_id, title, price, location, main_image_url } = req.body;
+    const {
+      owner_id,
+      status,
+      category,
+      furnishing_status,
+      title,
+      description,
+      rent_price,
+      rent_period,
+      total_beds,
+      total_baths,
+      address_street,
+      address_city,
+      address_lga,
+      address_state,
+      main_image_url,
+      total_kitchens,
+      total_stores,
+    } = req.body;
 
-    // Notice we are now specifically targeting "rent_price" in the database
     const query = `
-      INSERT INTO properties (owner_id, title, rent_price, location, main_image_url)
-      VALUES ($1, $2, $3, $4, $5)
+      INSERT INTO properties (
+        owner_id, status, category, furnishing_status, title, description,
+        rent_price, rent_period, total_beds, total_baths, address_street,
+        address_city, address_lga, address_state, map_coordinates, main_image_url,
+        gallery_urls, total_kitchens, total_stores
+      )
+      VALUES (
+        $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, 
+        NULL, $15, ARRAY[]::text[], $16, $17
+      )
       RETURNING *;
     `;
 
-    const result = await pool.query(query, [
+    const values = [
       owner_id,
+      status || 'Available',
+      category,
+      furnishing_status,
       title,
-      price,
-      address,
+      description,
+      rent_price,
+      rent_period || 'Yearly',
+      total_beds || 0,
+      total_baths || 0,
+      address_street,
+      address_city,
+      address_lga,
+      address_state,
       main_image_url,
-    ]);
+      total_kitchens || 0,
+      total_stores || 0,
+    ];
 
+    const result = await pool.query(query, values);
     res.json({ success: true, property: result.rows[0] });
   } catch (err) {
     console.error('Error creating property:', err);
