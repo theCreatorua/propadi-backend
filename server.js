@@ -649,23 +649,41 @@ app.get('/api/applications/owner/:owner_id', async (req, res) => {
   }
 });
 
-// 2. Accept or Decline an Application
+// 2. Accept or Decline an Application (WITH SMART CONTRACT AUTO-GENERATION)
 app.put('/api/applications/:id', async (req, res) => {
   try {
     const { id } = req.params;
     const { status } = req.body; // 'Approved' or 'Rejected'
 
-    const result = await pool.query(
+    // Step 1: Update the application status
+    const appResult = await pool.query(
       `UPDATE applications SET status = $1, date_status_updated = CURRENT_TIMESTAMP WHERE application_id = $2 RETURNING *`,
       [status, id],
     );
 
-    res.json({ success: true, application: result.rows[0] });
+    const application = appResult.rows[0];
+
+    // Step 2: The Magic - If Approved, automatically draft the Tenancy Agreement!
+    if (status === 'Approved' && application) {
+      await pool.query(
+        `INSERT INTO tenancies (application_id, property_id, renter_id, owner_id, rent_amount, status) 
+         VALUES ($1, $2, $3, $4, $5, 'Draft')`,
+        [
+          application.application_id,
+          application.property_id,
+          application.renter_id,
+          application.owner_id,
+          application.proposed_rent,
+        ],
+      );
+    }
+
+    res.json({ success: true, application });
   } catch (err) {
     console.error('Error updating application:', err);
     res
       .status(500)
-      .json({ success: false, error: 'Failed to update application' });
+      .json({ success: false, error: 'Failed to process application' });
   }
 });
 
