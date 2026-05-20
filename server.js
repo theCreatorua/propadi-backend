@@ -687,6 +687,63 @@ app.put('/api/applications/:id', async (req, res) => {
   }
 });
 
+// ==========================================
+// SMART CONTRACT & TENANCY ROUTES
+// ==========================================
+
+// 1. Fetch a specific Tenancy Agreement with all details
+app.get('/api/tenancies/:id', async (req, res) => {
+  try {
+    const { id } = req.params;
+    const result = await pool.query(
+      `SELECT 
+         t.*, 
+         p.title as property_title, p.address_street, p.address_city, p.address_state,
+         o.name as owner_name, o.email as owner_email,
+         r.name as renter_name, r.email as renter_email, r.occupation, r.nok_full_name
+       FROM tenancies t
+       JOIN properties p ON t.property_id = p.property_id
+       JOIN users o ON t.owner_id = o.user_id
+       JOIN users r ON t.renter_id = r.user_id
+       WHERE t.tenancy_id = $1`,
+      [id],
+    );
+
+    if (result.rows.length === 0) {
+      return res
+        .status(404)
+        .json({ success: false, error: 'Agreement not found' });
+    }
+
+    res.json({ success: true, tenancy: result.rows[0] });
+  } catch (err) {
+    console.error('Error fetching tenancy:', err);
+    res
+      .status(500)
+      .json({ success: false, error: 'Failed to fetch agreement' });
+  }
+});
+
+// 2. Electronically Sign the Agreement
+app.put('/api/tenancies/:id/sign', async (req, res) => {
+  try {
+    const { id } = req.params;
+
+    // We stamp the exact server time as the legal signature
+    const result = await pool.query(
+      `UPDATE tenancies 
+       SET renter_signature_date = CURRENT_TIMESTAMP, status = 'Signed' 
+       WHERE tenancy_id = $1 RETURNING *`,
+      [id],
+    );
+
+    res.json({ success: true, tenancy: result.rows[0] });
+  } catch (err) {
+    console.error('Error signing tenancy:', err);
+    res.status(500).json({ success: false, error: 'Failed to sign agreement' });
+  }
+});
+
 // ======== SERVER SETUP ========
 const PORT = process.env.PORT || 5000;
 app.listen(PORT, () => {
