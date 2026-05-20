@@ -631,7 +631,7 @@ app.get('/api/applications/owner/:owner_id', async (req, res) => {
     const result = await pool.query(
       `SELECT 
          a.application_id, a.property_id, a.proposed_rent, a.cover_letter, a.status, a.date_applied,
-         u.user_id as renter_id, u.role, u.renter_score, u.kyc_status, u.occupation, u.email,
+         u.user_id as renter_id, u.name, u.profile_picture_url, u.role, u.renter_score, u.kyc_status, u.occupation, u.email,
          p.title as property_title
        FROM applications a
        JOIN users u ON a.renter_id = u.user_id
