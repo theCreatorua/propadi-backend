@@ -527,16 +527,14 @@ app.get('/api/inbox/:userId', async (req, res) => {
 // ==========================================
 
 // 1. Request a New Viewing
+// 1. Request a New Viewing (WITH HIDDEN ID FOR BUTTONS)
 app.post('/api/viewings', async (req, res) => {
   try {
-    // We catch the data coming from the app
     const { property_id, renter_id, landlord_id, viewing_date } = req.body;
 
-    // The database requires a start and end time. We default the viewing to 1 hour.
     const startTime = new Date(viewing_date);
     const endTime = new Date(startTime.getTime() + 60 * 60 * 1000);
 
-    // THE FIX: We map to 'owner_id', 'scheduled_start_time', and 'scheduled_end_time' to match your schema perfectly.
     const result = await pool.query(
       `INSERT INTO viewings (property_id, renter_id, owner_id, scheduled_start_time, scheduled_end_time, status) 
        VALUES ($1, $2, $3, $4, $5, 'Pending') RETURNING *`,
@@ -549,7 +547,7 @@ app.post('/api/viewings', async (req, res) => {
       ],
     );
 
-    // Insert the "Smart Message" into the chat so both users see the request
+    // THE FIX: We secretly attach the viewing_id to the end of the text using "||"
     await pool.query(
       `INSERT INTO messages (property_id, sender_id, receiver_id, content) 
        VALUES ($1, $2, $3, $4)`,
@@ -557,7 +555,7 @@ app.post('/api/viewings', async (req, res) => {
         property_id,
         renter_id,
         landlord_id,
-        `🗓️ I have requested a viewing for ${startTime.toLocaleString()}. Please accept or decline.`,
+        `🗓️ I have requested a viewing for ${startTime.toLocaleString()}. Please accept or decline.||${result.rows[0].viewing_id}`,
       ],
     );
 
@@ -569,7 +567,6 @@ app.post('/api/viewings', async (req, res) => {
       .json({ success: false, error: 'Failed to request viewing' });
   }
 });
-
 // 2. Update Viewing Status (Accept/Decline)
 app.put('/api/viewings/:id', async (req, res) => {
   try {
