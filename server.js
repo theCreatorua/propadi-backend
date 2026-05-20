@@ -744,6 +744,31 @@ app.put('/api/tenancies/:id/sign', async (req, res) => {
   }
 });
 
+// 3. Fetch all applications for a specific RENTER (Includes the Draft Tenancy ID!)
+app.get('/api/applications/renter/:renter_id', async (req, res) => {
+  try {
+    const { renter_id } = req.params;
+    const result = await pool.query(
+      `SELECT 
+         a.application_id, a.property_id, a.proposed_rent, a.status, a.date_applied,
+         p.title as property_title, p.address_street, p.address_city,
+         t.tenancy_id
+       FROM applications a
+       JOIN properties p ON a.property_id = p.property_id
+       LEFT JOIN tenancies t ON a.application_id = t.application_id
+       WHERE a.renter_id = $1
+       ORDER BY a.date_applied DESC`,
+      [renter_id],
+    );
+    res.json({ success: true, applications: result.rows });
+  } catch (err) {
+    console.error('Error fetching renter applications:', err);
+    res
+      .status(500)
+      .json({ success: false, error: 'Failed to load your applications' });
+  }
+});
+
 // ======== SERVER SETUP ========
 const PORT = process.env.PORT || 5000;
 app.listen(PORT, () => {
