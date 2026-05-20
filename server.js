@@ -522,6 +522,62 @@ app.get('/api/inbox/:userId', async (req, res) => {
   }
 });
 
+// ==========================================
+// VIEWING TRACKER ROUTES
+// ==========================================
+
+// 1. Request a New Viewing
+app.post('/api/viewings', async (req, res) => {
+  try {
+    const { property_id, renter_id, landlord_id, viewing_date } = req.body;
+
+    const result = await pool.query(
+      `INSERT INTO viewings (property_id, renter_id, landlord_id, viewing_date, status) 
+       VALUES ($1, $2, $3, $4, 'Pending') RETURNING *`,
+      [property_id, renter_id, landlord_id, viewing_date],
+    );
+
+    // Bonus: We automatically insert a "Smart Message" into the chat so both users see the request!
+    await pool.query(
+      `INSERT INTO messages (property_id, sender_id, receiver_id, content) 
+       VALUES ($1, $2, $3, $4)`,
+      [
+        property_id,
+        renter_id,
+        landlord_id,
+        `🗓️ I have requested a viewing for ${new Date(viewing_date).toLocaleString()}. Please accept or decline.`,
+      ],
+    );
+
+    res.json({ success: true, viewing: result.rows[0] });
+  } catch (err) {
+    console.error('Error creating viewing:', err);
+    res
+      .status(500)
+      .json({ success: false, error: 'Failed to request viewing' });
+  }
+});
+
+// 2. Update Viewing Status (Accept/Decline)
+app.put('/api/viewings/:id', async (req, res) => {
+  try {
+    const { id } = req.params;
+    const { status } = req.body; // 'Accepted' or 'Declined'
+
+    const result = await pool.query(
+      `UPDATE viewings SET status = $1 WHERE id = $2 RETURNING *`,
+      [status, id],
+    );
+
+    res.json({ success: true, viewing: result.rows[0] });
+  } catch (err) {
+    console.error('Error updating viewing:', err);
+    res
+      .status(500)
+      .json({ success: false, error: 'Failed to update viewing status' });
+  }
+});
+
 // ======== SERVER SETUP ========
 const PORT = process.env.PORT || 5000;
 app.listen(PORT, () => {
