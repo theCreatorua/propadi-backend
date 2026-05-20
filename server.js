@@ -587,6 +587,43 @@ app.put('/api/viewings/:id', async (req, res) => {
   }
 });
 
+// ==========================================
+// FORMAL APPLICATION ROUTES
+// ==========================================
+
+app.post('/api/applications', async (req, res) => {
+  try {
+    const { property_id, renter_id, owner_id, proposed_rent, cover_letter } =
+      req.body;
+
+    // 1. Save the formal application
+    const result = await pool.query(
+      `INSERT INTO applications (property_id, renter_id, owner_id, proposed_rent, cover_letter, status) 
+       VALUES ($1, $2, $3, $4, $5, 'Pending') RETURNING *`,
+      [property_id, renter_id, owner_id, proposed_rent, cover_letter],
+    );
+
+    // 2. Fire an automated "Smart Message" into the chat so the owner is instantly notified!
+    await pool.query(
+      `INSERT INTO messages (property_id, sender_id, receiver_id, content) 
+       VALUES ($1, $2, $3, $4)`,
+      [
+        property_id,
+        renter_id,
+        owner_id,
+        `📄 I have submitted a formal application! Proposed Rent: ₦${proposed_rent}. Please check your dashboard to review it.`,
+      ],
+    );
+
+    res.json({ success: true, application: result.rows[0] });
+  } catch (err) {
+    console.error('Error submitting application:', err);
+    res
+      .status(500)
+      .json({ success: false, error: 'Failed to submit application' });
+  }
+});
+
 // ======== SERVER SETUP ========
 const PORT = process.env.PORT || 5000;
 app.listen(PORT, () => {
