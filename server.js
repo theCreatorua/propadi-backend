@@ -529,15 +529,27 @@ app.get('/api/inbox/:userId', async (req, res) => {
 // 1. Request a New Viewing
 app.post('/api/viewings', async (req, res) => {
   try {
+    // We catch the data coming from the app
     const { property_id, renter_id, landlord_id, viewing_date } = req.body;
 
+    // The database requires a start and end time. We default the viewing to 1 hour.
+    const startTime = new Date(viewing_date);
+    const endTime = new Date(startTime.getTime() + 60 * 60 * 1000);
+
+    // THE FIX: We map to 'owner_id', 'scheduled_start_time', and 'scheduled_end_time' to match your schema perfectly.
     const result = await pool.query(
-      `INSERT INTO viewings (property_id, renter_id, landlord_id, viewing_date, status) 
-       VALUES ($1, $2, $3, $4, 'Pending') RETURNING *`,
-      [property_id, renter_id, landlord_id, viewing_date],
+      `INSERT INTO viewings (property_id, renter_id, owner_id, scheduled_start_time, scheduled_end_time, status) 
+       VALUES ($1, $2, $3, $4, $5, 'Pending') RETURNING *`,
+      [
+        property_id,
+        renter_id,
+        landlord_id,
+        startTime.toISOString(),
+        endTime.toISOString(),
+      ],
     );
 
-    // Bonus: We automatically insert a "Smart Message" into the chat so both users see the request!
+    // Insert the "Smart Message" into the chat so both users see the request
     await pool.query(
       `INSERT INTO messages (property_id, sender_id, receiver_id, content) 
        VALUES ($1, $2, $3, $4)`,
@@ -545,7 +557,7 @@ app.post('/api/viewings', async (req, res) => {
         property_id,
         renter_id,
         landlord_id,
-        `🗓️ I have requested a viewing for ${new Date(viewing_date).toLocaleString()}. Please accept or decline.`,
+        `🗓️ I have requested a viewing for ${startTime.toLocaleString()}. Please accept or decline.`,
       ],
     );
 
@@ -565,7 +577,7 @@ app.put('/api/viewings/:id', async (req, res) => {
     const { status } = req.body; // 'Accepted' or 'Declined'
 
     const result = await pool.query(
-      `UPDATE viewings SET status = $1 WHERE id = $2 RETURNING *`,
+      `UPDATE viewings SET status = $1 WHERE viewing_id = $2 RETURNING *`, // THE FIX: using viewing_id to match schema
       [status, id],
     );
 
