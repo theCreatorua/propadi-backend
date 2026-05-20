@@ -624,6 +624,51 @@ app.post('/api/applications', async (req, res) => {
   }
 });
 
+// 1. Fetch all applications for a specific landlord (WITH TRUST METRICS)
+app.get('/api/applications/owner/:owner_id', async (req, res) => {
+  try {
+    const { owner_id } = req.params;
+    const result = await pool.query(
+      `SELECT 
+         a.application_id, a.property_id, a.proposed_rent, a.cover_letter, a.status, a.date_applied,
+         u.user_id as renter_id, u.role, u.renter_score, u.kyc_status, u.occupation, u.email,
+         p.title as property_title
+       FROM applications a
+       JOIN users u ON a.renter_id = u.user_id
+       JOIN properties p ON a.property_id = p.property_id
+       WHERE a.owner_id = $1
+       ORDER BY a.date_applied DESC`,
+      [owner_id],
+    );
+    res.json({ success: true, applications: result.rows });
+  } catch (err) {
+    console.error('Error fetching applications:', err);
+    res
+      .status(500)
+      .json({ success: false, error: 'Failed to load applications' });
+  }
+});
+
+// 2. Accept or Decline an Application
+app.put('/api/applications/:id', async (req, res) => {
+  try {
+    const { id } = req.params;
+    const { status } = req.body; // 'Approved' or 'Rejected'
+
+    const result = await pool.query(
+      `UPDATE applications SET status = $1, date_status_updated = CURRENT_TIMESTAMP WHERE application_id = $2 RETURNING *`,
+      [status, id],
+    );
+
+    res.json({ success: true, application: result.rows[0] });
+  } catch (err) {
+    console.error('Error updating application:', err);
+    res
+      .status(500)
+      .json({ success: false, error: 'Failed to update application' });
+  }
+});
+
 // ======== SERVER SETUP ========
 const PORT = process.env.PORT || 5000;
 app.listen(PORT, () => {
