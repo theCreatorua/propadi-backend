@@ -591,27 +591,28 @@ app.put('/api/viewings/:id', async (req, res) => {
 // FORMAL APPLICATION ROUTES
 // ==========================================
 
+// Submit a new application
 app.post('/api/applications', async (req, res) => {
   try {
-    const { property_id, renter_id, owner_id, proposed_rent, cover_letter } =
-      req.body;
+    const {
+      property_id,
+      renter_id,
+      owner_id,
+      proposed_rent,
+      cover_letter,
+      move_in_date,
+    } = req.body;
 
-    // 1. Save the formal application
     const result = await pool.query(
-      `INSERT INTO applications (property_id, renter_id, owner_id, proposed_rent, cover_letter, status) 
-       VALUES ($1, $2, $3, $4, $5, 'Pending') RETURNING *`,
-      [property_id, renter_id, owner_id, proposed_rent, cover_letter],
-    );
-
-    // 2. Fire an automated "Smart Message" into the chat so the owner is instantly notified!
-    await pool.query(
-      `INSERT INTO messages (property_id, sender_id, receiver_id, content) 
-       VALUES ($1, $2, $3, $4)`,
+      `INSERT INTO applications (property_id, renter_id, owner_id, proposed_rent, cover_letter, move_in_date) 
+       VALUES ($1, $2, $3, $4, $5, $6) RETURNING *`,
       [
         property_id,
         renter_id,
         owner_id,
-        `📄 I have submitted a formal application! Proposed Rent: ₦${proposed_rent}. Please check your dashboard to review it.`,
+        proposed_rent,
+        cover_letter,
+        move_in_date || 'Immediately',
       ],
     );
 
@@ -650,12 +651,13 @@ app.get('/api/applications/owner/:owner_id', async (req, res) => {
 });
 
 // 2. Accept or Decline an Application (WITH SMART CONTRACT AUTO-GENERATION)
+// Accept or Decline an Application (WITH SMART CONTRACT DATE MATH)
 app.put('/api/applications/:id', async (req, res) => {
   try {
     const { id } = req.params;
     const { status } = req.body; // 'Approved' or 'Rejected'
 
-    // Step 1: Update the application status
+    // 1. Update the application status
     const appResult = await pool.query(
       `UPDATE applications SET status = $1, date_status_updated = CURRENT_TIMESTAMP WHERE application_id = $2 RETURNING *`,
       [status, id],
@@ -663,17 +665,39 @@ app.put('/api/applications/:id', async (req, res) => {
 
     const application = appResult.rows[0];
 
-    // Step 2: The Magic - If Approved, automatically draft the Tenancy Agreement!
+    // 2. The Magic - Auto-draft the Tenancy Agreement with Dates!
     if (status === 'Approved' && application) {
+      // --- THE DATE MATH ENGINE ---
+      const start = new Date();
+      const moveIn = (application.move_in_date || '').toLowerCase();
+
+      if (moveIn.includes('next week')) {
+        start.setDate(start.getDate() + 7);
+      } else if (moveIn.includes('next month')) {
+        start.setMonth(start.getMonth() + 1);
+      } else if (!moveIn.includes('immediately') && moveIn !== '') {
+        // If it's a custom date, safely default to 14 days from now
+        start.setDate(start.getDate() + 14);
+      }
+
+      const end = new Date(start);
+      end.setFullYear(end.getFullYear() + 1); // Standard 1 Year Nigerian Lease
+
+      const sqlStartDate = start.toISOString().split('T')[0];
+      const sqlEndDate = end.toISOString().split('T')[0];
+      // -----------------------------
+
       await pool.query(
-        `INSERT INTO tenancies (application_id, property_id, renter_id, owner_id, rent_amount, status) 
-         VALUES ($1, $2, $3, $4, $5, 'Draft')`,
+        `INSERT INTO tenancies (application_id, property_id, renter_id, owner_id, rent_amount, rent_period, lease_start_date, lease_end_date, status) 
+         VALUES ($1, $2, $3, $4, $5, 'Per Annum', $6, $7, 'Draft')`,
         [
           application.application_id,
           application.property_id,
           application.renter_id,
           application.owner_id,
           application.proposed_rent,
+          sqlStartDate,
+          sqlEndDate,
         ],
       );
     }
