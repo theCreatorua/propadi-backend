@@ -769,6 +769,35 @@ app.get('/api/applications/renter/:renter_id', async (req, res) => {
   }
 });
 
+// 4. Check if a Renter has already applied for a specific property
+app.get('/api/applications/check/:property_id/:renter_id', async (req, res) => {
+  try {
+    const { property_id, renter_id } = req.params;
+
+    // We only block it if the application is 'Pending' or 'Approved'.
+    // If it was 'Rejected', we allow them to apply again.
+    const result = await pool.query(
+      `SELECT status FROM applications 
+       WHERE property_id = $1 AND renter_id = $2 AND status IN ('Pending', 'Approved') 
+       LIMIT 1`,
+      [property_id, renter_id],
+    );
+
+    if (result.rows.length > 0) {
+      res.json({
+        success: true,
+        hasApplied: true,
+        status: result.rows[0].status,
+      });
+    } else {
+      res.json({ success: true, hasApplied: false });
+    }
+  } catch (err) {
+    console.error('Error checking application status:', err);
+    res.status(500).json({ success: false, error: 'Failed to check status' });
+  }
+});
+
 // ======== SERVER SETUP ========
 const PORT = process.env.PORT || 5000;
 app.listen(PORT, () => {
