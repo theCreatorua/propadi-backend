@@ -235,12 +235,12 @@ app.get('/api/user/profile/:userId', async (req, res) => {
 // PROPADI TRUST & KYC ENGINE
 // ==========================================
 
-// Get a user's current KYC Tier and Trust Status
+// 1. Get a user's current KYC Tier and Trust Status
 app.get('/api/users/:id/trust', async (req, res) => {
   try {
     const { id } = req.params;
     const result = await pool.query(
-      `SELECT kyc_tier, phone_verified, nin_verified, address_verified, propadi_score 
+      `SELECT kyc_tier, phone_verified, nin_verified, address_verified, renter_score 
        FROM users WHERE user_id = $1`,
       [id],
     );
@@ -251,10 +251,39 @@ app.get('/api/users/:id/trust', async (req, res) => {
       res.status(404).json({ success: false, error: 'User not found' });
     }
   } catch (err) {
-    console.error('Error fetching trust data:', err);
     res
       .status(500)
       .json({ success: false, error: 'Failed to fetch trust data' });
+  }
+});
+
+// 2. Upgrade to Tier 2 (NIN Verification)
+app.post('/api/users/:id/verify-nin', async (req, res) => {
+  try {
+    const { id } = req.params;
+    const { nin } = req.body;
+
+    if (!nin || nin.length < 11) {
+      return res
+        .status(400)
+        .json({ success: false, error: 'Invalid NIN provided.' });
+    }
+
+    // In a real production environment, you would ping the NIMC API here.
+    // For now, we simulate a successful verification and upgrade their tier.
+    await pool.query(
+      `UPDATE users 
+       SET nin_verified = TRUE, kyc_tier = 2, renter_score = renter_score + 15 
+       WHERE user_id = $1`,
+      [id],
+    );
+
+    res.json({
+      success: true,
+      message: 'Identity verified successfully! You are now Tier 2.',
+    });
+  } catch (err) {
+    res.status(500).json({ success: false, error: 'Verification failed' });
   }
 });
 
