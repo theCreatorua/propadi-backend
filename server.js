@@ -826,39 +826,31 @@ app.get('/api/applications/check/:property_id/:renter_id', async (req, res) => {
 // PAYSTACK PAYMENT INTEGRATION
 // ==========================================
 
-// Initialize a Paystack Transaction for a Tenancy
+// 1. Initialize a Paystack Transaction
 app.post('/api/tenancies/:id/pay', async (req, res) => {
   try {
     const { id } = req.params;
 
-    // 1. Fetch the exact rent amount and the renter's email
     const tenancyResult = await pool.query(
       `SELECT t.rent_amount, u.email 
-       FROM tenancies t
-       JOIN users u ON t.renter_id = u.user_id
-       WHERE t.tenancy_id = $1`,
+       FROM tenancies t JOIN users u ON t.renter_id = u.user_id WHERE t.tenancy_id = $1`,
       [id],
     );
 
-    if (tenancyResult.rows.length === 0) {
+    if (tenancyResult.rows.length === 0)
       return res
         .status(404)
         .json({ success: false, error: 'Tenancy not found' });
-    }
 
     const tenancy = tenancyResult.rows[0];
     const rentAmount = parseFloat(tenancy.rent_amount);
 
-    // 2. The Zero-Loss Fee Math (Paystack charges 1.5% + 100, capped at ₦2,000)
     let gatewayFee = rentAmount * 0.015 + 100;
     if (gatewayFee > 2000) gatewayFee = 2000;
 
     const totalAmountNaira = rentAmount + gatewayFee;
-
-    // Paystack requires the amount in Kobo (multiply by 100)
     const totalAmountKobo = Math.round(totalAmountNaira * 100);
 
-    // 3. Ping Paystack's API securely
     const paystackResponse = await fetch(
       'https://api.paystack.co/transaction/initialize',
       {
@@ -870,21 +862,7 @@ app.post('/api/tenancies/:id/pay', async (req, res) => {
         body: JSON.stringify({
           email: tenancy.email,
           amount: totalAmountKobo,
-          metadata: {
-            tenancy_id: id,
-            custom_fields: [
-              {
-                display_name: 'Rent Amount',
-                variable_name: 'rent',
-                value: rentAmount,
-              },
-              {
-                display_name: 'Gateway Fee',
-                variable_name: 'fee',
-                value: gatewayFee,
-              },
-            ],
-          },
+          metadata: { tenancy_id: id },
         }),
       },
     );
@@ -892,21 +870,73 @@ app.post('/api/tenancies/:id/pay', async (req, res) => {
     const paystackData = await paystackResponse.json();
 
     if (paystackData.status) {
-      // Send the secure checkout URL back to the Propadi app
+      // THE FIX: Save the reference in the database before sending the link to the app!
+      await pool.query(
+        `UPDATE tenancies SET payment_reference = $1 WHERE tenancy_id = $2`,
+        [paystackData.data.reference, id],
+      );
+
       res.json({
         success: true,
         authorization_url: paystackData.data.authorization_url,
-        reference: paystackData.data.reference,
-        total_amount: totalAmountNaira,
       });
     } else {
       res.status(400).json({ success: false, error: paystackData.message });
     }
   } catch (err) {
-    console.error('Paystack Error:', err);
     res
       .status(500)
       .json({ success: false, error: 'Payment initialization failed' });
+  }
+});
+
+// 2. NEW: Verify the Payment
+app.post('/api/tenancies/:id/verify', async (req, res) => {
+  try {
+    const { id } = req.params;
+
+    // Get the reference we saved earlier
+    const refResult = await pool.query(
+      `SELECT payment_reference FROM tenancies WHERE tenancy_id = $1`,
+      [id],
+    );
+    const reference = refResult.rows[0]?.payment_reference;
+
+    if (!reference)
+      return res
+        .status(400)
+        .json({ success: false, error: 'No payment reference found.' });
+
+    // Ask Paystack if this reference was actually paid
+    const verifyResponse = await fetch(
+      `https://api.paystack.co/transaction/verify/${reference}`,
+      {
+        method: 'GET',
+        headers: { Authorization: `Bearer ${process.env.PAYSTACK_SECRET_KEY}` },
+      },
+    );
+
+    const verifyData = await verifyResponse.json();
+
+    if (verifyData.data.status === 'success') {
+      // THE MAGIC: If Paystack says yes, lock the contract to Paid!
+      await pool.query(
+        `UPDATE tenancies SET payment_status = 'Paid' WHERE tenancy_id = $1`,
+        [id],
+      );
+      res.json({
+        success: true,
+        message: 'Payment verified and contract activated!',
+      });
+    } else {
+      res.json({
+        success: false,
+        status: verifyData.data.status,
+        message: 'Payment is still pending or failed.',
+      });
+    }
+  } catch (err) {
+    res.status(500).json({ success: false, error: 'Failed to verify payment' });
   }
 });
 // ======== SERVER SETUP ========
