@@ -232,6 +232,33 @@ app.get('/api/user/profile/:userId', async (req, res) => {
 });
 
 // ==========================================
+// PROPADI TRUST & KYC ENGINE
+// ==========================================
+
+// Get a user's current KYC Tier and Trust Status
+app.get('/api/users/:id/trust', async (req, res) => {
+  try {
+    const { id } = req.params;
+    const result = await pool.query(
+      `SELECT kyc_tier, phone_verified, nin_verified, address_verified, propadi_score 
+       FROM users WHERE user_id = $1`,
+      [id],
+    );
+
+    if (result.rows.length > 0) {
+      res.json({ success: true, trust_data: result.rows[0] });
+    } else {
+      res.status(404).json({ success: false, error: 'User not found' });
+    }
+  } catch (err) {
+    console.error('Error fetching trust data:', err);
+    res
+      .status(500)
+      .json({ success: false, error: 'Failed to fetch trust data' });
+  }
+});
+
+// ==========================================
 // PROPERTIES ROUTES (CLEANED & DEDUPLICATED)
 // ==========================================
 
