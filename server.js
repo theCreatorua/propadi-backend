@@ -822,6 +822,93 @@ app.get('/api/applications/check/:property_id/:renter_id', async (req, res) => {
   }
 });
 
+// ==========================================
+// PAYSTACK PAYMENT INTEGRATION
+// ==========================================
+
+// Initialize a Paystack Transaction for a Tenancy
+app.post('/api/tenancies/:id/pay', async (req, res) => {
+  try {
+    const { id } = req.params;
+
+    // 1. Fetch the exact rent amount and the renter's email
+    const tenancyResult = await pool.query(
+      `SELECT t.rent_amount, u.email 
+       FROM tenancies t
+       JOIN users u ON t.renter_id = u.user_id
+       WHERE t.tenancy_id = $1`,
+      [id],
+    );
+
+    if (tenancyResult.rows.length === 0) {
+      return res
+        .status(404)
+        .json({ success: false, error: 'Tenancy not found' });
+    }
+
+    const tenancy = tenancyResult.rows[0];
+    const rentAmount = parseFloat(tenancy.rent_amount);
+
+    // 2. The Zero-Loss Fee Math (Paystack charges 1.5% + 100, capped at ₦2,000)
+    let gatewayFee = rentAmount * 0.015 + 100;
+    if (gatewayFee > 2000) gatewayFee = 2000;
+
+    const totalAmountNaira = rentAmount + gatewayFee;
+
+    // Paystack requires the amount in Kobo (multiply by 100)
+    const totalAmountKobo = Math.round(totalAmountNaira * 100);
+
+    // 3. Ping Paystack's API securely
+    const paystackResponse = await fetch(
+      'https://api.paystack.co/transaction/initialize',
+      {
+        method: 'POST',
+        headers: {
+          Authorization: `Bearer ${process.env.PAYSTACK_SECRET_KEY}`,
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({
+          email: tenancy.email,
+          amount: totalAmountKobo,
+          metadata: {
+            tenancy_id: id,
+            custom_fields: [
+              {
+                display_name: 'Rent Amount',
+                variable_name: 'rent',
+                value: rentAmount,
+              },
+              {
+                display_name: 'Gateway Fee',
+                variable_name: 'fee',
+                value: gatewayFee,
+              },
+            ],
+          },
+        }),
+      },
+    );
+
+    const paystackData = await paystackResponse.json();
+
+    if (paystackData.status) {
+      // Send the secure checkout URL back to the Propadi app
+      res.json({
+        success: true,
+        authorization_url: paystackData.data.authorization_url,
+        reference: paystackData.data.reference,
+        total_amount: totalAmountNaira,
+      });
+    } else {
+      res.status(400).json({ success: false, error: paystackData.message });
+    }
+  } catch (err) {
+    console.error('Paystack Error:', err);
+    res
+      .status(500)
+      .json({ success: false, error: 'Payment initialization failed' });
+  }
+});
 // ======== SERVER SETUP ========
 const PORT = process.env.PORT || 5000;
 app.listen(PORT, () => {
