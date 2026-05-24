@@ -995,6 +995,114 @@ app.post('/api/tenancies/:id/verify', async (req, res) => {
     res.status(500).json({ success: false, error: 'Failed to verify payment' });
   }
 });
+
+// ==========================================
+// NEW: LANDLORD WALLET & SECURE LEDGER
+// ==========================================
+
+// 1. Fetch Wallet Balance and Transaction History
+app.get('/api/wallet/:userId', async (req, res) => {
+  try {
+    const { userId } = req.params;
+
+    // A. Fetch the Secure Wallet Balance
+    const walletResult = await pool.query(
+      'SELECT balance, total_earned, pending_clearance FROM wallets WHERE user_id = $1',
+      [userId],
+    );
+
+    let wallet = walletResult.rows[0];
+    // If the landlord is new and hasn't earned money yet, default to zero
+    if (!wallet) {
+      wallet = { balance: 0, total_earned: 0, pending_clearance: 0 };
+    }
+
+    // B. Fetch the Immutable Transaction History
+    const txnResult = await pool.query(
+      `SELECT id, type, title, property_ref as property, amount, created_at as date, status 
+       FROM transactions 
+       WHERE user_id = $1 
+       ORDER BY created_at DESC`,
+      [userId],
+    );
+
+    res.json({
+      success: true,
+      balance: wallet.balance,
+      total_earned: wallet.total_earned,
+      pending_clearance: wallet.pending_clearance,
+      transactions: txnResult.rows || [],
+    });
+  } catch (error) {
+    console.error('Wallet fetch error:', error);
+    res
+      .status(500)
+      .json({ success: false, error: 'Failed to fetch wallet data' });
+  }
+});
+
+// 2. Process a Wallet Withdrawal
+app.post('/api/wallet/withdraw', async (req, res) => {
+  const client = await pool.connect();
+  try {
+    const { userId, amount, bankName, accountNumber } = req.body;
+    const withdrawAmount = parseFloat(amount);
+
+    if (!withdrawAmount || withdrawAmount <= 0) {
+      return res
+        .status(400)
+        .json({ success: false, error: 'Invalid withdrawal amount' });
+    }
+
+    await client.query('BEGIN'); // Start secure transaction
+
+    // A. Lock the row and check the balance
+    const walletResult = await client.query(
+      'SELECT balance FROM wallets WHERE user_id = $1 FOR UPDATE',
+      [userId],
+    );
+
+    if (
+      walletResult.rows.length === 0 ||
+      parseFloat(walletResult.rows[0].balance) < withdrawAmount
+    ) {
+      await client.query('ROLLBACK');
+      return res
+        .status(400)
+        .json({ success: false, error: 'Insufficient funds' });
+    }
+
+    // B. Deduct the balance
+    await client.query(
+      'UPDATE wallets SET balance = balance - $1, updated_at = CURRENT_TIMESTAMP WHERE user_id = $2',
+      [withdrawAmount, userId],
+    );
+
+    // C. Write the receipt to the Immutable Ledger
+    const propertyRef = `To ${bankName} (${accountNumber.slice(-4)})`;
+    const txnResult = await client.query(
+      `INSERT INTO transactions (user_id, type, title, property_ref, amount, status) 
+       VALUES ($1, 'withdrawal', 'Bank Withdrawal', $2, $3, 'Pending') RETURNING *`,
+      [userId, propertyRef, -withdrawAmount],
+    );
+
+    await client.query('COMMIT'); // Save everything permanently
+
+    res.json({
+      success: true,
+      message: 'Withdrawal initiated successfully',
+      transaction: txnResult.rows[0],
+    });
+  } catch (error) {
+    await client.query('ROLLBACK');
+    console.error('Withdrawal error:', error);
+    res
+      .status(500)
+      .json({ success: false, error: 'Failed to process withdrawal' });
+  } finally {
+    client.release();
+  }
+});
 // ======== SERVER SETUP ========
 const PORT = process.env.PORT || 5000;
 app.listen(PORT, () => {
