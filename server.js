@@ -1103,6 +1103,116 @@ app.post('/api/wallet/withdraw', async (req, res) => {
     client.release();
   }
 });
+
+// ==========================================
+// MAINTENANCE REQUESTS ROUTES (MASTER SCHEMA)
+// ==========================================
+
+// 1. Get all requests for a user (Renter or Landlord)
+app.get('/api/maintenance/:userId', async (req, res) => {
+  try {
+    const { userId } = req.params;
+    const result = await pool.query(
+      `SELECT m.request_id as id, m.category, m.title, m.description, m.status, m.date_submitted as created_at, m.media_url, p.title as property_title 
+       FROM maintenance_requests m
+       JOIN properties p ON m.property_id = p.property_id
+       WHERE m.renter_id = $1 OR m.owner_id = $1
+       ORDER BY m.date_submitted DESC`,
+      [userId],
+    );
+    res.json({ success: true, tickets: result.rows });
+  } catch (err) {
+    console.error('Maintenance fetch error:', err);
+    res
+      .status(500)
+      .json({ success: false, error: 'Failed to fetch maintenance requests' });
+  }
+});
+
+// 2. Create a new request (Renter)
+app.post('/api/maintenance', async (req, res) => {
+  try {
+    const { renter_id, category, title, description, media_url } = req.body;
+
+    // Auto-lookup the active property & owner based on signed tenancies
+    const tenancyResult = await pool.query(
+      `SELECT tenancy_id, property_id, owner_id FROM tenancies 
+       WHERE renter_id = $1 AND status = 'Signed' 
+       LIMIT 1`,
+      [renter_id],
+    );
+
+    if (tenancyResult.rows.length === 0) {
+      return res.status(400).json({
+        success: false,
+        error:
+          'No active tenancy found. You must have a signed lease to report maintenance.',
+      });
+    }
+
+    const { tenancy_id, property_id, owner_id } = tenancyResult.rows[0];
+
+    const result = await pool.query(
+      `INSERT INTO maintenance_requests (tenancy_id, property_id, renter_id, owner_id, category, title, description, media_url, status, date_submitted) 
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, 'Pending', CURRENT_TIMESTAMP) RETURNING *`,
+      [
+        tenancy_id,
+        property_id,
+        renter_id,
+        owner_id,
+        category,
+        title,
+        description,
+        media_url || null,
+      ],
+    );
+
+    // Fetch the property title to return to the frontend immediately
+    const propResult = await pool.query(
+      'SELECT title FROM properties WHERE property_id = $1',
+      [property_id],
+    );
+
+    // Map to the format the frontend expects
+    const newTicket = {
+      id: result.rows[0].request_id,
+      category: result.rows[0].category,
+      title: result.rows[0].title,
+      description: result.rows[0].description,
+      status: result.rows[0].status,
+      created_at: result.rows[0].date_submitted,
+      media_url: result.rows[0].media_url,
+      property_title: propResult.rows[0].title,
+    };
+
+    res.json({ success: true, ticket: newTicket });
+  } catch (err) {
+    console.error('Create request error:', err);
+    res
+      .status(500)
+      .json({ success: false, error: 'Failed to submit maintenance request' });
+  }
+});
+
+// 3. Update request status (Landlord)
+app.put('/api/maintenance/:id', async (req, res) => {
+  try {
+    const { id } = req.params;
+    const { status } = req.body;
+
+    // If marking as resolved, timestamp it
+    let query = `UPDATE maintenance_requests SET status = $1 WHERE request_id = $2 RETURNING *`;
+    if (status === 'Resolved') {
+      query = `UPDATE maintenance_requests SET status = $1, date_resolved = CURRENT_TIMESTAMP WHERE request_id = $2 RETURNING *`;
+    }
+
+    const result = await pool.query(query, [status, id]);
+    res.json({ success: true, ticket: result.rows[0] });
+  } catch (err) {
+    console.error('Update request error:', err);
+    res.status(500).json({ success: false, error: 'Failed to update status' });
+  }
+});
 // ======== SERVER SETUP ========
 const PORT = process.env.PORT || 5000;
 app.listen(PORT, () => {
