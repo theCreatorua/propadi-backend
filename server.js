@@ -1,5 +1,6 @@
 require('dotenv').config();
 const { createClient } = require('@supabase/supabase-js');
+const crypto = require('crypto'); // <-- ISOLATED CHANGE 1: Required for Secure Handshake PIN generation
 
 // Initialize Supabase for Storage uploads
 const supabase = createClient(
@@ -582,7 +583,6 @@ app.get('/api/inbox/:userId', async (req, res) => {
 // VIEWING TRACKER ROUTES
 // ==========================================
 
-// 1. Request a New Viewing
 // 1. Request a New Viewing (WITH HIDDEN ID FOR BUTTONS)
 app.post('/api/viewings', async (req, res) => {
   try {
@@ -623,16 +623,35 @@ app.post('/api/viewings', async (req, res) => {
       .json({ success: false, error: 'Failed to request viewing' });
   }
 });
-// 2. Update Viewing Status (Accept/Decline)
+
+// 2. Update Viewing Status (Accept/Decline) & Generate Secure Handshake PIN <-- ISOLATED CHANGE 2
 app.put('/api/viewings/:id', async (req, res) => {
   try {
     const { id } = req.params;
     const { status } = req.body; // 'Accepted' or 'Declined'
 
-    const result = await pool.query(
-      `UPDATE viewings SET status = $1 WHERE viewing_id = $2 RETURNING *`, // THE FIX: using viewing_id to match schema
-      [status, id],
-    );
+    let query;
+    let values;
+
+    if (status === 'Accepted') {
+      // Generate a secure 6-digit PIN using Node's native crypto
+      const securePin = crypto.randomInt(100000, 999999).toString();
+
+      // Set expiry for 5 minutes from now
+      const expiryTime = new Date();
+      expiryTime.setMinutes(expiryTime.getMinutes() + 5);
+
+      query = `UPDATE viewings 
+               SET status = $1, secure_handshake_pin = $2, pin_expiry = $3 
+               WHERE viewing_id = $4 RETURNING *`;
+      values = [status, securePin, expiryTime.toISOString(), id];
+    } else {
+      // If declined, just update the status normally
+      query = `UPDATE viewings SET status = $1 WHERE viewing_id = $2 RETURNING *`;
+      values = [status, id];
+    }
+
+    const result = await pool.query(query, values);
 
     res.json({ success: true, viewing: result.rows[0] });
   } catch (err) {
@@ -1213,6 +1232,7 @@ app.put('/api/maintenance/:id', async (req, res) => {
     res.status(500).json({ success: false, error: 'Failed to update status' });
   }
 });
+
 // ======== SERVER SETUP ========
 const PORT = process.env.PORT || 5000;
 app.listen(PORT, () => {
