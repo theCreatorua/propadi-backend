@@ -548,7 +548,7 @@ app.get('/api/inbox/:userId', async (req, res) => {
 });
 
 // ==========================================
-// VIEWING TRACKER ROUTES
+// VIEWING TRACKER & TRUST AUDIT ROUTES
 // ==========================================
 
 app.post('/api/viewings', async (req, res) => {
@@ -590,13 +590,11 @@ app.post('/api/viewings', async (req, res) => {
   }
 });
 
-// ISOLATED UPDATE: Automatically insert an "In Progress" ledger message into the chat.
 app.put('/api/viewings/:id', async (req, res) => {
   try {
     const { id } = req.params;
     const { status } = req.body;
 
-    // Look up the viewing to get context for the chat message
     const viewData = await pool.query(
       'SELECT property_id, owner_id, renter_id FROM viewings WHERE viewing_id = $1',
       [id],
@@ -616,7 +614,6 @@ app.put('/api/viewings/:id', async (req, res) => {
                WHERE viewing_id = $4 RETURNING *`;
       values = [status, securePin, expiryTime.toISOString(), id];
 
-      // Inject Ledger Message
       if (v) {
         await pool.query(
           `INSERT INTO messages (property_id, sender_id, receiver_id, content) VALUES ($1, $2, $3, $4)`,
@@ -643,7 +640,6 @@ app.put('/api/viewings/:id', async (req, res) => {
   }
 });
 
-// ISOLATED UPDATE: Automatically insert a "Completed" ledger message into the chat.
 app.post('/api/viewings/:id/validate', async (req, res) => {
   const client = await pool.connect();
 
@@ -686,7 +682,6 @@ app.post('/api/viewings/:id/validate', async (req, res) => {
     const expiry = new Date(viewing.pin_expiry);
     if (now > expiry) {
       await client.query('ROLLBACK');
-      // Inject Failed Ledger Message
       await client.query(
         `INSERT INTO messages (property_id, sender_id, receiver_id, content) VALUES ($1, $2, $3, $4)`,
         [
@@ -721,14 +716,13 @@ app.post('/api/viewings/:id/validate', async (req, res) => {
       [id, `${owner_lat},${owner_lng}`],
     );
 
-    // Inject Success Ledger Message
     await client.query(
       `INSERT INTO messages (property_id, sender_id, receiver_id, content) VALUES ($1, $2, $3, $4)`,
       [
         viewing.property_id,
         viewing.owner_id,
         viewing.renter_id,
-        `✅ **Secure Viewing Completed Successfully.** The physical property inspection has been verified.`,
+        `✅ **Secure Handshake Completed.** Renter is currently conducting the physical audit.`,
       ],
     );
 
@@ -745,6 +739,93 @@ app.post('/api/viewings/:id/validate', async (req, res) => {
     res
       .status(500)
       .json({ success: false, error: 'Internal validation error.' });
+  } finally {
+    client.release();
+  }
+});
+
+// ISOLATED UPDATE: The Active Trust & Audit Engine Processing Route
+app.post('/api/viewings/:id/audit', async (req, res) => {
+  const client = await pool.connect();
+  try {
+    const { id } = req.params;
+    const { audit_data, renter_notes, final_decision } = req.body;
+
+    await client.query('BEGIN');
+
+    const viewResult = await client.query(
+      'SELECT property_id, renter_id, owner_id FROM viewings WHERE viewing_id = $1 FOR UPDATE',
+      [id],
+    );
+    if (viewResult.rows.length === 0) {
+      await client.query('ROLLBACK');
+      return res
+        .status(404)
+        .json({ success: false, error: 'Viewing not found' });
+    }
+    const v = viewResult.rows[0];
+
+    let missingCount = 0;
+    const totalCount = audit_data.length;
+
+    for (const item of audit_data) {
+      await client.query(
+        `INSERT INTO inspection_audits (viewing_id, amenity_id, is_physically_present, renter_notes)
+         VALUES ($1, $2, $3, $4)`,
+        [id, item.amenity_id, item.is_present, renter_notes],
+      );
+      if (item.is_present === false) {
+        missingCount++;
+      }
+    }
+
+    if (missingCount > 0) {
+      const penalty = missingCount * 5;
+      await client.query(
+        'UPDATE users SET renter_score = renter_score - $1 WHERE user_id = $2',
+        [penalty, v.owner_id],
+      );
+    } else if (totalCount > 0 && missingCount === 0) {
+      await client.query(
+        'UPDATE users SET renter_score = renter_score + 2 WHERE user_id = $2',
+        [v.owner_id],
+      );
+    }
+
+    let conclusionText =
+      missingCount > 0
+        ? `⚠️ *Propadi Trust Engine has deducted trust points from the Owner due to missing advertised amenities.*`
+        : `✅ *Property perfectly matches the online listing. Owner trust score increased.*`;
+
+    if (totalCount === 0) {
+      conclusionText = `*No specific amenities were verified.*`;
+    }
+
+    const reportContent =
+      `📋 **Immutable Inspection Report**\n` +
+      `Amenities Verified: ${totalCount - missingCount}/${totalCount}\n` +
+      `Discrepancies Found: ${missingCount}\n` +
+      `Renter's Decision: **${final_decision}**\n\n` +
+      conclusionText;
+
+    await client.query(
+      `INSERT INTO messages (property_id, sender_id, receiver_id, content) VALUES ($1, $2, $3, $4)`,
+      [v.property_id, v.renter_id, v.owner_id, reportContent],
+    );
+
+    await client.query(
+      `UPDATE viewings SET status = 'Audited', updated_at = CURRENT_TIMESTAMP WHERE viewing_id = $1`,
+      [id],
+    );
+
+    await client.query('COMMIT');
+    res.json({ success: true, message: 'Audit logged successfully' });
+  } catch (err) {
+    await client.query('ROLLBACK');
+    console.error('Audit Processing Error:', err);
+    res
+      .status(500)
+      .json({ success: false, error: 'Failed to process inspection audit' });
   } finally {
     client.release();
   }
