@@ -1,6 +1,6 @@
 require('dotenv').config();
 const { createClient } = require('@supabase/supabase-js');
-const crypto = require('crypto'); // <-- ISOLATED CHANGE 1: Required for Secure Handshake PIN generation
+const crypto = require('crypto');
 
 // Initialize Supabase for Storage uploads
 const supabase = createClient(
@@ -31,7 +31,7 @@ console.log(
 // Initialize Resend
 const resend = new Resend(process.env.RESEND_API_KEY);
 
-// Database Connection (Supabase)
+// Database Connection (Supabase PostgreSQL)
 const pool = new Pool({
   connectionString: process.env.DATABASE_URL,
   ssl: { rejectUnauthorized: false },
@@ -41,9 +41,10 @@ const pool = new Pool({
 // AUTHENTICATION & USER ROUTES
 // ==========================================
 
-// 1. Sign Up a New User
+// 1. Sync User Profile (Post-Supabase Auth)
 app.post('/api/auth/register', async (req, res) => {
-  const { email, password, name } = req.body;
+  // Requires user_id passed from Supabase frontend auth
+  const { user_id, email, name } = req.body;
 
   try {
     const userCheck = await pool.query('SELECT * FROM users WHERE email = $1', [
@@ -55,10 +56,16 @@ app.post('/api/auth/register', async (req, res) => {
         .json({ success: false, error: 'Email is already registered' });
     }
 
+    // Insert into 'users' strictly mapping to the master schema
     const newUser = await pool.query(
-      'INSERT INTO users (email, password, name, balance) VALUES ($1, $2, $3, 0) RETURNING user_id, email, name, balance',
-      [email, password, name],
+      'INSERT INTO users (user_id, email, name) VALUES ($1, $2, $3) RETURNING user_id, email, name',
+      [user_id, email, name],
     );
+
+    // Initialize Wallet to comply with the 12-table master architecture
+    await pool.query('INSERT INTO wallets (user_id, balance) VALUES ($1, 0)', [
+      user_id,
+    ]);
 
     res.json({
       success: true,
@@ -67,38 +74,11 @@ app.post('/api/auth/register', async (req, res) => {
     });
   } catch (err) {
     console.error('Sign Up Error:', err);
-    res.status(500).json({ success: false, error: 'Failed to create account' });
+    res.status(500).json({ success: false, error: 'Failed to create profile' });
   }
 });
 
-// 2. Log In an Existing User
-app.post('/api/auth/login', async (req, res) => {
-  const { email, password } = req.body;
-
-  try {
-    const result = await pool.query(
-      'SELECT user_id, email, name, balance FROM users WHERE email = $1 AND password = $2',
-      [email, password],
-    );
-
-    if (result.rows.length === 0) {
-      return res
-        .status(401)
-        .json({ success: false, error: 'Invalid email or password' });
-    }
-
-    res.json({
-      success: true,
-      message: 'Login successful',
-      user: result.rows[0],
-    });
-  } catch (err) {
-    console.error('Login Error:', err);
-    res.status(500).json({ success: false, error: 'Failed to log in' });
-  }
-});
-
-// 3. Deposit / Fund Vault
+// 2. Deposit / Fund Vault (Fixed: Syncs with Wallets and Transactions Tables)
 app.post('/api/user/deposit', async (req, res) => {
   const { userId, amount } = req.body;
 
@@ -110,17 +90,20 @@ app.post('/api/user/deposit', async (req, res) => {
 
   try {
     const updateResult = await pool.query(
-      'UPDATE users SET balance = balance + $1 WHERE user_id = $2 RETURNING balance',
+      'UPDATE wallets SET balance = balance + $1, updated_at = CURRENT_TIMESTAMP WHERE user_id = $2 RETURNING balance',
       [amount, userId],
     );
 
     if (updateResult.rows.length === 0) {
-      return res.status(404).json({ success: false, error: 'User not found' });
+      return res
+        .status(404)
+        .json({ success: false, error: 'User wallet not found' });
     }
 
     const insertResult = await pool.query(
-      'INSERT INTO withdrawals (user_id, amount, status, type) VALUES ($1, $2, $3, $4) RETURNING *',
-      [userId, amount, 'Paid', 'Deposit'],
+      `INSERT INTO transactions (user_id, type, title, amount, status) 
+       VALUES ($1, 'credit', 'Vault Deposit', $2, 'Completed') RETURNING *`,
+      [userId, amount],
     );
 
     res.json({
@@ -137,7 +120,7 @@ app.post('/api/user/deposit', async (req, res) => {
   }
 });
 
-// 4. Request Withdrawal
+// 3. Request Withdrawal (Fixed: Checks Wallets Table before Withdrawal)
 app.post('/api/user/withdraw', async (req, res) => {
   const { userId, amount, email, bankName, accountNumber } = req.body;
 
@@ -155,11 +138,14 @@ app.post('/api/user/withdraw', async (req, res) => {
 
   try {
     const userResult = await pool.query(
-      'SELECT balance FROM users WHERE user_id = $1',
+      'SELECT balance FROM wallets WHERE user_id = $1',
       [userId],
     );
+
     if (userResult.rows.length === 0) {
-      return res.status(404).json({ success: false, error: 'User not found' });
+      return res
+        .status(404)
+        .json({ success: false, error: 'User wallet not found' });
     }
 
     const currentBalance = parseFloat(userResult.rows[0].balance);
@@ -170,8 +156,9 @@ app.post('/api/user/withdraw', async (req, res) => {
     }
 
     const insertResult = await pool.query(
-      `INSERT INTO withdrawals (user_id, email, amount, bank_name, account_number, status, type) VALUES ($1, $2, $3, $4, $5, $6, $7) RETURNING *`,
-      [userId, email, amount, bankName, accountNumber, 'Pending', 'Withdrawal'],
+      `INSERT INTO withdrawals (user_id, email, amount, bank_name, account_number, status, type) 
+       VALUES ($1, $2, $3, $4, $5, 'Pending', 'Withdrawal') RETURNING *`,
+      [userId, email, amount, bankName, accountNumber],
     );
 
     res.json({
@@ -187,12 +174,12 @@ app.post('/api/user/withdraw', async (req, res) => {
   }
 });
 
-// Get user dashboard data
+// 4. Get user dashboard data (Fixed: Pulls from Wallets schema)
 app.get('/api/user/dashboard/:id', async (req, res) => {
   try {
     const { id } = req.params;
     const balanceResult = await pool.query(
-      'SELECT balance FROM users WHERE user_id = $1',
+      'SELECT balance FROM wallets WHERE user_id = $1',
       [id],
     );
     const withdrawalsResult = await pool.query(
@@ -211,13 +198,16 @@ app.get('/api/user/dashboard/:id', async (req, res) => {
   }
 });
 
-// Get User Profile Details
+// 5. Get User Profile Details (Fixed: Joins Users and Wallets)
 app.get('/api/user/profile/:userId', async (req, res) => {
   const { userId } = req.params;
 
   try {
     const result = await pool.query(
-      'SELECT email, balance FROM users WHERE user_id = $1',
+      `SELECT u.email, COALESCE(w.balance, 0) as balance 
+       FROM users u 
+       LEFT JOIN wallets w ON u.user_id = w.user_id 
+       WHERE u.user_id = $1`,
       [userId],
     );
 
@@ -270,8 +260,6 @@ app.post('/api/users/:id/verify-nin', async (req, res) => {
         .json({ success: false, error: 'Invalid NIN provided.' });
     }
 
-    // In a real production environment, you would ping the NIMC API here.
-    // For now, we simulate a successful verification and upgrade their tier.
     await pool.query(
       `UPDATE users 
        SET nin_verified = TRUE, kyc_tier = 2, renter_score = renter_score + 15 
@@ -386,7 +374,7 @@ app.post('/api/properties', async (req, res) => {
       title,
       description,
       rent_price,
-      rent_period || 'Yearly',
+      rent_period || 'Year',
       total_beds || 0,
       total_baths || 0,
       address_street,
@@ -446,7 +434,7 @@ app.get('/api/admin/withdrawals', async (req, res) => {
   }
 });
 
-// 2. Mark withdrawal as Paid, DEDUCT BALANCE, and send email
+// 2. Mark withdrawal as Paid, DEDUCT BALANCE, and send email (Fixed for Wallets)
 app.put('/api/admin/withdrawals/:id', async (req, res) => {
   const { id } = req.params;
   const { status } = req.body;
@@ -472,7 +460,7 @@ app.put('/api/admin/withdrawals/:id', async (req, res) => {
 
     if (status === 'Paid') {
       await pool.query(
-        'UPDATE users SET balance = balance - $1 WHERE user_id = $2',
+        'UPDATE wallets SET balance = balance - $1 WHERE user_id = $2',
         [withdrawal.amount, withdrawal.user_id],
       );
 
@@ -583,7 +571,7 @@ app.get('/api/inbox/:userId', async (req, res) => {
 // VIEWING TRACKER ROUTES
 // ==========================================
 
-// 1. Request a New Viewing (WITH HIDDEN ID FOR BUTTONS)
+// 1. Request a New Viewing
 app.post('/api/viewings', async (req, res) => {
   try {
     const { property_id, renter_id, landlord_id, viewing_date } = req.body;
@@ -603,7 +591,6 @@ app.post('/api/viewings', async (req, res) => {
       ],
     );
 
-    // THE FIX: We secretly attach the viewing_id to the end of the text using "||"
     await pool.query(
       `INSERT INTO messages (property_id, sender_id, receiver_id, content) 
        VALUES ($1, $2, $3, $4)`,
@@ -624,20 +611,17 @@ app.post('/api/viewings', async (req, res) => {
   }
 });
 
-// 2. Update Viewing Status (Accept/Decline) & Generate Secure Handshake PIN <-- ISOLATED CHANGE 2
+// 2. Update Viewing Status (Accept/Decline) & Generate Secure Handshake PIN
 app.put('/api/viewings/:id', async (req, res) => {
   try {
     const { id } = req.params;
-    const { status } = req.body; // 'Accepted' or 'Declined'
+    const { status } = req.body;
 
     let query;
     let values;
 
     if (status === 'Accepted') {
-      // Generate a secure 6-digit PIN using Node's native crypto
       const securePin = crypto.randomInt(100000, 999999).toString();
-
-      // Set expiry for 5 minutes from now
       const expiryTime = new Date();
       expiryTime.setMinutes(expiryTime.getMinutes() + 5);
 
@@ -646,13 +630,11 @@ app.put('/api/viewings/:id', async (req, res) => {
                WHERE viewing_id = $4 RETURNING *`;
       values = [status, securePin, expiryTime.toISOString(), id];
     } else {
-      // If declined, just update the status normally
       query = `UPDATE viewings SET status = $1 WHERE viewing_id = $2 RETURNING *`;
       values = [status, id];
     }
 
     const result = await pool.query(query, values);
-
     res.json({ success: true, viewing: result.rows[0] });
   } catch (err) {
     console.error('Error updating viewing:', err);
@@ -662,7 +644,7 @@ app.put('/api/viewings/:id', async (req, res) => {
   }
 });
 
-// 3. Validate Secure Handshake (Owner scans Renter's QR/PIN) <-- STRICTLY ISOLATED NEW ROUTE
+// 3. Validate Secure Handshake (Fixed: Location Types TEXT instead of POINT error)
 app.post('/api/viewings/:id/validate', async (req, res) => {
   const client = await pool.connect();
 
@@ -676,9 +658,8 @@ app.post('/api/viewings/:id/validate', async (req, res) => {
         .json({ success: false, error: 'Handshake PIN is required.' });
     }
 
-    await client.query('BEGIN'); // Start a secure transaction lock
+    await client.query('BEGIN');
 
-    // Step 1: Fetch the active viewing
     const viewingResult = await client.query(
       `SELECT secure_handshake_pin, pin_expiry, status 
        FROM viewings WHERE viewing_id = $1 FOR UPDATE`,
@@ -694,50 +675,41 @@ app.post('/api/viewings/:id/validate', async (req, res) => {
 
     const viewing = viewingResult.rows[0];
 
-    // Step 2: Validate the State
     if (viewing.status !== 'Accepted') {
       await client.query('ROLLBACK');
-      return res
-        .status(400)
-        .json({
-          success: false,
-          error: 'This viewing is not currently active or accepted.',
-        });
+      return res.status(400).json({
+        success: false,
+        error: 'This viewing is not currently active or accepted.',
+      });
     }
 
-    // Step 3: Validate the Expiration Timer
     const now = new Date();
     const expiry = new Date(viewing.pin_expiry);
     if (now > expiry) {
       await client.query('ROLLBACK');
-      return res
-        .status(400)
-        .json({
-          success: false,
-          error:
-            'This handshake PIN has expired. The renter must refresh their app.',
-        });
+      return res.status(400).json({
+        success: false,
+        error:
+          'This handshake PIN has expired. The renter must refresh their app.',
+      });
     }
 
-    // Step 4: Validate the Cryptographic PIN
     if (viewing.secure_handshake_pin !== pin.toString()) {
       await client.query('ROLLBACK');
-      return res
-        .status(400)
-        .json({
-          success: false,
-          error: 'Invalid handshake PIN. Verification failed.',
-        });
+      return res.status(400).json({
+        success: false,
+        error: 'Invalid handshake PIN. Verification failed.',
+      });
     }
 
-    // Step 5: Success! Update Status and log check-in location
+    // Fixed mapping: Schema uses TEXT for owner_checkin_location
     const updateResult = await client.query(
       `UPDATE viewings 
        SET status = 'Completed', 
-           owner_checkin_location = point($2, $3),
+           owner_checkin_location = $2,
            updated_at = CURRENT_TIMESTAMP 
        WHERE viewing_id = $1 RETURNING *`,
-      [id, owner_lng || 0, owner_lat || 0], // Geolocation fallback to 0 if not passed
+      [id, `${owner_lat},${owner_lng}`],
     );
 
     await client.query('COMMIT');
@@ -796,7 +768,7 @@ app.post('/api/applications', async (req, res) => {
   }
 });
 
-// 1. Fetch all applications for a specific landlord (WITH TRUST METRICS)
+// 1. Fetch all applications for a specific landlord
 app.get('/api/applications/owner/:owner_id', async (req, res) => {
   try {
     const { owner_id } = req.params;
@@ -821,14 +793,12 @@ app.get('/api/applications/owner/:owner_id', async (req, res) => {
   }
 });
 
-// 2. Accept or Decline an Application (WITH SMART CONTRACT AUTO-GENERATION)
-// Accept or Decline an Application (WITH SMART CONTRACT DATE MATH)
+// 2. Accept or Decline an Application (WITH SMART CONTRACT DATE MATH)
 app.put('/api/applications/:id', async (req, res) => {
   try {
     const { id } = req.params;
-    const { status } = req.body; // 'Approved' or 'Rejected'
+    const { status } = req.body;
 
-    // 1. Update the application status
     const appResult = await pool.query(
       `UPDATE applications SET status = $1, date_status_updated = CURRENT_TIMESTAMP WHERE application_id = $2 RETURNING *`,
       [status, id],
@@ -836,27 +806,21 @@ app.put('/api/applications/:id', async (req, res) => {
 
     const application = appResult.rows[0];
 
-    // 2. The Magic - Auto-draft the Tenancy Agreement with Dates!
     if (status === 'Approved' && application) {
-      // --- THE DATE MATH ENGINE ---
       const start = new Date();
       const moveIn = (application.move_in_date || '').toLowerCase();
 
-      if (moveIn.includes('next week')) {
-        start.setDate(start.getDate() + 7);
-      } else if (moveIn.includes('next month')) {
+      if (moveIn.includes('next week')) start.setDate(start.getDate() + 7);
+      else if (moveIn.includes('next month'))
         start.setMonth(start.getMonth() + 1);
-      } else if (!moveIn.includes('immediately') && moveIn !== '') {
-        // If it's a custom date, safely default to 14 days from now
+      else if (!moveIn.includes('immediately') && moveIn !== '')
         start.setDate(start.getDate() + 14);
-      }
 
       const end = new Date(start);
-      end.setFullYear(end.getFullYear() + 1); // Standard 1 Year Nigerian Lease
+      end.setFullYear(end.getFullYear() + 1);
 
       const sqlStartDate = start.toISOString().split('T')[0];
       const sqlEndDate = end.toISOString().split('T')[0];
-      // -----------------------------
 
       await pool.query(
         `INSERT INTO tenancies (application_id, property_id, renter_id, owner_id, rent_amount, rent_period, lease_start_date, lease_end_date, status) 
@@ -924,7 +888,6 @@ app.put('/api/tenancies/:id/sign', async (req, res) => {
   try {
     const { id } = req.params;
 
-    // We stamp the exact server time as the legal signature
     const result = await pool.query(
       `UPDATE tenancies 
        SET renter_signature_date = CURRENT_TIMESTAMP, status = 'Signed' 
@@ -939,7 +902,7 @@ app.put('/api/tenancies/:id/sign', async (req, res) => {
   }
 });
 
-// 3. Fetch all applications for a specific RENTER (Includes the Draft Tenancy ID!)
+// 3. Fetch all applications for a specific RENTER
 app.get('/api/applications/renter/:renter_id', async (req, res) => {
   try {
     const { renter_id } = req.params;
@@ -969,8 +932,6 @@ app.get('/api/applications/check/:property_id/:renter_id', async (req, res) => {
   try {
     const { property_id, renter_id } = req.params;
 
-    // We only block it if the application is 'Pending' or 'Approved'.
-    // If it was 'Rejected', we allow them to apply again.
     const result = await pool.query(
       `SELECT status FROM applications 
        WHERE property_id = $1 AND renter_id = $2 AND status IN ('Pending', 'Approved') 
@@ -1041,12 +1002,10 @@ app.post('/api/tenancies/:id/pay', async (req, res) => {
     const paystackData = await paystackResponse.json();
 
     if (paystackData.status) {
-      // THE FIX: Save the reference in the database before sending the link to the app!
       await pool.query(
         `UPDATE tenancies SET payment_reference = $1 WHERE tenancy_id = $2`,
         [paystackData.data.reference, id],
       );
-
       res.json({
         success: true,
         authorization_url: paystackData.data.authorization_url,
@@ -1061,12 +1020,11 @@ app.post('/api/tenancies/:id/pay', async (req, res) => {
   }
 });
 
-// 2. NEW: Verify the Payment
+// 2. Verify the Payment
 app.post('/api/tenancies/:id/verify', async (req, res) => {
   try {
     const { id } = req.params;
 
-    // Get the reference we saved earlier
     const refResult = await pool.query(
       `SELECT payment_reference FROM tenancies WHERE tenancy_id = $1`,
       [id],
@@ -1078,7 +1036,6 @@ app.post('/api/tenancies/:id/verify', async (req, res) => {
         .status(400)
         .json({ success: false, error: 'No payment reference found.' });
 
-    // Ask Paystack if this reference was actually paid
     const verifyResponse = await fetch(
       `https://api.paystack.co/transaction/verify/${reference}`,
       {
@@ -1090,7 +1047,6 @@ app.post('/api/tenancies/:id/verify', async (req, res) => {
     const verifyData = await verifyResponse.json();
 
     if (verifyData.data.status === 'success') {
-      // THE MAGIC: If Paystack says yes, lock the contract to Paid!
       await pool.query(
         `UPDATE tenancies SET payment_status = 'Paid' WHERE tenancy_id = $1`,
         [id],
@@ -1112,7 +1068,7 @@ app.post('/api/tenancies/:id/verify', async (req, res) => {
 });
 
 // ==========================================
-// NEW: LANDLORD WALLET & SECURE LEDGER
+// LANDLORD WALLET & SECURE LEDGER
 // ==========================================
 
 // 1. Fetch Wallet Balance and Transaction History
@@ -1120,19 +1076,16 @@ app.get('/api/wallet/:userId', async (req, res) => {
   try {
     const { userId } = req.params;
 
-    // A. Fetch the Secure Wallet Balance
     const walletResult = await pool.query(
       'SELECT balance, total_earned, pending_clearance FROM wallets WHERE user_id = $1',
       [userId],
     );
-
     let wallet = walletResult.rows[0];
-    // If the landlord is new and hasn't earned money yet, default to zero
+
     if (!wallet) {
       wallet = { balance: 0, total_earned: 0, pending_clearance: 0 };
     }
 
-    // B. Fetch the Immutable Transaction History
     const txnResult = await pool.query(
       `SELECT id, type, title, property_ref as property, amount, created_at as date, status 
        FROM transactions 
@@ -1156,7 +1109,7 @@ app.get('/api/wallet/:userId', async (req, res) => {
   }
 });
 
-// 2. Process a Wallet Withdrawal
+// 2. Process a Wallet Withdrawal (Fixed: Syncs with Wallets correctly)
 app.post('/api/wallet/withdraw', async (req, res) => {
   const client = await pool.connect();
   try {
@@ -1169,9 +1122,8 @@ app.post('/api/wallet/withdraw', async (req, res) => {
         .json({ success: false, error: 'Invalid withdrawal amount' });
     }
 
-    await client.query('BEGIN'); // Start secure transaction
+    await client.query('BEGIN');
 
-    // A. Lock the row and check the balance
     const walletResult = await client.query(
       'SELECT balance FROM wallets WHERE user_id = $1 FOR UPDATE',
       [userId],
@@ -1187,13 +1139,11 @@ app.post('/api/wallet/withdraw', async (req, res) => {
         .json({ success: false, error: 'Insufficient funds' });
     }
 
-    // B. Deduct the balance
     await client.query(
       'UPDATE wallets SET balance = balance - $1, updated_at = CURRENT_TIMESTAMP WHERE user_id = $2',
       [withdrawAmount, userId],
     );
 
-    // C. Write the receipt to the Immutable Ledger
     const propertyRef = `To ${bankName} (${accountNumber.slice(-4)})`;
     const txnResult = await client.query(
       `INSERT INTO transactions (user_id, type, title, property_ref, amount, status) 
@@ -1201,7 +1151,7 @@ app.post('/api/wallet/withdraw', async (req, res) => {
       [userId, propertyRef, -withdrawAmount],
     );
 
-    await client.query('COMMIT'); // Save everything permanently
+    await client.query('COMMIT');
 
     res.json({
       success: true,
@@ -1220,10 +1170,10 @@ app.post('/api/wallet/withdraw', async (req, res) => {
 });
 
 // ==========================================
-// MAINTENANCE REQUESTS ROUTES (MASTER SCHEMA)
+// MAINTENANCE REQUESTS ROUTES
 // ==========================================
 
-// 1. Get all requests for a user (Renter or Landlord)
+// 1. Get all requests for a user
 app.get('/api/maintenance/:userId', async (req, res) => {
   try {
     const { userId } = req.params;
@@ -1249,7 +1199,6 @@ app.post('/api/maintenance', async (req, res) => {
   try {
     const { renter_id, category, title, description, media_url } = req.body;
 
-    // Auto-lookup the active property & owner based on signed tenancies
     const tenancyResult = await pool.query(
       `SELECT tenancy_id, property_id, owner_id FROM tenancies 
        WHERE renter_id = $1 AND status = 'Signed' 
@@ -1258,11 +1207,9 @@ app.post('/api/maintenance', async (req, res) => {
     );
 
     if (tenancyResult.rows.length === 0) {
-      return res.status(400).json({
-        success: false,
-        error:
-          'No active tenancy found. You must have a signed lease to report maintenance.',
-      });
+      return res
+        .status(400)
+        .json({ success: false, error: 'No active tenancy found.' });
     }
 
     const { tenancy_id, property_id, owner_id } = tenancyResult.rows[0];
@@ -1282,13 +1229,11 @@ app.post('/api/maintenance', async (req, res) => {
       ],
     );
 
-    // Fetch the property title to return to the frontend immediately
     const propResult = await pool.query(
       'SELECT title FROM properties WHERE property_id = $1',
       [property_id],
     );
 
-    // Map to the format the frontend expects
     const newTicket = {
       id: result.rows[0].request_id,
       category: result.rows[0].category,
@@ -1315,7 +1260,6 @@ app.put('/api/maintenance/:id', async (req, res) => {
     const { id } = req.params;
     const { status } = req.body;
 
-    // If marking as resolved, timestamp it
     let query = `UPDATE maintenance_requests SET status = $1 WHERE request_id = $2 RETURNING *`;
     if (status === 'Resolved') {
       query = `UPDATE maintenance_requests SET status = $1, date_resolved = CURRENT_TIMESTAMP WHERE request_id = $2 RETURNING *`;
