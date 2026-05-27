@@ -662,6 +662,102 @@ app.put('/api/viewings/:id', async (req, res) => {
   }
 });
 
+// 3. Validate Secure Handshake (Owner scans Renter's QR/PIN) <-- STRICTLY ISOLATED NEW ROUTE
+app.post('/api/viewings/:id/validate', async (req, res) => {
+  const client = await pool.connect();
+
+  try {
+    const { id } = req.params;
+    const { pin, owner_lat, owner_lng } = req.body;
+
+    if (!pin) {
+      return res
+        .status(400)
+        .json({ success: false, error: 'Handshake PIN is required.' });
+    }
+
+    await client.query('BEGIN'); // Start a secure transaction lock
+
+    // Step 1: Fetch the active viewing
+    const viewingResult = await client.query(
+      `SELECT secure_handshake_pin, pin_expiry, status 
+       FROM viewings WHERE viewing_id = $1 FOR UPDATE`,
+      [id],
+    );
+
+    if (viewingResult.rows.length === 0) {
+      await client.query('ROLLBACK');
+      return res
+        .status(404)
+        .json({ success: false, error: 'Viewing session not found.' });
+    }
+
+    const viewing = viewingResult.rows[0];
+
+    // Step 2: Validate the State
+    if (viewing.status !== 'Accepted') {
+      await client.query('ROLLBACK');
+      return res
+        .status(400)
+        .json({
+          success: false,
+          error: 'This viewing is not currently active or accepted.',
+        });
+    }
+
+    // Step 3: Validate the Expiration Timer
+    const now = new Date();
+    const expiry = new Date(viewing.pin_expiry);
+    if (now > expiry) {
+      await client.query('ROLLBACK');
+      return res
+        .status(400)
+        .json({
+          success: false,
+          error:
+            'This handshake PIN has expired. The renter must refresh their app.',
+        });
+    }
+
+    // Step 4: Validate the Cryptographic PIN
+    if (viewing.secure_handshake_pin !== pin.toString()) {
+      await client.query('ROLLBACK');
+      return res
+        .status(400)
+        .json({
+          success: false,
+          error: 'Invalid handshake PIN. Verification failed.',
+        });
+    }
+
+    // Step 5: Success! Update Status and log check-in location
+    const updateResult = await client.query(
+      `UPDATE viewings 
+       SET status = 'Completed', 
+           owner_checkin_location = point($2, $3),
+           updated_at = CURRENT_TIMESTAMP 
+       WHERE viewing_id = $1 RETURNING *`,
+      [id, owner_lng || 0, owner_lat || 0], // Geolocation fallback to 0 if not passed
+    );
+
+    await client.query('COMMIT');
+
+    res.json({
+      success: true,
+      message: 'Secure Handshake verified! Viewing officially completed.',
+      viewing: updateResult.rows[0],
+    });
+  } catch (err) {
+    await client.query('ROLLBACK');
+    console.error('Handshake Validation Error:', err);
+    res
+      .status(500)
+      .json({ success: false, error: 'Internal validation error.' });
+  } finally {
+    client.release();
+  }
+});
+
 // ==========================================
 // FORMAL APPLICATION ROUTES
 // ==========================================
