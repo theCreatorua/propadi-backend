@@ -41,9 +41,7 @@ const pool = new Pool({
 // AUTHENTICATION & USER ROUTES
 // ==========================================
 
-// 1. Sync User Profile (Post-Supabase Auth)
 app.post('/api/auth/register', async (req, res) => {
-  // Requires user_id passed from Supabase frontend auth
   const { user_id, email, name } = req.body;
 
   try {
@@ -56,13 +54,11 @@ app.post('/api/auth/register', async (req, res) => {
         .json({ success: false, error: 'Email is already registered' });
     }
 
-    // Insert into 'users' strictly mapping to the master schema
     const newUser = await pool.query(
       'INSERT INTO users (user_id, email, name) VALUES ($1, $2, $3) RETURNING user_id, email, name',
       [user_id, email, name],
     );
 
-    // Initialize Wallet to comply with the 12-table master architecture
     await pool.query('INSERT INTO wallets (user_id, balance) VALUES ($1, 0)', [
       user_id,
     ]);
@@ -78,7 +74,6 @@ app.post('/api/auth/register', async (req, res) => {
   }
 });
 
-// 2. Deposit / Fund Vault (Fixed: Syncs with Wallets and Transactions Tables)
 app.post('/api/user/deposit', async (req, res) => {
   const { userId, amount } = req.body;
 
@@ -120,7 +115,6 @@ app.post('/api/user/deposit', async (req, res) => {
   }
 });
 
-// 3. Request Withdrawal (Fixed: Checks Wallets Table before Withdrawal)
 app.post('/api/user/withdraw', async (req, res) => {
   const { userId, amount, email, bankName, accountNumber } = req.body;
 
@@ -174,7 +168,6 @@ app.post('/api/user/withdraw', async (req, res) => {
   }
 });
 
-// 4. Get user dashboard data (Fixed: Pulls from Wallets schema)
 app.get('/api/user/dashboard/:id', async (req, res) => {
   try {
     const { id } = req.params;
@@ -198,7 +191,6 @@ app.get('/api/user/dashboard/:id', async (req, res) => {
   }
 });
 
-// 5. Get User Profile Details (Fixed: Joins Users and Wallets)
 app.get('/api/user/profile/:userId', async (req, res) => {
   const { userId } = req.params;
 
@@ -226,7 +218,6 @@ app.get('/api/user/profile/:userId', async (req, res) => {
 // PROPADI TRUST & KYC ENGINE
 // ==========================================
 
-// 1. Get a user's current KYC Tier and Trust Status
 app.get('/api/users/:id/trust', async (req, res) => {
   try {
     const { id } = req.params;
@@ -248,7 +239,6 @@ app.get('/api/users/:id/trust', async (req, res) => {
   }
 });
 
-// 2. Upgrade to Tier 2 (NIN Verification)
 app.post('/api/users/:id/verify-nin', async (req, res) => {
   try {
     const { id } = req.params;
@@ -277,10 +267,9 @@ app.post('/api/users/:id/verify-nin', async (req, res) => {
 });
 
 // ==========================================
-// PROPERTIES ROUTES (CLEANED & DEDUPLICATED)
+// PROPERTIES ROUTES
 // ==========================================
 
-// 1. GET ALL ROUTE (For the Renter's Home Feed)
 app.get('/api/properties', async (req, res) => {
   try {
     const query = `SELECT * FROM properties WHERE status = 'Available' ORDER BY date_listed DESC;`;
@@ -292,12 +281,10 @@ app.get('/api/properties', async (req, res) => {
   }
 });
 
-// 2. GET SINGLE ROUTE (For the Property Details & Visual Verification)
 app.get('/api/properties/:id', async (req, res) => {
   try {
     const { id } = req.params;
 
-    // Step A: Get the core property
     const propQuery = `SELECT * FROM properties WHERE property_id = $1;`;
     const propResult = await pool.query(propQuery, [id]);
 
@@ -309,7 +296,6 @@ app.get('/api/properties/:id', async (req, res) => {
 
     const property = propResult.rows[0];
 
-    // Step B: Get the visually verified amenities
     const amenitiesQuery = `SELECT * FROM properties_amenities WHERE property_id = $1;`;
     const amenitiesResult = await pool.query(amenitiesQuery, [id]);
 
@@ -324,7 +310,6 @@ app.get('/api/properties/:id', async (req, res) => {
   }
 });
 
-// 3. POST ROUTE: Create a new property listing AND its visually verified amenities
 app.post('/api/properties', async (req, res) => {
   const client = await pool.connect();
 
@@ -421,7 +406,6 @@ app.post('/api/properties', async (req, res) => {
 // ADMIN ROUTES
 // ==========================================
 
-// 1. Get all withdrawals
 app.get('/api/admin/withdrawals', async (req, res) => {
   try {
     const result = await pool.query(
@@ -434,7 +418,6 @@ app.get('/api/admin/withdrawals', async (req, res) => {
   }
 });
 
-// 2. Mark withdrawal as Paid, DEDUCT BALANCE, and send email (Fixed for Wallets)
 app.put('/api/admin/withdrawals/:id', async (req, res) => {
   const { id } = req.params;
   const { status } = req.body;
@@ -487,7 +470,6 @@ app.put('/api/admin/withdrawals/:id', async (req, res) => {
 // MESSAGING ROUTES
 // ==========================================
 
-// 1. Send a new message
 app.post('/api/messages', async (req, res) => {
   try {
     const { property_id, sender_id, receiver_id, content } = req.body;
@@ -505,7 +487,6 @@ app.post('/api/messages', async (req, res) => {
   }
 });
 
-// 2. Get chat history between two users for a specific property
 app.get('/api/messages/:property_id/:user1_id/:user2_id', async (req, res) => {
   try {
     const { property_id, user1_id, user2_id } = req.params;
@@ -527,7 +508,6 @@ app.get('/api/messages/:property_id/:user1_id/:user2_id', async (req, res) => {
   }
 });
 
-// 3. GET INBOX
 app.get('/api/inbox/:userId', async (req, res) => {
   try {
     const { userId } = req.params;
@@ -571,7 +551,6 @@ app.get('/api/inbox/:userId', async (req, res) => {
 // VIEWING TRACKER ROUTES
 // ==========================================
 
-// 1. Request a New Viewing
 app.post('/api/viewings', async (req, res) => {
   try {
     const { property_id, renter_id, landlord_id, viewing_date } = req.body;
@@ -611,11 +590,18 @@ app.post('/api/viewings', async (req, res) => {
   }
 });
 
-// 2. Update Viewing Status (Accept/Decline) & Generate Secure Handshake PIN
+// ISOLATED UPDATE: Automatically insert an "In Progress" ledger message into the chat.
 app.put('/api/viewings/:id', async (req, res) => {
   try {
     const { id } = req.params;
     const { status } = req.body;
+
+    // Look up the viewing to get context for the chat message
+    const viewData = await pool.query(
+      'SELECT property_id, owner_id, renter_id FROM viewings WHERE viewing_id = $1',
+      [id],
+    );
+    const v = viewData.rows[0];
 
     let query;
     let values;
@@ -629,6 +615,19 @@ app.put('/api/viewings/:id', async (req, res) => {
                SET status = $1, secure_handshake_pin = $2, pin_expiry = $3 
                WHERE viewing_id = $4 RETURNING *`;
       values = [status, securePin, expiryTime.toISOString(), id];
+
+      // Inject Ledger Message
+      if (v) {
+        await pool.query(
+          `INSERT INTO messages (property_id, sender_id, receiver_id, content) VALUES ($1, $2, $3, $4)`,
+          [
+            v.property_id,
+            v.owner_id,
+            v.renter_id,
+            `⏳ **Viewing In Progress:** Both parties have agreed. Awaiting physical Secure Handshake.`,
+          ],
+        );
+      }
     } else {
       query = `UPDATE viewings SET status = $1 WHERE viewing_id = $2 RETURNING *`;
       values = [status, id];
@@ -644,7 +643,7 @@ app.put('/api/viewings/:id', async (req, res) => {
   }
 });
 
-// 3. Validate Secure Handshake (Fixed: Location Types TEXT instead of POINT error)
+// ISOLATED UPDATE: Automatically insert a "Completed" ledger message into the chat.
 app.post('/api/viewings/:id/validate', async (req, res) => {
   const client = await pool.connect();
 
@@ -661,7 +660,7 @@ app.post('/api/viewings/:id/validate', async (req, res) => {
     await client.query('BEGIN');
 
     const viewingResult = await client.query(
-      `SELECT secure_handshake_pin, pin_expiry, status 
+      `SELECT secure_handshake_pin, pin_expiry, status, property_id, owner_id, renter_id 
        FROM viewings WHERE viewing_id = $1 FOR UPDATE`,
       [id],
     );
@@ -687,6 +686,17 @@ app.post('/api/viewings/:id/validate', async (req, res) => {
     const expiry = new Date(viewing.pin_expiry);
     if (now > expiry) {
       await client.query('ROLLBACK');
+      // Inject Failed Ledger Message
+      await client.query(
+        `INSERT INTO messages (property_id, sender_id, receiver_id, content) VALUES ($1, $2, $3, $4)`,
+        [
+          viewing.property_id,
+          viewing.owner_id,
+          viewing.renter_id,
+          `❌ **Viewing Failed:** The Secure Handshake PIN expired before verification.`,
+        ],
+      );
+      await client.query('COMMIT');
       return res.status(400).json({
         success: false,
         error:
@@ -702,7 +712,6 @@ app.post('/api/viewings/:id/validate', async (req, res) => {
       });
     }
 
-    // Fixed mapping: Schema uses TEXT for owner_checkin_location
     const updateResult = await client.query(
       `UPDATE viewings 
        SET status = 'Completed', 
@@ -710,6 +719,17 @@ app.post('/api/viewings/:id/validate', async (req, res) => {
            updated_at = CURRENT_TIMESTAMP 
        WHERE viewing_id = $1 RETURNING *`,
       [id, `${owner_lat},${owner_lng}`],
+    );
+
+    // Inject Success Ledger Message
+    await client.query(
+      `INSERT INTO messages (property_id, sender_id, receiver_id, content) VALUES ($1, $2, $3, $4)`,
+      [
+        viewing.property_id,
+        viewing.owner_id,
+        viewing.renter_id,
+        `✅ **Secure Viewing Completed Successfully.** The physical property inspection has been verified.`,
+      ],
     );
 
     await client.query('COMMIT');
@@ -734,7 +754,6 @@ app.post('/api/viewings/:id/validate', async (req, res) => {
 // FORMAL APPLICATION ROUTES
 // ==========================================
 
-// Submit a new application
 app.post('/api/applications', async (req, res) => {
   try {
     const {
@@ -768,7 +787,6 @@ app.post('/api/applications', async (req, res) => {
   }
 });
 
-// 1. Fetch all applications for a specific landlord
 app.get('/api/applications/owner/:owner_id', async (req, res) => {
   try {
     const { owner_id } = req.params;
@@ -793,7 +811,6 @@ app.get('/api/applications/owner/:owner_id', async (req, res) => {
   }
 });
 
-// 2. Accept or Decline an Application (WITH SMART CONTRACT DATE MATH)
 app.put('/api/applications/:id', async (req, res) => {
   try {
     const { id } = req.params;
@@ -850,7 +867,6 @@ app.put('/api/applications/:id', async (req, res) => {
 // SMART CONTRACT & TENANCY ROUTES
 // ==========================================
 
-// 1. Fetch a specific Tenancy Agreement with all details
 app.get('/api/tenancies/:id', async (req, res) => {
   try {
     const { id } = req.params;
@@ -883,7 +899,6 @@ app.get('/api/tenancies/:id', async (req, res) => {
   }
 });
 
-// 2. Electronically Sign the Agreement
 app.put('/api/tenancies/:id/sign', async (req, res) => {
   try {
     const { id } = req.params;
@@ -902,7 +917,6 @@ app.put('/api/tenancies/:id/sign', async (req, res) => {
   }
 });
 
-// 3. Fetch all applications for a specific RENTER
 app.get('/api/applications/renter/:renter_id', async (req, res) => {
   try {
     const { renter_id } = req.params;
@@ -927,7 +941,6 @@ app.get('/api/applications/renter/:renter_id', async (req, res) => {
   }
 });
 
-// 4. Check if a Renter has already applied for a specific property
 app.get('/api/applications/check/:property_id/:renter_id', async (req, res) => {
   try {
     const { property_id, renter_id } = req.params;
@@ -958,7 +971,6 @@ app.get('/api/applications/check/:property_id/:renter_id', async (req, res) => {
 // PAYSTACK PAYMENT INTEGRATION
 // ==========================================
 
-// 1. Initialize a Paystack Transaction
 app.post('/api/tenancies/:id/pay', async (req, res) => {
   try {
     const { id } = req.params;
@@ -1020,7 +1032,6 @@ app.post('/api/tenancies/:id/pay', async (req, res) => {
   }
 });
 
-// 2. Verify the Payment
 app.post('/api/tenancies/:id/verify', async (req, res) => {
   try {
     const { id } = req.params;
@@ -1071,7 +1082,6 @@ app.post('/api/tenancies/:id/verify', async (req, res) => {
 // LANDLORD WALLET & SECURE LEDGER
 // ==========================================
 
-// 1. Fetch Wallet Balance and Transaction History
 app.get('/api/wallet/:userId', async (req, res) => {
   try {
     const { userId } = req.params;
@@ -1109,7 +1119,6 @@ app.get('/api/wallet/:userId', async (req, res) => {
   }
 });
 
-// 2. Process a Wallet Withdrawal (Fixed: Syncs with Wallets correctly)
 app.post('/api/wallet/withdraw', async (req, res) => {
   const client = await pool.connect();
   try {
@@ -1173,7 +1182,6 @@ app.post('/api/wallet/withdraw', async (req, res) => {
 // MAINTENANCE REQUESTS ROUTES
 // ==========================================
 
-// 1. Get all requests for a user
 app.get('/api/maintenance/:userId', async (req, res) => {
   try {
     const { userId } = req.params;
@@ -1194,7 +1202,6 @@ app.get('/api/maintenance/:userId', async (req, res) => {
   }
 });
 
-// 2. Create a new request (Renter)
 app.post('/api/maintenance', async (req, res) => {
   try {
     const { renter_id, category, title, description, media_url } = req.body;
@@ -1254,7 +1261,6 @@ app.post('/api/maintenance', async (req, res) => {
   }
 });
 
-// 3. Update request status (Landlord)
 app.put('/api/maintenance/:id', async (req, res) => {
   try {
     const { id } = req.params;
