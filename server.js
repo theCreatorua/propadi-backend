@@ -744,7 +744,7 @@ app.post('/api/viewings/:id/validate', async (req, res) => {
   }
 });
 
-// ISOLATED UPDATE: The Active Trust & Audit Engine Processing Route
+// The Active Trust & Audit Engine Processing Route (FIXED: Typo in user_id param)
 app.post('/api/viewings/:id/audit', async (req, res) => {
   const client = await pool.connect();
   try {
@@ -786,8 +786,9 @@ app.post('/api/viewings/:id/audit', async (req, res) => {
         [penalty, v.owner_id],
       );
     } else if (totalCount > 0 && missingCount === 0) {
+      // FIXED: Changed $2 to $1 in the query string
       await client.query(
-        'UPDATE users SET renter_score = renter_score + 2 WHERE user_id = $2',
+        'UPDATE users SET renter_score = renter_score + 2 WHERE user_id = $1',
         [v.owner_id],
       );
     }
