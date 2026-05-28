@@ -5,7 +5,7 @@ const crypto = require('crypto');
 // Initialize Supabase for Storage uploads
 const supabase = createClient(
   process.env.SUPABASE_URL,
-  process.env.SUPABASE_SERVICE_ROLE_KEY, // <-- The VIP Admin Key!
+  process.env.SUPABASE_SERVICE_ROLE_KEY,
 );
 const express = require('express');
 const cors = require('cors');
@@ -28,10 +28,8 @@ console.log(
   process.env.RESEND_API_KEY ? process.env.RESEND_API_KEY.length : 0,
 );
 
-// Initialize Resend
 const resend = new Resend(process.env.RESEND_API_KEY);
 
-// Database Connection (Supabase PostgreSQL)
 const pool = new Pool({
   connectionString: process.env.DATABASE_URL,
   ssl: { rejectUnauthorized: false },
@@ -744,7 +742,6 @@ app.post('/api/viewings/:id/validate', async (req, res) => {
   }
 });
 
-// The Active Trust & Audit Engine Processing Route (FIXED: Typo in user_id param)
 app.post('/api/viewings/:id/audit', async (req, res) => {
   const client = await pool.connect();
   try {
@@ -786,7 +783,6 @@ app.post('/api/viewings/:id/audit', async (req, res) => {
         [penalty, v.owner_id],
       );
     } else if (totalCount > 0 && missingCount === 0) {
-      // FIXED: Changed $2 to $1 in the query string
       await client.query(
         'UPDATE users SET renter_score = renter_score + 2 WHERE user_id = $1',
         [v.owner_id],
@@ -836,6 +832,7 @@ app.post('/api/viewings/:id/audit', async (req, res) => {
 // FORMAL APPLICATION ROUTES
 // ==========================================
 
+// ISOLATED UPDATE: Added is_sight_unseen payload reception
 app.post('/api/applications', async (req, res) => {
   try {
     const {
@@ -845,11 +842,12 @@ app.post('/api/applications', async (req, res) => {
       proposed_rent,
       cover_letter,
       move_in_date,
+      is_sight_unseen,
     } = req.body;
 
     const result = await pool.query(
-      `INSERT INTO applications (property_id, renter_id, owner_id, proposed_rent, cover_letter, move_in_date) 
-       VALUES ($1, $2, $3, $4, $5, $6) RETURNING *`,
+      `INSERT INTO applications (property_id, renter_id, owner_id, proposed_rent, cover_letter, move_in_date, is_sight_unseen) 
+       VALUES ($1, $2, $3, $4, $5, $6, $7) RETURNING *`,
       [
         property_id,
         renter_id,
@@ -857,6 +855,7 @@ app.post('/api/applications', async (req, res) => {
         proposed_rent,
         cover_letter,
         move_in_date || 'Immediately',
+        is_sight_unseen || false,
       ],
     );
 
@@ -874,7 +873,7 @@ app.get('/api/applications/owner/:owner_id', async (req, res) => {
     const { owner_id } = req.params;
     const result = await pool.query(
       `SELECT 
-         a.application_id, a.property_id, a.proposed_rent, a.cover_letter, a.status, a.date_applied,
+         a.application_id, a.property_id, a.proposed_rent, a.cover_letter, a.status, a.date_applied, a.is_sight_unseen,
          u.user_id as renter_id, u.name, u.profile_picture_url, u.role, u.renter_score, u.kyc_status, u.occupation, u.email,
          p.title as property_title
        FROM applications a
@@ -893,6 +892,7 @@ app.get('/api/applications/owner/:owner_id', async (req, res) => {
   }
 });
 
+// ISOLATED UPDATE: Carries is_sight_unseen from application to tenancy
 app.put('/api/applications/:id', async (req, res) => {
   try {
     const { id } = req.params;
@@ -922,8 +922,8 @@ app.put('/api/applications/:id', async (req, res) => {
       const sqlEndDate = end.toISOString().split('T')[0];
 
       await pool.query(
-        `INSERT INTO tenancies (application_id, property_id, renter_id, owner_id, rent_amount, rent_period, lease_start_date, lease_end_date, status) 
-         VALUES ($1, $2, $3, $4, $5, 'Per Annum', $6, $7, 'Draft')`,
+        `INSERT INTO tenancies (application_id, property_id, renter_id, owner_id, rent_amount, rent_period, lease_start_date, lease_end_date, status, is_sight_unseen) 
+         VALUES ($1, $2, $3, $4, $5, 'Per Annum', $6, $7, 'Draft', $8)`,
         [
           application.application_id,
           application.property_id,
@@ -932,6 +932,7 @@ app.put('/api/applications/:id', async (req, res) => {
           application.proposed_rent,
           sqlStartDate,
           sqlEndDate,
+          application.is_sight_unseen,
         ],
       );
     }
