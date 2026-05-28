@@ -414,6 +414,56 @@ app.post('/api/applications', async (req, res) => {
   }
 });
 
+// --- RESTORED: GET Landlord's Applications ---
+app.get('/api/applications/owner/:owner_id', async (req, res) => {
+  try {
+    const { owner_id } = req.params;
+    const result = await pool.query(
+      `SELECT 
+         a.application_id, a.property_id, a.proposed_rent, a.cover_letter, a.status, a.date_applied, a.is_sight_unseen,
+         u.user_id as renter_id, u.name, u.profile_picture_url, u.role, u.renter_score, u.kyc_status, u.occupation, u.email,
+         p.title as property_title
+       FROM applications a
+       JOIN users u ON a.renter_id = u.user_id
+       JOIN properties p ON a.property_id = p.property_id
+       WHERE a.owner_id = $1
+       ORDER BY a.date_applied DESC`,
+      [owner_id],
+    );
+    res.json({ success: true, applications: result.rows });
+  } catch (err) {
+    console.error('Error fetching applications:', err);
+    res
+      .status(500)
+      .json({ success: false, error: 'Failed to load applications' });
+  }
+});
+
+// --- RESTORED: GET Renter's Applications ---
+app.get('/api/applications/renter/:renter_id', async (req, res) => {
+  try {
+    const { renter_id } = req.params;
+    const result = await pool.query(
+      `SELECT 
+         a.application_id, a.property_id, a.proposed_rent, a.status, a.date_applied,
+         p.title as property_title, p.address_street, p.address_city,
+         t.tenancy_id
+       FROM applications a
+       JOIN properties p ON a.property_id = p.property_id
+       LEFT JOIN tenancies t ON a.application_id = t.application_id
+       WHERE a.renter_id = $1
+       ORDER BY a.date_applied DESC`,
+      [renter_id],
+    );
+    res.json({ success: true, applications: result.rows });
+  } catch (err) {
+    console.error('Error fetching renter applications:', err);
+    res
+      .status(500)
+      .json({ success: false, error: 'Failed to load your applications' });
+  }
+});
+
 app.put('/api/applications/:id', async (req, res) => {
   try {
     const { id } = req.params;
