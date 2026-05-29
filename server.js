@@ -1590,7 +1590,7 @@ app.get('/api/tenancies/renewals/:userId', async (req, res) => {
        WHERE t.renter_id = $1 
          AND t.renewal_of_tenancy_id IS NOT NULL 
          AND t.renewal_status = 'Pending'
-       ORDER BY t.created_at DESC`,
+       ORDER BY t.date_created DESC`,
       [userId],
     );
     res.json({ success: true, renewals: result.rows });
