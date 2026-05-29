@@ -1175,9 +1175,11 @@ app.post('/api/tenancies/:id/verify', async (req, res) => {
     }
   } catch (err) {
     await client.query('ROLLBACK');
+    console.error('ESCROW CRASH:', err); // Logs to your backend terminal
     res.status(500).json({
       success: false,
-      error: 'Failed to verify payment and process ledgers',
+      status: 'Database Crash',
+      message: err.message, // Sends the exact SQL error to your phone screen
     });
   } finally {
     client.release();
