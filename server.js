@@ -1020,6 +1020,28 @@ app.get('/api/tenancies/:id', async (req, res) => {
   }
 });
 
+// ✅ LIGHTWEIGHT STATUS POLL – no Paystack call, just DB read
+app.get('/api/tenancies/:id/status', async (req, res) => {
+  try {
+    const { id } = req.params;
+    const result = await pool.query(
+      `SELECT payment_status, status FROM tenancies WHERE tenancy_id = $1`,
+      [id],
+    );
+    if (result.rows.length === 0) {
+      return res.status(404).json({ success: false, error: 'Not found' });
+    }
+    res.json({
+      success: true,
+      payment_status: result.rows[0].payment_status,
+      tenancy_status: result.rows[0].status,
+    });
+  } catch (err) {
+    console.error('Status poll error:', err);
+    res.status(500).json({ success: false, error: 'Server error' });
+  }
+});
+
 app.put('/api/tenancies/:id/sign', async (req, res) => {
   try {
     const { id } = req.params;
@@ -1175,12 +1197,12 @@ app.post('/api/tenancies/:id/verify', async (req, res) => {
     }
   } catch (err) {
     await client.query('ROLLBACK');
-    console.error('ESCROW ERROR (Internal):', err); // Keeps the raw error in your server logs
+    console.error('ESCROW ERROR (Internal):', err);
     res.status(500).json({
       success: false,
       status: 'Transaction Error',
       message:
-        'An error occurred while securing your ledger. Please contact Propadi Support.', // Safe, generic public message
+        'An error occurred while securing your ledger. Please contact Propadi Support.',
     });
   } finally {
     client.release();
@@ -1191,7 +1213,6 @@ app.post('/api/tenancies/:id/verify', async (req, res) => {
 // PAYSTACK WEBHOOK LISTENER (AUTOMATED ESCROW)
 // ==========================================
 app.post('/api/webhook/paystack', async (req, res) => {
-  // 1. Validate the Paystack Signature to ensure hackers can't fake payments
   const hash = crypto
     .createHmac('sha512', process.env.PAYSTACK_SECRET_KEY)
     .update(JSON.stringify(req.body))
@@ -1203,16 +1224,14 @@ app.post('/api/webhook/paystack', async (req, res) => {
 
   const event = req.body;
 
-  // 2. We only care when money successfully lands
   if (event.event === 'charge.success') {
     const tenancyId = event.data.metadata?.tenancy_id;
     if (!tenancyId) return res.status(200).send('No tenancy ID, ignored.');
 
     const client = await pool.connect();
     try {
-      await client.query('BEGIN'); // Start safe database transaction
+      await client.query('BEGIN');
 
-      // 3. PREVENT DOUBLE-CREDITING: Check if the user already clicked the manual "Verify" button
       const checkResult = await client.query(
         `SELECT payment_status, rent_amount, renter_id, owner_id FROM tenancies WHERE tenancy_id = $1 FOR UPDATE`,
         [tenancyId],
@@ -1224,13 +1243,11 @@ app.post('/api/webhook/paystack', async (req, res) => {
         return res.status(200).send('Ledger already updated');
       }
 
-      // 4. Update Tenancy Status
       await client.query(
         `UPDATE tenancies SET payment_status = 'Paid', payment_reference = $1 WHERE tenancy_id = $2`,
         [event.data.reference, tenancyId],
       );
 
-      // 5. Calculate transparent gateway fees
       const rentAmount = parseFloat(tenancy.rent_amount);
       let gatewayFee = rentAmount * 0.015 + 100;
       if (gatewayFee > 2000) gatewayFee = 2000;
@@ -1241,7 +1258,6 @@ app.post('/api/webhook/paystack', async (req, res) => {
       );
       const propertyTitle = propQuery.rows[0]?.title || 'Propadi Property';
 
-      // 6. Execute Multi-Party Ledger Updates automatically
       await client.query(
         `INSERT INTO transactions (user_id, type, title, property_ref, amount, status) VALUES ($1, 'payment', 'Annual Rent Payment', $2, $3, 'Completed')`,
         [tenancy.renter_id, propertyTitle, -rentAmount],
@@ -1274,7 +1290,6 @@ app.post('/api/webhook/paystack', async (req, res) => {
     }
   }
 
-  // Always return 200 OK so Paystack knows we got the message and doesn't retry
   res.status(200).send('Webhook received successfully');
 });
 
@@ -1282,7 +1297,6 @@ app.post('/api/webhook/paystack', async (req, res) => {
 // ROLE-BASED WALLET & LEDGER ROUTES
 // ==========================================
 
-// Landlord Wallet Read Route
 app.get('/api/wallet/:userId', async (req, res) => {
   try {
     const { userId } = req.params;
@@ -1310,7 +1324,6 @@ app.get('/api/wallet/:userId', async (req, res) => {
   }
 });
 
-// Tenant Wallet Read Route
 app.get('/api/tenant-wallet/:userId', async (req, res) => {
   try {
     const { userId } = req.params;
@@ -1346,7 +1359,6 @@ app.get('/api/tenant-wallet/:userId', async (req, res) => {
   }
 });
 
-// Landlord Withdrawal Route
 app.post('/api/wallet/withdraw', async (req, res) => {
   const client = await pool.connect();
   try {
