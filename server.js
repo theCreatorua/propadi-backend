@@ -1175,11 +1175,12 @@ app.post('/api/tenancies/:id/verify', async (req, res) => {
     }
   } catch (err) {
     await client.query('ROLLBACK');
-    console.error('ESCROW CRASH:', err); // Logs to your backend terminal
+    console.error('ESCROW ERROR (Internal):', err); // Keeps the raw error in your server logs
     res.status(500).json({
       success: false,
-      status: 'Database Crash',
-      message: err.message, // Sends the exact SQL error to your phone screen
+      status: 'Transaction Error',
+      message:
+        'An error occurred while securing your ledger. Please contact Propadi Support.', // Safe, generic public message
     });
   } finally {
     client.release();
