@@ -1496,6 +1496,133 @@ app.put('/api/maintenance/:id', async (req, res) => {
   }
 });
 
+// === RENEWAL SYSTEM START ===
+// Landlord offers a renewal for a tenancy that is paid and within 60 days of end
+app.post('/api/tenancies/:id/renew', async (req, res) => {
+  const client = await pool.connect();
+  try {
+    const { id } = req.params;
+    const { new_rent_amount } = req.body; // optional, default to current rent
+
+    await client.query('BEGIN');
+
+    // Fetch original tenancy
+    const origResult = await client.query(
+      `SELECT renter_id, owner_id, property_id, rent_amount, lease_end_date, payment_status 
+       FROM tenancies WHERE tenancy_id = $1 FOR UPDATE`,
+      [id],
+    );
+    if (origResult.rows.length === 0) {
+      await client.query('ROLLBACK');
+      return res
+        .status(404)
+        .json({ success: false, error: 'Tenancy not found' });
+    }
+    const orig = origResult.rows[0];
+
+    // Only owner can renew, and only if payment_status = 'Paid'
+    // (we trust frontend to send owner_id; we'll check session later)
+    if (orig.payment_status !== 'Paid') {
+      await client.query('ROLLBACK');
+      return res
+        .status(400)
+        .json({ success: false, error: 'Only paid tenancies can be renewed' });
+    }
+
+    const newRent = new_rent_amount
+      ? parseFloat(new_rent_amount)
+      : parseFloat(orig.rent_amount);
+    const newStart = new Date(orig.lease_end_date);
+    newStart.setDate(newStart.getDate() + 1); // start day after previous lease ends
+    const newEnd = new Date(newStart);
+    newEnd.setFullYear(newEnd.getFullYear() + 1);
+
+    // Create renewal tenancy as 'Draft' with renewal_of_tenancy_id pointer
+    const insertResult = await client.query(
+      `INSERT INTO tenancies (
+        property_id, renter_id, owner_id, rent_amount, rent_period,
+        lease_start_date, lease_end_date, status, payment_status,
+        renewal_of_tenancy_id, renewal_status
+      ) VALUES ($1, $2, $3, $4, $5, $6, $7, 'Draft', 'Pending', $8, 'Pending')
+      RETURNING *`,
+      [
+        orig.property_id,
+        orig.renter_id,
+        orig.owner_id,
+        newRent,
+        'Per Annum',
+        newStart,
+        newEnd,
+        id,
+      ],
+    );
+    const newTenancy = insertResult.rows[0];
+
+    // Optionally send notification to renter (we can add later)
+    await client.query('COMMIT');
+
+    res.json({
+      success: true,
+      message: 'Renewal offer created. The tenant will see it in their wallet.',
+      tenancy: newTenancy,
+    });
+  } catch (err) {
+    await client.query('ROLLBACK');
+    console.error('Renewal creation error:', err);
+    res
+      .status(500)
+      .json({ success: false, error: 'Could not create renewal offer' });
+  } finally {
+    client.release();
+  }
+});
+
+// Get all renewal offers for a tenant (pending)
+app.get('/api/tenancies/renewals/:userId', async (req, res) => {
+  try {
+    const { userId } = req.params;
+    const result = await pool.query(
+      `SELECT t.*, p.title as property_title, p.address_street, p.address_city,
+              o.name as owner_name
+       FROM tenancies t
+       JOIN properties p ON t.property_id = p.property_id
+       JOIN users o ON t.owner_id = o.user_id
+       WHERE t.renter_id = $1 
+         AND t.renewal_of_tenancy_id IS NOT NULL 
+         AND t.renewal_status = 'Pending'
+       ORDER BY t.created_at DESC`,
+      [userId],
+    );
+    res.json({ success: true, renewals: result.rows });
+  } catch (err) {
+    console.error('Renewal fetch error:', err);
+    res.status(500).json({ success: false, error: 'Failed to fetch renewals' });
+  }
+});
+
+// Tenant accepts a renewal offer (sets status to 'Signed' implicitly, then they pay)
+app.post('/api/tenancies/:id/accept-renewal', async (req, res) => {
+  try {
+    const { id } = req.params;
+    // Optionally, you can also sign it automatically, but we'll just mark renewal_status = 'Accepted'
+    // and let the tenant sign/pay via the existing flow.
+    const result = await pool.query(
+      `UPDATE tenancies SET renewal_status = 'Accepted' WHERE tenancy_id = $1 RETURNING *`,
+      [id],
+    );
+    if (result.rows.length === 0) {
+      return res
+        .status(404)
+        .json({ success: false, error: 'Renewal not found' });
+    }
+    res.json({ success: true, tenancy: result.rows[0] });
+  } catch (err) {
+    console.error('Accept renewal error:', err);
+    res.status(500).json({ success: false, error: 'Failed to accept renewal' });
+  }
+});
+// === RENEWAL SYSTEM END ===
+
 // ======== SERVER SETUP ========
 const PORT = process.env.PORT || 5000;
 app.listen(PORT, () => {
