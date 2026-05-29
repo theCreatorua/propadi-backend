@@ -1188,6 +1188,97 @@ app.post('/api/tenancies/:id/verify', async (req, res) => {
 });
 
 // ==========================================
+// PAYSTACK WEBHOOK LISTENER (AUTOMATED ESCROW)
+// ==========================================
+app.post('/api/webhook/paystack', async (req, res) => {
+  // 1. Validate the Paystack Signature to ensure hackers can't fake payments
+  const hash = crypto
+    .createHmac('sha512', process.env.PAYSTACK_SECRET_KEY)
+    .update(JSON.stringify(req.body))
+    .digest('hex');
+
+  if (hash !== req.headers['x-paystack-signature']) {
+    return res.status(400).send('Invalid signature');
+  }
+
+  const event = req.body;
+
+  // 2. We only care when money successfully lands
+  if (event.event === 'charge.success') {
+    const tenancyId = event.data.metadata?.tenancy_id;
+    if (!tenancyId) return res.status(200).send('No tenancy ID, ignored.');
+
+    const client = await pool.connect();
+    try {
+      await client.query('BEGIN'); // Start safe database transaction
+
+      // 3. PREVENT DOUBLE-CREDITING: Check if the user already clicked the manual "Verify" button
+      const checkResult = await client.query(
+        `SELECT payment_status, rent_amount, renter_id, owner_id FROM tenancies WHERE tenancy_id = $1 FOR UPDATE`,
+        [tenancyId],
+      );
+      const tenancy = checkResult.rows[0];
+
+      if (!tenancy || tenancy.payment_status === 'Paid') {
+        await client.query('ROLLBACK');
+        return res.status(200).send('Ledger already updated');
+      }
+
+      // 4. Update Tenancy Status
+      await client.query(
+        `UPDATE tenancies SET payment_status = 'Paid', payment_reference = $1 WHERE tenancy_id = $2`,
+        [event.data.reference, tenancyId],
+      );
+
+      // 5. Calculate transparent gateway fees
+      const rentAmount = parseFloat(tenancy.rent_amount);
+      let gatewayFee = rentAmount * 0.015 + 100;
+      if (gatewayFee > 2000) gatewayFee = 2000;
+
+      const propQuery = await client.query(
+        `SELECT title FROM properties WHERE property_id = (SELECT property_id FROM tenancies WHERE tenancy_id = $1)`,
+        [tenancyId],
+      );
+      const propertyTitle = propQuery.rows[0]?.title || 'Propadi Property';
+
+      // 6. Execute Multi-Party Ledger Updates automatically
+      await client.query(
+        `INSERT INTO transactions (user_id, type, title, property_ref, amount, status) VALUES ($1, 'payment', 'Annual Rent Payment', $2, $3, 'Completed')`,
+        [tenancy.renter_id, propertyTitle, -rentAmount],
+      );
+
+      await client.query(
+        `INSERT INTO transactions (user_id, type, title, property_ref, amount, status) VALUES ($1, 'fee', 'Propadi Secure Gateway Fee', 'Platform Service', $2, 'Completed')`,
+        [tenancy.renter_id, -gatewayFee],
+      );
+
+      await client.query(
+        `INSERT INTO transactions (user_id, type, title, property_ref, amount, status) VALUES ($1, 'credit', 'Rent Payment Received', $2, $3, 'Completed')`,
+        [tenancy.owner_id, propertyTitle, rentAmount],
+      );
+
+      await client.query(
+        `UPDATE wallets SET balance = balance + $1, total_earned = total_earned + $1, updated_at = CURRENT_TIMESTAMP WHERE user_id = $2`,
+        [rentAmount, tenancy.owner_id],
+      );
+
+      await client.query('COMMIT');
+      console.log(
+        `[WEBHOOK SUCCESS] Tenancy ${tenancyId} automatically funded and verified.`,
+      );
+    } catch (error) {
+      await client.query('ROLLBACK');
+      console.error('[WEBHOOK CRASH]', error);
+    } finally {
+      client.release();
+    }
+  }
+
+  // Always return 200 OK so Paystack knows we got the message and doesn't retry
+  res.status(200).send('Webhook received successfully');
+});
+
+// ==========================================
 // ROLE-BASED WALLET & LEDGER ROUTES
 // ==========================================
 
