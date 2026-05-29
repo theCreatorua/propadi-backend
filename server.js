@@ -1621,6 +1621,32 @@ app.post('/api/tenancies/:id/accept-renewal', async (req, res) => {
     res.status(500).json({ success: false, error: 'Failed to accept renewal' });
   }
 });
+
+// Get all tenancies for a landlord (paid and active)
+app.get('/api/tenancies/landlord/:ownerId', async (req, res) => {
+  try {
+    const { ownerId } = req.params;
+    console.log('Fetching tenancies for landlord:', ownerId); // Debug log
+
+    const result = await pool.query(
+      `SELECT t.tenancy_id, t.rent_amount, t.lease_start_date, t.lease_end_date, t.payment_status,
+              p.title as property_title, p.address_street, p.address_city,
+              u.name as renter_name
+       FROM tenancies t
+       JOIN properties p ON t.property_id = p.property_id
+       JOIN users u ON t.renter_id = u.user_id
+       WHERE t.owner_id = $1 AND LOWER(t.payment_status) = 'paid'
+       ORDER BY t.lease_end_date ASC`,
+      [ownerId],
+    );
+    res.json({ success: true, tenancies: result.rows });
+  } catch (err) {
+    console.error('Landlord tenancies fetch error:', err);
+    res
+      .status(500)
+      .json({ success: false, error: 'Failed to fetch tenancies' });
+  }
+});
 // === RENEWAL SYSTEM END ===
 
 // ======== SERVER SETUP ========
