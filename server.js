@@ -1095,6 +1095,7 @@ app.post('/api/tenancies/:id/pay', async (req, res) => {
           email: tenancy.email,
           amount: totalAmountKobo,
           metadata: { tenancy_id: id },
+          callback_url: 'propadi://paystack-return',
         }),
       },
     );
