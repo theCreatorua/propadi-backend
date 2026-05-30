@@ -2,7 +2,6 @@ require('dotenv').config();
 const { createClient } = require('@supabase/supabase-js');
 const crypto = require('crypto');
 
-// Initialize Supabase for Storage uploads
 const supabase = createClient(
   process.env.SUPABASE_URL,
   process.env.SUPABASE_SERVICE_ROLE_KEY,
@@ -103,7 +102,7 @@ app.post('/api/user/deposit', async (req, res) => {
   }
 });
 
-// OLD simulated withdrawal (kept for backward compatibility)
+// Legacy simulated withdrawal (kept for compatibility)
 app.post('/api/user/withdraw', async (req, res) => {
   const { userId, amount, email, bankName, accountNumber } = req.body;
 
@@ -468,6 +467,23 @@ app.post('/api/messages', async (req, res) => {
        VALUES ($1, $2, $3, $4) RETURNING *`,
       [property_id, sender_id, receiver_id, content],
     );
+
+    // === PUSH NOTIFICATION FOR CHAT ===
+    const receiverId = receiver_id;
+    const senderNameQuery = await pool.query(
+      'SELECT name FROM users WHERE user_id = $1',
+      [sender_id],
+    );
+    const senderName = senderNameQuery.rows[0]?.name || 'Someone';
+    const messagePreview =
+      content.length > 50 ? content.substring(0, 50) + '...' : content;
+    await sendPushToUser(
+      receiverId,
+      `💬 New message from ${senderName}`,
+      messagePreview,
+      { screen: 'Chat', property_id, other_user_id: sender_id },
+    );
+    // === END PUSH ===
 
     res.json({ success: true, message: result.rows[0] });
   } catch (err) {
@@ -1021,7 +1037,6 @@ app.get('/api/tenancies/:id', async (req, res) => {
   }
 });
 
-// Lightweight status poll endpoint
 app.get('/api/tenancies/:id/status', async (req, res) => {
   try {
     const { id } = req.params;
@@ -1096,7 +1111,7 @@ app.post('/api/tenancies/:id/pay', async (req, res) => {
           email: tenancy.email,
           amount: totalAmountKobo,
           metadata: { tenancy_id: id },
-          callback_url: 'propadi://paystack-return', // optional
+          callback_url: 'propadi://paystack-return',
         }),
       },
     );
@@ -1282,6 +1297,15 @@ app.post('/api/webhook/paystack', async (req, res) => {
       console.log(
         `[WEBHOOK SUCCESS] Tenancy ${tenancyId} automatically funded and verified.`,
       );
+
+      // === PUSH NOTIFICATION TO LANDLORD ===
+      await sendPushToUser(
+        tenancy.owner_id,
+        '💰 Rent Payment Received',
+        `₦${rentAmount.toLocaleString()} has been added to your wallet for ${propertyTitle}`,
+        { screen: 'LandlordWallet' },
+      );
+      // === END PUSH ===
     } catch (error) {
       await client.query('ROLLBACK');
       console.error('[WEBHOOK CRASH]', error);
@@ -1421,6 +1445,20 @@ app.post('/api/tenancies/:id/renew', async (req, res) => {
 
     await client.query('COMMIT');
 
+    // === PUSH NOTIFICATION FOR RENEWAL OFFER ===
+    const propertyTitleQuery = await pool.query(
+      'SELECT title FROM properties WHERE property_id = $1',
+      [orig.property_id],
+    );
+    const propTitle = propertyTitleQuery.rows[0]?.title || 'your property';
+    await sendPushToUser(
+      orig.renter_id,
+      '📄 Lease Renewal Offer',
+      `You have a renewal offer for ${propTitle}. Accept to sign and pay.`,
+      { screen: 'Tenancy', tenancy_id: newTenancy.tenancy_id },
+    );
+    // === END PUSH ===
+
     res.json({
       success: true,
       message: 'Renewal offer created. The tenant will see it in their wallet.',
@@ -1506,7 +1544,6 @@ app.get('/api/tenancies/landlord/:ownerId', async (req, res) => {
 // PAYOUT ENGINE (Paystack Transfers)
 // ==========================================
 
-// Helper: Create or retrieve a Paystack transfer recipient
 async function getOrCreateRecipient(userId, bankCode, accountNumber, email) {
   const response = await fetch('https://api.paystack.co/transferrecipient', {
     method: 'POST',
@@ -1531,7 +1568,6 @@ async function getOrCreateRecipient(userId, bankCode, accountNumber, email) {
   }
 }
 
-// Landlord withdrawal using Paystack Transfers API
 app.post('/api/wallet/withdraw', async (req, res) => {
   const client = await pool.connect();
   try {
@@ -1590,7 +1626,6 @@ app.post('/api/wallet/withdraw', async (req, res) => {
 
     await client.query('COMMIT');
 
-    // Call Paystack Transfer API
     try {
       const recipientCode = await getOrCreateRecipient(
         userId,
@@ -1683,7 +1718,6 @@ app.post('/api/wallet/withdraw', async (req, res) => {
   }
 });
 
-// Webhook for Paystack transfer updates
 app.post('/api/webhook/paystack-transfer', async (req, res) => {
   const hash = crypto
     .createHmac('sha512', process.env.PAYSTACK_SECRET_KEY)
@@ -1713,6 +1747,67 @@ app.post('/api/webhook/paystack-transfer', async (req, res) => {
     );
   }
   res.sendStatus(200);
+});
+
+// ==========================================
+// PUSH NOTIFICATIONS HELPERS & ENDPOINT
+// ==========================================
+
+async function sendPushToUser(userId, title, body, data = {}) {
+  try {
+    const { rows } = await pool.query(
+      'SELECT token FROM user_push_tokens WHERE user_id = $1',
+      [userId],
+    );
+    if (rows.length === 0) return;
+
+    const messages = rows.map((row) => ({
+      to: row.token,
+      sound: 'default',
+      title,
+      body,
+      data,
+    }));
+
+    const expoResponse = await fetch('https://exp.host/--/api/v2/push/send', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(messages),
+    });
+    const result = await expoResponse.json();
+    if (result.errors) {
+      console.error('Expo push errors:', result.errors);
+    }
+    for (const msg of messages) {
+      await pool.query(
+        `INSERT INTO notifications (user_id, title, body, data) VALUES ($1, $2, $3, $4)`,
+        [userId, title, body, JSON.stringify(data)],
+      );
+    }
+  } catch (err) {
+    console.error('sendPushToUser error:', err);
+  }
+}
+
+app.post('/api/notifications/register-token', async (req, res) => {
+  const { userId, token } = req.body;
+  if (!userId || !token) {
+    return res
+      .status(400)
+      .json({ success: false, error: 'Missing userId or token' });
+  }
+  try {
+    await pool.query(
+      `INSERT INTO user_push_tokens (user_id, token, updated_at)
+       VALUES ($1, $2, NOW())
+       ON CONFLICT (token) DO UPDATE SET updated_at = NOW()`,
+      [userId, token],
+    );
+    res.json({ success: true });
+  } catch (err) {
+    console.error('Register token error:', err);
+    res.status(500).json({ success: false, error: 'Failed to register token' });
+  }
 });
 
 // ==========================================
@@ -1792,6 +1887,7 @@ app.put('/api/maintenance/:id', async (req, res) => {
         ? `UPDATE maintenance_requests SET status = $1, date_resolved = CURRENT_TIMESTAMP WHERE request_id = $2 RETURNING *`
         : `UPDATE maintenance_requests SET status = $1 WHERE request_id = $2 RETURNING *`;
     const result = await pool.query(query, [status, id]);
+    // TODO: Add push notification for maintenance status change when userId is known
     res.json({ success: true, ticket: result.rows[0] });
   } catch (err) {
     res.status(500).json({ success: false, error: 'Failed to update status' });
