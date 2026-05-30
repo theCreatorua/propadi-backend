@@ -103,6 +103,7 @@ app.post('/api/user/deposit', async (req, res) => {
   }
 });
 
+// OLD simulated withdrawal (kept for backward compatibility)
 app.post('/api/user/withdraw', async (req, res) => {
   const { userId, amount, email, bankName, accountNumber } = req.body;
 
@@ -1020,7 +1021,7 @@ app.get('/api/tenancies/:id', async (req, res) => {
   }
 });
 
-// ✅ LIGHTWEIGHT STATUS POLL – no Paystack call, just DB read
+// Lightweight status poll endpoint
 app.get('/api/tenancies/:id/status', async (req, res) => {
   try {
     const { id } = req.params;
@@ -1095,7 +1096,7 @@ app.post('/api/tenancies/:id/pay', async (req, res) => {
           email: tenancy.email,
           amount: totalAmountKobo,
           metadata: { tenancy_id: id },
-          callback_url: 'propadi://paystack-return',
+          callback_url: 'propadi://paystack-return', // optional
         }),
       },
     );
@@ -1121,7 +1122,7 @@ app.post('/api/tenancies/:id/pay', async (req, res) => {
   }
 });
 
-// MULTI-PARTY ESCROW ROUTING ENGINE
+// Multi-party escrow verification endpoint (manual fallback)
 app.post('/api/tenancies/:id/verify', async (req, res) => {
   const client = await pool.connect();
   try {
@@ -1210,9 +1211,7 @@ app.post('/api/tenancies/:id/verify', async (req, res) => {
   }
 });
 
-// ==========================================
-// PAYSTACK WEBHOOK LISTENER (AUTOMATED ESCROW)
-// ==========================================
+// Paystack webhook for charge.success
 app.post('/api/webhook/paystack', async (req, res) => {
   const hash = crypto
     .createHmac('sha512', process.env.PAYSTACK_SECRET_KEY)
@@ -1360,23 +1359,206 @@ app.get('/api/tenant-wallet/:userId', async (req, res) => {
   }
 });
 
+// ==========================================
+// RENEWAL SYSTEM
+// ==========================================
+
+app.post('/api/tenancies/:id/renew', async (req, res) => {
+  const client = await pool.connect();
+  try {
+    const { id } = req.params;
+    const { new_rent_amount } = req.body;
+
+    await client.query('BEGIN');
+
+    const origResult = await client.query(
+      `SELECT renter_id, owner_id, property_id, rent_amount, lease_end_date, payment_status 
+       FROM tenancies WHERE tenancy_id = $1 FOR UPDATE`,
+      [id],
+    );
+    if (origResult.rows.length === 0) {
+      await client.query('ROLLBACK');
+      return res
+        .status(404)
+        .json({ success: false, error: 'Tenancy not found' });
+    }
+    const orig = origResult.rows[0];
+
+    if (orig.payment_status !== 'Paid') {
+      await client.query('ROLLBACK');
+      return res
+        .status(400)
+        .json({ success: false, error: 'Only paid tenancies can be renewed' });
+    }
+
+    const newRent = new_rent_amount
+      ? parseFloat(new_rent_amount)
+      : parseFloat(orig.rent_amount);
+    const newStart = new Date(orig.lease_end_date);
+    newStart.setDate(newStart.getDate() + 1);
+    const newEnd = new Date(newStart);
+    newEnd.setFullYear(newEnd.getFullYear() + 1);
+
+    const insertResult = await client.query(
+      `INSERT INTO tenancies (
+        property_id, renter_id, owner_id, rent_amount, rent_period,
+        lease_start_date, lease_end_date, status, payment_status,
+        renewal_of_tenancy_id, renewal_status
+      ) VALUES ($1, $2, $3, $4, $5, $6, $7, 'Draft', 'Pending', $8, 'Pending')
+      RETURNING *`,
+      [
+        orig.property_id,
+        orig.renter_id,
+        orig.owner_id,
+        newRent,
+        'Per Annum',
+        newStart,
+        newEnd,
+        id,
+      ],
+    );
+    const newTenancy = insertResult.rows[0];
+
+    await client.query('COMMIT');
+
+    res.json({
+      success: true,
+      message: 'Renewal offer created. The tenant will see it in their wallet.',
+      tenancy: newTenancy,
+    });
+  } catch (err) {
+    await client.query('ROLLBACK');
+    console.error('Renewal creation error:', err);
+    res
+      .status(500)
+      .json({ success: false, error: 'Could not create renewal offer' });
+  } finally {
+    client.release();
+  }
+});
+
+app.get('/api/tenancies/renewals/:userId', async (req, res) => {
+  try {
+    const { userId } = req.params;
+    const result = await pool.query(
+      `SELECT t.*, p.title as property_title, p.address_street, p.address_city,
+              o.name as owner_name
+       FROM tenancies t
+       JOIN properties p ON t.property_id = p.property_id
+       JOIN users o ON t.owner_id = o.user_id
+       WHERE t.renter_id = $1 
+         AND t.renewal_of_tenancy_id IS NOT NULL 
+         AND t.renewal_status = 'Pending'
+       ORDER BY t.date_created DESC`,
+      [userId],
+    );
+    res.json({ success: true, renewals: result.rows });
+  } catch (err) {
+    console.error('Renewal fetch error:', err);
+    res.status(500).json({ success: false, error: 'Failed to fetch renewals' });
+  }
+});
+
+app.post('/api/tenancies/:id/accept-renewal', async (req, res) => {
+  try {
+    const { id } = req.params;
+    const result = await pool.query(
+      `UPDATE tenancies SET renewal_status = 'Accepted' WHERE tenancy_id = $1 RETURNING *`,
+      [id],
+    );
+    if (result.rows.length === 0) {
+      return res
+        .status(404)
+        .json({ success: false, error: 'Renewal not found' });
+    }
+    res.json({ success: true, tenancy: result.rows[0] });
+  } catch (err) {
+    console.error('Accept renewal error:', err);
+    res.status(500).json({ success: false, error: 'Failed to accept renewal' });
+  }
+});
+
+app.get('/api/tenancies/landlord/:ownerId', async (req, res) => {
+  try {
+    const { ownerId } = req.params;
+    console.log('Fetching tenancies for landlord:', ownerId);
+    const result = await pool.query(
+      `SELECT t.tenancy_id, t.rent_amount, t.lease_start_date, t.lease_end_date, t.payment_status,
+              p.title as property_title, p.address_street, p.address_city,
+              u.name as renter_name
+       FROM tenancies t
+       JOIN properties p ON t.property_id = p.property_id
+       JOIN users u ON t.renter_id = u.user_id
+       WHERE t.owner_id = $1 AND LOWER(t.payment_status) = 'paid'
+       ORDER BY t.lease_end_date ASC`,
+      [ownerId],
+    );
+    res.json({ success: true, tenancies: result.rows });
+  } catch (err) {
+    console.error('Landlord tenancies fetch error:', err);
+    res
+      .status(500)
+      .json({ success: false, error: 'Failed to fetch tenancies' });
+  }
+});
+
+// ==========================================
+// PAYOUT ENGINE (Paystack Transfers)
+// ==========================================
+
+// Helper: Create or retrieve a Paystack transfer recipient
+async function getOrCreateRecipient(userId, bankCode, accountNumber, email) {
+  const response = await fetch('https://api.paystack.co/transferrecipient', {
+    method: 'POST',
+    headers: {
+      Authorization: `Bearer ${process.env.PAYSTACK_SECRET_KEY}`,
+      'Content-Type': 'application/json',
+    },
+    body: JSON.stringify({
+      type: 'nuban',
+      name: `Propadi User ${userId.substring(0, 8)}`,
+      account_number: accountNumber,
+      bank_code: bankCode,
+      currency: 'NGN',
+      email: email,
+    }),
+  });
+  const data = await response.json();
+  if (data.status) {
+    return data.data.recipient_code;
+  } else {
+    throw new Error(data.message || 'Failed to create transfer recipient');
+  }
+}
+
+// Landlord withdrawal using Paystack Transfers API
 app.post('/api/wallet/withdraw', async (req, res) => {
   const client = await pool.connect();
   try {
-    const { userId, amount, bankName, accountNumber } = req.body;
+    const { userId, amount, bankName, bankCode, accountNumber } = req.body;
     const withdrawAmount = parseFloat(amount);
 
-    if (!withdrawAmount || withdrawAmount <= 0)
+    if (!withdrawAmount || withdrawAmount <= 0) {
       return res
         .status(400)
         .json({ success: false, error: 'Invalid withdrawal amount' });
+    }
+
+    const userResult = await client.query(
+      'SELECT email FROM users WHERE user_id = $1',
+      [userId],
+    );
+    if (userResult.rows.length === 0) {
+      return res.status(404).json({ success: false, error: 'User not found' });
+    }
+    const userEmail = userResult.rows[0].email;
 
     await client.query('BEGIN');
+
     const walletResult = await client.query(
       'SELECT balance FROM wallets WHERE user_id = $1 FOR UPDATE',
       [userId],
     );
-
     if (
       walletResult.rows.length === 0 ||
       parseFloat(walletResult.rows[0].balance) < withdrawAmount
@@ -1392,25 +1574,142 @@ app.post('/api/wallet/withdraw', async (req, res) => {
       [withdrawAmount, userId],
     );
 
-    const txnResult = await client.query(
-      `INSERT INTO transactions (user_id, type, title, property_ref, amount, status) VALUES ($1, 'withdrawal', 'Bank Withdrawal', $2, $3, 'Pending') RETURNING *`,
+    const withdrawalResult = await client.query(
+      `INSERT INTO withdrawals (user_id, email, amount, bank_name, account_number, status, type, transfer_status)
+       VALUES ($1, $2, $3, $4, $5, 'Processing', 'Withdrawal', 'Processing')
+       RETURNING *`,
+      [userId, userEmail, withdrawAmount, bankName, accountNumber],
+    );
+    const withdrawal = withdrawalResult.rows[0];
+
+    await client.query(
+      `INSERT INTO transactions (user_id, type, title, property_ref, amount, status)
+       VALUES ($1, 'withdrawal', 'Bank Withdrawal', $2, $3, 'Pending')`,
       [userId, `To ${bankName} (${accountNumber.slice(-4)})`, -withdrawAmount],
     );
 
     await client.query('COMMIT');
-    res.json({
-      success: true,
-      message: 'Withdrawal initiated successfully',
-      transaction: txnResult.rows[0],
-    });
-  } catch (error) {
+
+    // Call Paystack Transfer API
+    try {
+      const recipientCode = await getOrCreateRecipient(
+        userId,
+        bankCode,
+        accountNumber,
+        userEmail,
+      );
+      const transferResponse = await fetch('https://api.paystack.co/transfer', {
+        method: 'POST',
+        headers: {
+          Authorization: `Bearer ${process.env.PAYSTACK_SECRET_KEY}`,
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({
+          source: 'balance',
+          amount: withdrawAmount * 100,
+          recipient: recipientCode,
+          reason: `Propadi withdrawal for ${userEmail}`,
+          currency: 'NGN',
+          reference: `propadi_wd_${withdrawal.id}_${Date.now()}`,
+        }),
+      });
+      const transferData = await transferResponse.json();
+      if (transferData.status) {
+        await pool.query(
+          `UPDATE withdrawals SET transfer_code = $1, transfer_status = 'Processing', status = 'Processing' WHERE id = $2`,
+          [transferData.data.transfer_code, withdrawal.id],
+        );
+        await pool.query(
+          `UPDATE transactions SET status = 'Processing' WHERE user_id = $1 AND type = 'withdrawal' AND amount = $2 ORDER BY created_at DESC LIMIT 1`,
+          [userId, -withdrawAmount],
+        );
+        res.json({
+          success: true,
+          message:
+            'Withdrawal initiated successfully. Funds will be sent to your bank account shortly.',
+          transfer_code: transferData.data.transfer_code,
+        });
+      } else {
+        console.error('Paystack transfer error:', transferData);
+        await pool.query(
+          `UPDATE withdrawals SET transfer_status = 'Failed', failure_reason = $1, status = 'Failed' WHERE id = $2`,
+          [transferData.message || 'Unknown error', withdrawal.id],
+        );
+        await pool.query(
+          `UPDATE transactions SET status = 'Failed' WHERE user_id = $1 AND type = 'withdrawal' AND amount = $2 ORDER BY created_at DESC LIMIT 1`,
+          [userId, -withdrawAmount],
+        );
+        await pool.query(
+          `UPDATE wallets SET balance = balance + $1 WHERE user_id = $2`,
+          [withdrawAmount, userId],
+        );
+        res.status(400).json({
+          success: false,
+          error:
+            transferData.message ||
+            'Transfer failed. Your wallet has been refunded.',
+        });
+      }
+    } catch (paystackError) {
+      console.error('Paystack API error:', paystackError);
+      await pool.query(
+        `UPDATE withdrawals SET transfer_status = 'Failed', failure_reason = $1, status = 'Failed' WHERE id = $2`,
+        [paystackError.message, withdrawal.id],
+      );
+      await pool.query(
+        `UPDATE transactions SET status = 'Failed' WHERE user_id = $1 AND type = 'withdrawal' AND amount = $2 ORDER BY created_at DESC LIMIT 1`,
+        [userId, -withdrawAmount],
+      );
+      await pool.query(
+        `UPDATE wallets SET balance = balance + $1 WHERE user_id = $2`,
+        [withdrawAmount, userId],
+      );
+      res.status(500).json({
+        success: false,
+        error: 'Payment gateway error. Wallet refunded.',
+      });
+    }
+  } catch (err) {
     await client.query('ROLLBACK');
+    console.error('Withdrawal error:', err);
     res
       .status(500)
       .json({ success: false, error: 'Failed to process withdrawal' });
   } finally {
     client.release();
   }
+});
+
+// Webhook for Paystack transfer updates
+app.post('/api/webhook/paystack-transfer', async (req, res) => {
+  const hash = crypto
+    .createHmac('sha512', process.env.PAYSTACK_SECRET_KEY)
+    .update(JSON.stringify(req.body))
+    .digest('hex');
+  if (hash !== req.headers['x-paystack-signature']) {
+    return res.status(400).send('Invalid signature');
+  }
+  const event = req.body;
+  if (event.event === 'transfer.success') {
+    const transferCode = event.data.transfer_code;
+    await pool.query(
+      `UPDATE withdrawals SET transfer_status = 'Success', status = 'Completed' WHERE transfer_code = $1`,
+      [transferCode],
+    );
+    await pool.query(
+      `UPDATE transactions SET status = 'Completed' 
+       WHERE user_id = (SELECT user_id FROM withdrawals WHERE transfer_code = $1) 
+       AND type = 'withdrawal' ORDER BY created_at DESC LIMIT 1`,
+      [transferCode],
+    );
+  } else if (event.event === 'transfer.failed') {
+    const transferCode = event.data.transfer_code;
+    await pool.query(
+      `UPDATE withdrawals SET transfer_status = 'Failed', failure_reason = $1, status = 'Failed' WHERE transfer_code = $2`,
+      [event.data.reason, transferCode],
+    );
+  }
+  res.sendStatus(200);
 });
 
 // ==========================================
@@ -1496,385 +1795,9 @@ app.put('/api/maintenance/:id', async (req, res) => {
   }
 });
 
-// === RENEWAL SYSTEM START ===
-// Landlord offers a renewal for a tenancy that is paid and within 60 days of end
-app.post('/api/tenancies/:id/renew', async (req, res) => {
-  const client = await pool.connect();
-  try {
-    const { id } = req.params;
-    const { new_rent_amount } = req.body; // optional, default to current rent
-
-    await client.query('BEGIN');
-
-    // Fetch original tenancy
-    const origResult = await client.query(
-      `SELECT renter_id, owner_id, property_id, rent_amount, lease_end_date, payment_status 
-       FROM tenancies WHERE tenancy_id = $1 FOR UPDATE`,
-      [id],
-    );
-    if (origResult.rows.length === 0) {
-      await client.query('ROLLBACK');
-      return res
-        .status(404)
-        .json({ success: false, error: 'Tenancy not found' });
-    }
-    const orig = origResult.rows[0];
-
-    // Only owner can renew, and only if payment_status = 'Paid'
-    // (we trust frontend to send owner_id; we'll check session later)
-    if (orig.payment_status !== 'Paid') {
-      await client.query('ROLLBACK');
-      return res
-        .status(400)
-        .json({ success: false, error: 'Only paid tenancies can be renewed' });
-    }
-
-    const newRent = new_rent_amount
-      ? parseFloat(new_rent_amount)
-      : parseFloat(orig.rent_amount);
-    const newStart = new Date(orig.lease_end_date);
-    newStart.setDate(newStart.getDate() + 1); // start day after previous lease ends
-    const newEnd = new Date(newStart);
-    newEnd.setFullYear(newEnd.getFullYear() + 1);
-
-    // Create renewal tenancy as 'Draft' with renewal_of_tenancy_id pointer
-    const insertResult = await client.query(
-      `INSERT INTO tenancies (
-        property_id, renter_id, owner_id, rent_amount, rent_period,
-        lease_start_date, lease_end_date, status, payment_status,
-        renewal_of_tenancy_id, renewal_status
-      ) VALUES ($1, $2, $3, $4, $5, $6, $7, 'Draft', 'Pending', $8, 'Pending')
-      RETURNING *`,
-      [
-        orig.property_id,
-        orig.renter_id,
-        orig.owner_id,
-        newRent,
-        'Per Annum',
-        newStart,
-        newEnd,
-        id,
-      ],
-    );
-    const newTenancy = insertResult.rows[0];
-
-    // Optionally send notification to renter (we can add later)
-    await client.query('COMMIT');
-
-    res.json({
-      success: true,
-      message: 'Renewal offer created. The tenant will see it in their wallet.',
-      tenancy: newTenancy,
-    });
-  } catch (err) {
-    await client.query('ROLLBACK');
-    console.error('Renewal creation error:', err);
-    res
-      .status(500)
-      .json({ success: false, error: 'Could not create renewal offer' });
-  } finally {
-    client.release();
-  }
-});
-
-// Get all renewal offers for a tenant (pending)
-app.get('/api/tenancies/renewals/:userId', async (req, res) => {
-  try {
-    const { userId } = req.params;
-    const result = await pool.query(
-      `SELECT t.*, p.title as property_title, p.address_street, p.address_city,
-              o.name as owner_name
-       FROM tenancies t
-       JOIN properties p ON t.property_id = p.property_id
-       JOIN users o ON t.owner_id = o.user_id
-       WHERE t.renter_id = $1 
-         AND t.renewal_of_tenancy_id IS NOT NULL 
-         AND t.renewal_status = 'Pending'
-       ORDER BY t.date_created DESC`,
-      [userId],
-    );
-    res.json({ success: true, renewals: result.rows });
-  } catch (err) {
-    console.error('Renewal fetch error:', err);
-    res.status(500).json({ success: false, error: 'Failed to fetch renewals' });
-  }
-});
-
-// Tenant accepts a renewal offer (sets status to 'Signed' implicitly, then they pay)
-app.post('/api/tenancies/:id/accept-renewal', async (req, res) => {
-  try {
-    const { id } = req.params;
-    // Optionally, you can also sign it automatically, but we'll just mark renewal_status = 'Accepted'
-    // and let the tenant sign/pay via the existing flow.
-    const result = await pool.query(
-      `UPDATE tenancies SET renewal_status = 'Accepted' WHERE tenancy_id = $1 RETURNING *`,
-      [id],
-    );
-    if (result.rows.length === 0) {
-      return res
-        .status(404)
-        .json({ success: false, error: 'Renewal not found' });
-    }
-    res.json({ success: true, tenancy: result.rows[0] });
-  } catch (err) {
-    console.error('Accept renewal error:', err);
-    res.status(500).json({ success: false, error: 'Failed to accept renewal' });
-  }
-});
-
-// Get all tenancies for a landlord (paid and active)
-app.get('/api/tenancies/landlord/:ownerId', async (req, res) => {
-  try {
-    const { ownerId } = req.params;
-    console.log('Fetching tenancies for landlord:', ownerId); // Debug log
-
-    const result = await pool.query(
-      `SELECT t.tenancy_id, t.rent_amount, t.lease_start_date, t.lease_end_date, t.payment_status,
-              p.title as property_title, p.address_street, p.address_city,
-              u.name as renter_name
-       FROM tenancies t
-       JOIN properties p ON t.property_id = p.property_id
-       JOIN users u ON t.renter_id = u.user_id
-       WHERE t.owner_id = $1 AND LOWER(t.payment_status) = 'paid'
-       ORDER BY t.lease_end_date ASC`,
-      [ownerId],
-    );
-    res.json({ success: true, tenancies: result.rows });
-  } catch (err) {
-    console.error('Landlord tenancies fetch error:', err);
-    res
-      .status(500)
-      .json({ success: false, error: 'Failed to fetch tenancies' });
-  }
-});
-// === RENEWAL SYSTEM END ===
-
 // ==========================================
-// PAYOUT ENGINE (Paystack Transfers)
+// SERVER SETUP
 // ==========================================
-
-// Helper: Create or retrieve a Paystack transfer recipient for a user
-async function getOrCreateRecipient(userId, bankCode, accountNumber, email) {
-  // Check if we already have a recipient_code stored for this user? (Optional: add column to users)
-  // For simplicity, we create a new recipient each time (Paystack allows duplicates but we can cache).
-  const response = await fetch('https://api.paystack.co/transferrecipient', {
-    method: 'POST',
-    headers: {
-      Authorization: `Bearer ${process.env.PAYSTACK_SECRET_KEY}`,
-      'Content-Type': 'application/json',
-    },
-    body: JSON.stringify({
-      type: 'nuban',
-      name: `Propadi User ${userId.substring(0, 8)}`,
-      account_number: accountNumber,
-      bank_code: bankCode,
-      currency: 'NGN',
-      email: email,
-    }),
-  });
-  const data = await response.json();
-  if (data.status) {
-    return data.data.recipient_code;
-  } else {
-    throw new Error(data.message || 'Failed to create transfer recipient');
-  }
-}
-
-// Landlord initiates withdrawal – calls Paystack Transfers API
-app.post('/api/wallet/withdraw', async (req, res) => {
-  const client = await pool.connect();
-  try {
-    const { userId, amount, bankName, bankCode, accountNumber } = req.body;
-    const withdrawAmount = parseFloat(amount);
-
-    if (!withdrawAmount || withdrawAmount <= 0) {
-      return res
-        .status(400)
-        .json({ success: false, error: 'Invalid withdrawal amount' });
-    }
-
-    // Get user email
-    const userResult = await client.query(
-      'SELECT email FROM users WHERE user_id = $1',
-      [userId],
-    );
-    if (userResult.rows.length === 0) {
-      return res.status(404).json({ success: false, error: 'User not found' });
-    }
-    const userEmail = userResult.rows[0].email;
-
-    await client.query('BEGIN');
-
-    // Lock wallet row and check balance
-    const walletResult = await client.query(
-      'SELECT balance FROM wallets WHERE user_id = $1 FOR UPDATE',
-      [userId],
-    );
-    if (
-      walletResult.rows.length === 0 ||
-      parseFloat(walletResult.rows[0].balance) < withdrawAmount
-    ) {
-      await client.query('ROLLBACK');
-      return res
-        .status(400)
-        .json({ success: false, error: 'Insufficient funds' });
-    }
-
-    // Deduct from wallet immediately (pending transfer)
-    await client.query(
-      'UPDATE wallets SET balance = balance - $1, updated_at = CURRENT_TIMESTAMP WHERE user_id = $2',
-      [withdrawAmount, userId],
-    );
-
-    // Create withdrawal record
-    const withdrawalResult = await client.query(
-      `INSERT INTO withdrawals (user_id, email, amount, bank_name, account_number, status, type, transfer_status)
-       VALUES ($1, $2, $3, $4, $5, 'Processing', 'Withdrawal', 'Processing')
-       RETURNING *`,
-      [userId, userEmail, withdrawAmount, bankName, accountNumber],
-    );
-    const withdrawal = withdrawalResult.rows[0];
-
-    // Create a transaction record (Pending)
-    await client.query(
-      `INSERT INTO transactions (user_id, type, title, property_ref, amount, status)
-       VALUES ($1, 'withdrawal', 'Bank Withdrawal', $2, $3, 'Pending')`,
-      [userId, `To ${bankName} (${accountNumber.slice(-4)})`, -withdrawAmount],
-    );
-
-    await client.query('COMMIT');
-
-    // Now call Paystack Transfer API (outside transaction)
-    try {
-      const recipientCode = await getOrCreateRecipient(
-        userId,
-        bankCode,
-        accountNumber,
-        userEmail,
-      );
-      const transferResponse = await fetch('https://api.paystack.co/transfer', {
-        method: 'POST',
-        headers: {
-          Authorization: `Bearer ${process.env.PAYSTACK_SECRET_KEY}`,
-          'Content-Type': 'application/json',
-        },
-        body: JSON.stringify({
-          source: 'balance',
-          amount: withdrawAmount * 100, // in kobo
-          recipient: recipientCode,
-          reason: `Propadi withdrawal for ${userEmail}`,
-          currency: 'NGN',
-          reference: `propadi_wd_${withdrawal.id}_${Date.now()}`,
-        }),
-      });
-      const transferData = await transferResponse.json();
-      if (transferData.status) {
-        // Update withdrawal record with transfer_code and status
-        await pool.query(
-          `UPDATE withdrawals SET transfer_code = $1, transfer_status = 'Processing', status = 'Processing' WHERE id = $2`,
-          [transferData.data.transfer_code, withdrawal.id],
-        );
-        // Update transaction status to Processing
-        await pool.query(
-          `UPDATE transactions SET status = 'Processing' WHERE user_id = $1 AND type = 'withdrawal' AND amount = $2 ORDER BY created_at DESC LIMIT 1`,
-          [userId, -withdrawAmount],
-        );
-        res.json({
-          success: true,
-          message:
-            'Withdrawal initiated successfully. Funds will be sent to your bank account shortly.',
-          transfer_code: transferData.data.transfer_code,
-        });
-      } else {
-        // Transfer failed – rollback wallet deduction? We already committed. Instead, we can refund later.
-        console.error('Paystack transfer error:', transferData);
-        await pool.query(
-          `UPDATE withdrawals SET transfer_status = 'Failed', failure_reason = $1, status = 'Failed' WHERE id = $2`,
-          [transferData.message || 'Unknown error', withdrawal.id],
-        );
-        await pool.query(
-          `UPDATE transactions SET status = 'Failed' WHERE user_id = $1 AND type = 'withdrawal' AND amount = $2 ORDER BY created_at DESC LIMIT 1`,
-          [userId, -withdrawAmount],
-        );
-        // Refund the wallet (money was deducted but transfer failed)
-        await pool.query(
-          `UPDATE wallets SET balance = balance + $1 WHERE user_id = $2`,
-          [withdrawAmount, userId],
-        );
-        res.status(400).json({
-          success: false,
-          error:
-            transferData.message ||
-            'Transfer failed. Your wallet has been refunded.',
-        });
-      }
-    } catch (paystackError) {
-      console.error('Paystack API error:', paystackError);
-      await pool.query(
-        `UPDATE withdrawals SET transfer_status = 'Failed', failure_reason = $1, status = 'Failed' WHERE id = $2`,
-        [paystackError.message, withdrawal.id],
-      );
-      await pool.query(
-        `UPDATE transactions SET status = 'Failed' WHERE user_id = $1 AND type = 'withdrawal' AND amount = $2 ORDER BY created_at DESC LIMIT 1`,
-        [userId, -withdrawAmount],
-      );
-      // Refund wallet
-      await pool.query(
-        `UPDATE wallets SET balance = balance + $1 WHERE user_id = $2`,
-        [withdrawAmount, userId],
-      );
-      res
-        .status(500)
-        .json({
-          success: false,
-          error: 'Payment gateway error. Wallet refunded.',
-        });
-    }
-  } catch (err) {
-    await client.query('ROLLBACK');
-    console.error('Withdrawal error:', err);
-    res
-      .status(500)
-      .json({ success: false, error: 'Failed to process withdrawal' });
-  } finally {
-    client.release();
-  }
-});
-
-// Webhook for Paystack transfer updates (optional but recommended)
-app.post('/api/webhook/paystack-transfer', async (req, res) => {
-  const hash = crypto
-    .createHmac('sha512', process.env.PAYSTACK_SECRET_KEY)
-    .update(JSON.stringify(req.body))
-    .digest('hex');
-  if (hash !== req.headers['x-paystack-signature']) {
-    return res.status(400).send('Invalid signature');
-  }
-  const event = req.body;
-  if (event.event === 'transfer.success') {
-    const transferCode = event.data.transfer_code;
-    await pool.query(
-      `UPDATE withdrawals SET transfer_status = 'Success', status = 'Completed' WHERE transfer_code = $1`,
-      [transferCode],
-    );
-    // Also update the corresponding transaction
-    await pool.query(
-      `UPDATE transactions SET status = 'Completed' 
-       WHERE user_id = (SELECT user_id FROM withdrawals WHERE transfer_code = $1) 
-       AND type = 'withdrawal' ORDER BY created_at DESC LIMIT 1`,
-      [transferCode],
-    );
-  } else if (event.event === 'transfer.failed') {
-    const transferCode = event.data.transfer_code;
-    await pool.query(
-      `UPDATE withdrawals SET transfer_status = 'Failed', failure_reason = $1, status = 'Failed' WHERE transfer_code = $2`,
-      [event.data.reason, transferCode],
-    );
-  }
-  res.sendStatus(200);
-});
-
-// ======== SERVER SETUP ========
 const PORT = process.env.PORT || 5000;
 app.listen(PORT, () => {
   console.log(`Server running on port ${PORT}`);
