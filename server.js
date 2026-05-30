@@ -1649,6 +1649,231 @@ app.get('/api/tenancies/landlord/:ownerId', async (req, res) => {
 });
 // === RENEWAL SYSTEM END ===
 
+// ==========================================
+// PAYOUT ENGINE (Paystack Transfers)
+// ==========================================
+
+// Helper: Create or retrieve a Paystack transfer recipient for a user
+async function getOrCreateRecipient(userId, bankCode, accountNumber, email) {
+  // Check if we already have a recipient_code stored for this user? (Optional: add column to users)
+  // For simplicity, we create a new recipient each time (Paystack allows duplicates but we can cache).
+  const response = await fetch('https://api.paystack.co/transferrecipient', {
+    method: 'POST',
+    headers: {
+      Authorization: `Bearer ${process.env.PAYSTACK_SECRET_KEY}`,
+      'Content-Type': 'application/json',
+    },
+    body: JSON.stringify({
+      type: 'nuban',
+      name: `Propadi User ${userId.substring(0, 8)}`,
+      account_number: accountNumber,
+      bank_code: bankCode,
+      currency: 'NGN',
+      email: email,
+    }),
+  });
+  const data = await response.json();
+  if (data.status) {
+    return data.data.recipient_code;
+  } else {
+    throw new Error(data.message || 'Failed to create transfer recipient');
+  }
+}
+
+// Landlord initiates withdrawal – calls Paystack Transfers API
+app.post('/api/wallet/withdraw', async (req, res) => {
+  const client = await pool.connect();
+  try {
+    const { userId, amount, bankName, bankCode, accountNumber } = req.body;
+    const withdrawAmount = parseFloat(amount);
+
+    if (!withdrawAmount || withdrawAmount <= 0) {
+      return res
+        .status(400)
+        .json({ success: false, error: 'Invalid withdrawal amount' });
+    }
+
+    // Get user email
+    const userResult = await client.query(
+      'SELECT email FROM users WHERE user_id = $1',
+      [userId],
+    );
+    if (userResult.rows.length === 0) {
+      return res.status(404).json({ success: false, error: 'User not found' });
+    }
+    const userEmail = userResult.rows[0].email;
+
+    await client.query('BEGIN');
+
+    // Lock wallet row and check balance
+    const walletResult = await client.query(
+      'SELECT balance FROM wallets WHERE user_id = $1 FOR UPDATE',
+      [userId],
+    );
+    if (
+      walletResult.rows.length === 0 ||
+      parseFloat(walletResult.rows[0].balance) < withdrawAmount
+    ) {
+      await client.query('ROLLBACK');
+      return res
+        .status(400)
+        .json({ success: false, error: 'Insufficient funds' });
+    }
+
+    // Deduct from wallet immediately (pending transfer)
+    await client.query(
+      'UPDATE wallets SET balance = balance - $1, updated_at = CURRENT_TIMESTAMP WHERE user_id = $2',
+      [withdrawAmount, userId],
+    );
+
+    // Create withdrawal record
+    const withdrawalResult = await client.query(
+      `INSERT INTO withdrawals (user_id, email, amount, bank_name, account_number, status, type, transfer_status)
+       VALUES ($1, $2, $3, $4, $5, 'Processing', 'Withdrawal', 'Processing')
+       RETURNING *`,
+      [userId, userEmail, withdrawAmount, bankName, accountNumber],
+    );
+    const withdrawal = withdrawalResult.rows[0];
+
+    // Create a transaction record (Pending)
+    await client.query(
+      `INSERT INTO transactions (user_id, type, title, property_ref, amount, status)
+       VALUES ($1, 'withdrawal', 'Bank Withdrawal', $2, $3, 'Pending')`,
+      [userId, `To ${bankName} (${accountNumber.slice(-4)})`, -withdrawAmount],
+    );
+
+    await client.query('COMMIT');
+
+    // Now call Paystack Transfer API (outside transaction)
+    try {
+      const recipientCode = await getOrCreateRecipient(
+        userId,
+        bankCode,
+        accountNumber,
+        userEmail,
+      );
+      const transferResponse = await fetch('https://api.paystack.co/transfer', {
+        method: 'POST',
+        headers: {
+          Authorization: `Bearer ${process.env.PAYSTACK_SECRET_KEY}`,
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({
+          source: 'balance',
+          amount: withdrawAmount * 100, // in kobo
+          recipient: recipientCode,
+          reason: `Propadi withdrawal for ${userEmail}`,
+          currency: 'NGN',
+          reference: `propadi_wd_${withdrawal.id}_${Date.now()}`,
+        }),
+      });
+      const transferData = await transferResponse.json();
+      if (transferData.status) {
+        // Update withdrawal record with transfer_code and status
+        await pool.query(
+          `UPDATE withdrawals SET transfer_code = $1, transfer_status = 'Processing', status = 'Processing' WHERE id = $2`,
+          [transferData.data.transfer_code, withdrawal.id],
+        );
+        // Update transaction status to Processing
+        await pool.query(
+          `UPDATE transactions SET status = 'Processing' WHERE user_id = $1 AND type = 'withdrawal' AND amount = $2 ORDER BY created_at DESC LIMIT 1`,
+          [userId, -withdrawAmount],
+        );
+        res.json({
+          success: true,
+          message:
+            'Withdrawal initiated successfully. Funds will be sent to your bank account shortly.',
+          transfer_code: transferData.data.transfer_code,
+        });
+      } else {
+        // Transfer failed – rollback wallet deduction? We already committed. Instead, we can refund later.
+        console.error('Paystack transfer error:', transferData);
+        await pool.query(
+          `UPDATE withdrawals SET transfer_status = 'Failed', failure_reason = $1, status = 'Failed' WHERE id = $2`,
+          [transferData.message || 'Unknown error', withdrawal.id],
+        );
+        await pool.query(
+          `UPDATE transactions SET status = 'Failed' WHERE user_id = $1 AND type = 'withdrawal' AND amount = $2 ORDER BY created_at DESC LIMIT 1`,
+          [userId, -withdrawAmount],
+        );
+        // Refund the wallet (money was deducted but transfer failed)
+        await pool.query(
+          `UPDATE wallets SET balance = balance + $1 WHERE user_id = $2`,
+          [withdrawAmount, userId],
+        );
+        res.status(400).json({
+          success: false,
+          error:
+            transferData.message ||
+            'Transfer failed. Your wallet has been refunded.',
+        });
+      }
+    } catch (paystackError) {
+      console.error('Paystack API error:', paystackError);
+      await pool.query(
+        `UPDATE withdrawals SET transfer_status = 'Failed', failure_reason = $1, status = 'Failed' WHERE id = $2`,
+        [paystackError.message, withdrawal.id],
+      );
+      await pool.query(
+        `UPDATE transactions SET status = 'Failed' WHERE user_id = $1 AND type = 'withdrawal' AND amount = $2 ORDER BY created_at DESC LIMIT 1`,
+        [userId, -withdrawAmount],
+      );
+      // Refund wallet
+      await pool.query(
+        `UPDATE wallets SET balance = balance + $1 WHERE user_id = $2`,
+        [withdrawAmount, userId],
+      );
+      res
+        .status(500)
+        .json({
+          success: false,
+          error: 'Payment gateway error. Wallet refunded.',
+        });
+    }
+  } catch (err) {
+    await client.query('ROLLBACK');
+    console.error('Withdrawal error:', err);
+    res
+      .status(500)
+      .json({ success: false, error: 'Failed to process withdrawal' });
+  } finally {
+    client.release();
+  }
+});
+
+// Webhook for Paystack transfer updates (optional but recommended)
+app.post('/api/webhook/paystack-transfer', async (req, res) => {
+  const hash = crypto
+    .createHmac('sha512', process.env.PAYSTACK_SECRET_KEY)
+    .update(JSON.stringify(req.body))
+    .digest('hex');
+  if (hash !== req.headers['x-paystack-signature']) {
+    return res.status(400).send('Invalid signature');
+  }
+  const event = req.body;
+  if (event.event === 'transfer.success') {
+    const transferCode = event.data.transfer_code;
+    await pool.query(
+      `UPDATE withdrawals SET transfer_status = 'Success', status = 'Completed' WHERE transfer_code = $1`,
+      [transferCode],
+    );
+    // Also update the corresponding transaction
+    await pool.query(
+      `UPDATE transactions SET status = 'Completed' 
+       WHERE user_id = (SELECT user_id FROM withdrawals WHERE transfer_code = $1) 
+       AND type = 'withdrawal' ORDER BY created_at DESC LIMIT 1`,
+      [transferCode],
+    );
+  } else if (event.event === 'transfer.failed') {
+    const transferCode = event.data.transfer_code;
+    await pool.query(
+      `UPDATE withdrawals SET transfer_status = 'Failed', failure_reason = $1, status = 'Failed' WHERE transfer_code = $2`,
+      [event.data.reason, transferCode],
+    );
+  }
+  res.sendStatus(200);
+});
+
 // ======== SERVER SETUP ========
 const PORT = process.env.PORT || 5000;
 app.listen(PORT, () => {
