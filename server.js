@@ -1620,7 +1620,8 @@ app.post('/api/wallet/withdraw', async (req, res) => {
           [transferData.data.transfer_code, withdrawal.id],
         );
         await pool.query(
-          `UPDATE transactions SET status = 'Processing' WHERE user_id = $1 AND type = 'withdrawal' AND amount = $2 ORDER BY created_at DESC LIMIT 1`,
+          `UPDATE transactions SET status = 'Processing' 
+           WHERE id = (SELECT id FROM transactions WHERE user_id = $1 AND type = 'withdrawal' AND amount = $2 ORDER BY created_at DESC LIMIT 1)`,
           [userId, -withdrawAmount],
         );
         res.json({
@@ -1636,7 +1637,8 @@ app.post('/api/wallet/withdraw', async (req, res) => {
           [transferData.message || 'Unknown error', withdrawal.id],
         );
         await pool.query(
-          `UPDATE transactions SET status = 'Failed' WHERE user_id = $1 AND type = 'withdrawal' AND amount = $2 ORDER BY created_at DESC LIMIT 1`,
+          `UPDATE transactions SET status = 'Failed' 
+           WHERE id = (SELECT id FROM transactions WHERE user_id = $1 AND type = 'withdrawal' AND amount = $2 ORDER BY created_at DESC LIMIT 1)`,
           [userId, -withdrawAmount],
         );
         await pool.query(
@@ -1657,7 +1659,8 @@ app.post('/api/wallet/withdraw', async (req, res) => {
         [paystackError.message, withdrawal.id],
       );
       await pool.query(
-        `UPDATE transactions SET status = 'Failed' WHERE user_id = $1 AND type = 'withdrawal' AND amount = $2 ORDER BY created_at DESC LIMIT 1`,
+        `UPDATE transactions SET status = 'Failed' 
+         WHERE id = (SELECT id FROM transactions WHERE user_id = $1 AND type = 'withdrawal' AND amount = $2 ORDER BY created_at DESC LIMIT 1)`,
         [userId, -withdrawAmount],
       );
       await pool.query(
