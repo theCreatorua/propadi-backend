@@ -1788,22 +1788,6 @@ async function sendPushToUser(userId, title, body, data = {}) {
     console.error('sendPushToUser error:', err);
   }
 }
-// Temporary test endpoint – remove after testing
-app.post('/api/test-push', async (req, res) => {
-  const { userId, title, body } = req.body;
-  if (!userId || !title || !body) {
-    return res
-      .status(400)
-      .json({ success: false, error: 'Missing userId, title, or body' });
-  }
-  try {
-    await sendPushToUser(userId, title, body, { test: true });
-    res.json({ success: true, message: 'Push sent' });
-  } catch (err) {
-    console.error('Test push error:', err);
-    res.status(500).json({ success: false, error: err.message });
-  }
-});
 
 app.post('/api/notifications/register-token', async (req, res) => {
   const { userId, token } = req.body;
