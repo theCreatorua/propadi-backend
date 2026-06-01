@@ -469,7 +469,6 @@ app.post('/api/messages', async (req, res) => {
     );
 
     // === PUSH NOTIFICATION FOR CHAT ===
-    const receiverId = receiver_id;
     const senderNameQuery = await pool.query(
       'SELECT name FROM users WHERE user_id = $1',
       [sender_id],
@@ -478,7 +477,7 @@ app.post('/api/messages', async (req, res) => {
     const messagePreview =
       content.length > 50 ? content.substring(0, 50) + '...' : content;
     await sendPushToUser(
-      receiverId,
+      receiver_id,
       `💬 New message from ${senderName}`,
       messagePreview,
       { screen: 'Chat', property_id, other_user_id: sender_id },
