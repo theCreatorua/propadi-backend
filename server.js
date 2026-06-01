@@ -1778,6 +1778,7 @@ async function sendPushToUser(userId, title, body, data = {}) {
     if (result.errors) {
       console.error('Expo push errors:', result.errors);
     }
+    // Store notification in database for history
     for (const msg of messages) {
       await pool.query(
         `INSERT INTO notifications (user_id, title, body, data) VALUES ($1, $2, $3, $4)`,
