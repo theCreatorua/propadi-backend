@@ -574,16 +574,26 @@ app.post('/api/viewings', async (req, res) => {
       ],
     );
 
+    const messageContent = `🗓️ I have requested a viewing for ${startTime.toLocaleString()}. Please accept or decline.||${result.rows[0].viewing_id}`;
     await pool.query(
       `INSERT INTO messages (property_id, sender_id, receiver_id, content) 
        VALUES ($1, $2, $3, $4)`,
-      [
-        property_id,
-        renter_id,
-        landlord_id,
-        `🗓️ I have requested a viewing for ${startTime.toLocaleString()}. Please accept or decline.||${result.rows[0].viewing_id}`,
-      ],
+      [property_id, renter_id, landlord_id, messageContent],
     );
+
+    // === PUSH NOTIFICATION TO OWNER ===
+    const ownerNameQuery = await pool.query(
+      'SELECT name FROM users WHERE user_id = $1',
+      [landlord_id],
+    );
+    const ownerName = ownerNameQuery.rows[0]?.name || 'Owner';
+    await sendPushToUser(
+      landlord_id,
+      '📅 New Viewing Request',
+      `${ownerName}, a renter has requested a viewing. Please check your chat.`,
+      { screen: 'Chat', property_id, other_user_id: renter_id },
+    );
+    // === END PUSH ===
 
     res.json({ success: true, viewing: result.rows[0] });
   } catch (err) {
