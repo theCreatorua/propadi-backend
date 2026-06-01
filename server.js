@@ -330,11 +330,11 @@ app.post('/api/properties', async (req, res) => {
         owner_id, status, category, furnishing_status, title, description,
         rent_price, rent_period, total_beds, total_baths, address_street,
         address_city, address_lga, address_state, map_coordinates, main_image_url,
-        gallery_urls, total_kitchens, total_stores
+        gallery_urls, total_kitchens, total_stores, landmark_name, landmark_type
       )
       VALUES (
         $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, 
-        NULL, $15, ARRAY[]::text[], $16, $17
+        NULL, $15, ARRAY[]::text[], $16, $17, $18, $19
       )
       RETURNING *;
     `;
@@ -357,6 +357,8 @@ app.post('/api/properties', async (req, res) => {
       main_image_url,
       total_kitchens || 0,
       total_stores || 0,
+      req.body.landmark_name || null,
+      req.body.landmark_type || null,
     ];
 
     const propResult = await client.query(propQuery, propValues);
