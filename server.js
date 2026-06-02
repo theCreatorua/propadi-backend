@@ -2061,12 +2061,10 @@ app.delete('/api/admin/users/:userId', requireAdmin, async (req, res) => {
     const { userId } = req.params;
     // Prevent admin from deleting themselves
     if (userId === req.adminUser.id)
-      return res
-        .status(400)
-        .json({
-          success: false,
-          error: 'Cannot delete your own admin account',
-        });
+      return res.status(400).json({
+        success: false,
+        error: 'Cannot delete your own admin account',
+      });
     await pool.query('DELETE FROM users WHERE user_id = $1', [userId]);
     await pool.query(
       'INSERT INTO admin_logs (admin_id, action, target_type, target_id) VALUES ($1, $2, $3, $4)',
@@ -2077,6 +2075,196 @@ app.delete('/api/admin/users/:userId', requireAdmin, async (req, res) => {
     res.status(500).json({ success: false, error: err.message });
   }
 });
+
+// ==========================================
+// RATING & REVIEW SYSTEM
+// ==========================================
+
+// POST /api/reviews – submit a review
+app.post('/api/reviews', async (req, res) => {
+  const client = await pool.connect();
+  try {
+    const {
+      reviewer_id,
+      reviewee_id,
+      tenancy_id,
+      rating,
+      comment,
+      is_landlord_review,
+    } = req.body;
+
+    if (!reviewer_id || !reviewee_id || !rating || rating < 1 || rating > 5) {
+      return res
+        .status(400)
+        .json({ success: false, error: 'Invalid review data' });
+    }
+
+    // Check if user already reviewed this tenancy (one review per tenancy per user)
+    const existing = await client.query(
+      'SELECT id FROM reviews WHERE reviewer_id = $1 AND tenancy_id = $2',
+      [reviewer_id, tenancy_id],
+    );
+    if (existing.rows.length > 0) {
+      return res
+        .status(400)
+        .json({
+          success: false,
+          error: 'You have already reviewed this tenancy',
+        });
+    }
+
+    await client.query('BEGIN');
+
+    const result = await client.query(
+      `INSERT INTO reviews (reviewer_id, reviewee_id, tenancy_id, rating, comment, is_landlord_review)
+       VALUES ($1, $2, $3, $4, $5, $6) RETURNING *`,
+      [
+        reviewer_id,
+        reviewee_id,
+        tenancy_id,
+        rating,
+        comment,
+        is_landlord_review || false,
+      ],
+    );
+
+    // Update average rating for reviewee
+    const avgResult = await client.query(
+      'SELECT AVG(rating)::DECIMAL(10,2) as avg FROM reviews WHERE reviewee_id = $1',
+      [reviewee_id],
+    );
+    const avgRating = parseFloat(avgResult.rows[0].avg) || 0;
+    await client.query('UPDATE users SET avg_rating = $1 WHERE user_id = $2', [
+      avgRating,
+      reviewee_id,
+    ]);
+
+    // Optional: adjust trust score based on rating
+    // (e.g., +2 for 5-star, -1 for 1-star)
+    if (rating === 5) {
+      await client.query(
+        'UPDATE users SET renter_score = renter_score + 2 WHERE user_id = $1',
+        [reviewee_id],
+      );
+    } else if (rating === 1) {
+      await client.query(
+        'UPDATE users SET renter_score = renter_score - 1 WHERE user_id = $1',
+        [reviewee_id],
+      );
+    }
+
+    await client.query('COMMIT');
+    res.json({ success: true, review: result.rows[0] });
+  } catch (err) {
+    await client.query('ROLLBACK');
+    console.error('Review submission error:', err);
+    res.status(500).json({ success: false, error: 'Failed to submit review' });
+  } finally {
+    client.release();
+  }
+});
+
+// GET /api/users/:userId/reviews – get all reviews for a user
+app.get('/api/users/:userId/reviews', async (req, res) => {
+  try {
+    const { userId } = req.params;
+    const result = await pool.query(
+      `SELECT r.*, 
+              u.name as reviewer_name, u.avatar_url,
+              p.title as property_title
+       FROM reviews r
+       JOIN users u ON r.reviewer_id = u.user_id
+       LEFT JOIN tenancies t ON r.tenancy_id = t.tenancy_id
+       LEFT JOIN properties p ON t.property_id = p.property_id
+       WHERE r.reviewee_id = $1
+       ORDER BY r.created_at DESC`,
+      [userId],
+    );
+    res.json({ success: true, reviews: result.rows });
+  } catch (err) {
+    console.error('Fetch reviews error:', err);
+    res.status(500).json({ success: false, error: 'Failed to fetch reviews' });
+  }
+});
+
+// GET /api/tenancies/:tenancyId/review-status – check if current user can review
+app.get('/api/tenancies/:tenancyId/review-status', async (req, res) => {
+  try {
+    const { tenancyId } = req.params;
+    const authHeader = req.headers.authorization;
+    if (!authHeader)
+      return res.status(401).json({ success: false, error: 'Unauthorized' });
+    const token = authHeader.split(' ')[1];
+    const {
+      data: { user },
+      error,
+    } = await supabase.auth.getUser(token);
+    if (error || !user)
+      return res.status(401).json({ success: false, error: 'Invalid token' });
+
+    // Check if tenancy belongs to user (as renter or owner) and is paid/ended
+    const tenancyResult = await pool.query(
+      `SELECT renter_id, owner_id, lease_end_date, payment_status 
+       FROM tenancies WHERE tenancy_id = $1`,
+      [tenancyId],
+    );
+    if (tenancyResult.rows.length === 0) {
+      return res.json({
+        success: true,
+        canReview: false,
+        reason: 'Tenancy not found',
+      });
+    }
+    const tenancy = tenancyResult.rows[0];
+    const isParticipant =
+      tenancy.renter_id === user.id || tenancy.owner_id === user.id;
+    if (!isParticipant) {
+      return res.json({
+        success: true,
+        canReview: false,
+        reason: 'You are not a party to this tenancy',
+      });
+    }
+
+    // Check if tenancy is completed (lease_end_date passed) or payment_status = 'Paid' and ended
+    const now = new Date();
+    const leaseEnd = new Date(tenancy.lease_end_date);
+    const isCompleted = leaseEnd < now;
+    if (!isCompleted && tenancy.payment_status !== 'Paid') {
+      return res.json({
+        success: true,
+        canReview: false,
+        reason: 'Tenancy not yet completed or paid',
+      });
+    }
+
+    // Check if user already reviewed
+    const existing = await pool.query(
+      'SELECT id FROM reviews WHERE reviewer_id = $1 AND tenancy_id = $2',
+      [user.id, tenancyId],
+    );
+    if (existing.rows.length > 0) {
+      return res.json({
+        success: true,
+        canReview: false,
+        reason: 'You have already reviewed this tenancy',
+      });
+    }
+
+    res.json({
+      success: true,
+      canReview: true,
+      revieweeId:
+        tenancy.renter_id === user.id ? tenancy.owner_id : tenancy.renter_id,
+    });
+  } catch (err) {
+    console.error('Review status error:', err);
+    res
+      .status(500)
+      .json({ success: false, error: 'Failed to check review status' });
+  }
+});
+
 // ==========================================
 // SERVER SETUP
 // ==========================================
