@@ -385,16 +385,21 @@ app.post('/api/properties', async (req, res) => {
       visually_verified_amenities,
       landmark_name,
       landmark_type,
+      size_sqm,
+      parking_spaces,
+      year_built,
+      floor_number,
     } = req.body;
 
     const propQuery = `
       INSERT INTO properties (
         owner_id, status, category, furnishing_status, title, description,
-        rent_price, rent_period, total_beds, total_baths, address_street,
-        address_city, address_lga, address_state, map_coordinates, main_image_url,
-        gallery_urls, total_kitchens, total_stores, landmark_name, landmark_type
+  rent_price, rent_period, total_beds, total_baths, address_street,
+  address_city, address_lga, address_state, map_coordinates, main_image_url,
+  gallery_urls, total_kitchens, total_stores, landmark_name, landmark_type,
+  size_sqm, parking_spaces, year_built, floor_number
       )
-      VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, NULL, $15, $16, $17, $18, $19, $20)
+      VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, NULL, $15, $16, $17, $18, $19, $20, $21, $22, $23, $24)
       RETURNING *;
     `;
     const propValues = [
@@ -418,6 +423,10 @@ app.post('/api/properties', async (req, res) => {
       total_stores || 0,
       landmark_name || null,
       landmark_type || null,
+      req.body.size_sqm || null,
+      req.body.parking_spaces || null,
+      req.body.year_built || null,
+      req.body.floor_number || null,
     ];
     const propResult = await client.query(propQuery, propValues);
     const savedProperty = propResult.rows[0];
