@@ -1845,6 +1845,239 @@ app.put('/api/maintenance/:id', async (req, res) => {
 });
 
 // ==========================================
+// ADMIN DASHBOARD ENDPOINTS
+// ==========================================
+
+// Middleware to verify admin role
+const requireAdmin = async (req, res, next) => {
+  try {
+    const authHeader = req.headers.authorization;
+    if (!authHeader)
+      return res
+        .status(401)
+        .json({ success: false, error: 'No token provided' });
+    const token = authHeader.split(' ')[1];
+    const {
+      data: { user },
+      error,
+    } = await supabase.auth.getUser(token);
+    if (error || !user)
+      return res.status(401).json({ success: false, error: 'Invalid token' });
+    const { rows } = await pool.query(
+      'SELECT is_admin FROM users WHERE user_id = $1',
+      [user.id],
+    );
+    if (rows.length === 0 || !rows[0].is_admin) {
+      return res
+        .status(403)
+        .json({ success: false, error: 'Admin access required' });
+    }
+    req.adminUser = user;
+    next();
+  } catch (err) {
+    res
+      .status(500)
+      .json({ success: false, error: 'Admin verification failed' });
+  }
+};
+
+// GET /api/admin/stats – platform statistics
+app.get('/api/admin/stats', requireAdmin, async (req, res) => {
+  try {
+    const usersCount = await pool.query('SELECT COUNT(*) FROM users');
+    const propertiesCount = await pool.query('SELECT COUNT(*) FROM properties');
+    const activeTenancies = await pool.query(
+      "SELECT COUNT(*) FROM tenancies WHERE payment_status = 'Paid'",
+    );
+    const totalRentCollected = await pool.query(
+      "SELECT SUM(rent_amount) FROM tenancies WHERE payment_status = 'Paid'",
+    );
+    const totalFees = await pool.query(
+      "SELECT SUM(ABS(amount)) FROM transactions WHERE type = 'fee' AND status = 'Completed'",
+    );
+
+    res.json({
+      success: true,
+      stats: {
+        totalUsers: parseInt(usersCount.rows[0].count),
+        totalProperties: parseInt(propertiesCount.rows[0].count),
+        activeTenancies: parseInt(activeTenancies.rows[0].count),
+        totalRentCollected: parseFloat(totalRentCollected.rows[0].sum || 0),
+        totalPlatformFees: parseFloat(totalFees.rows[0].sum || 0),
+      },
+    });
+  } catch (err) {
+    res.status(500).json({ success: false, error: err.message });
+  }
+});
+
+// GET /api/admin/users – list all users (with optional role filter)
+app.get('/api/admin/users', requireAdmin, async (req, res) => {
+  try {
+    const { role } = req.query;
+    let query =
+      'SELECT user_id, name, email, role, is_admin, renter_score, kyc_status, date_joined FROM users';
+    const params = [];
+    if (role) {
+      query += ' WHERE role = $1';
+      params.push(role);
+    }
+    query += ' ORDER BY date_joined DESC';
+    const result = await pool.query(query, params);
+    res.json({ success: true, users: result.rows });
+  } catch (err) {
+    res.status(500).json({ success: false, error: err.message });
+  }
+});
+
+// PUT /api/admin/users/:userId/role – update user role (owner/renter) or admin flag
+app.put('/api/admin/users/:userId', requireAdmin, async (req, res) => {
+  try {
+    const { userId } = req.params;
+    const { role, is_admin } = req.body;
+    let query = 'UPDATE users SET ';
+    const updates = [];
+    const values = [];
+    if (role) {
+      updates.push(`role = $${updates.length + 1}`);
+      values.push(role);
+    }
+    if (is_admin !== undefined) {
+      updates.push(`is_admin = $${updates.length + 1}`);
+      values.push(is_admin);
+    }
+    if (updates.length === 0)
+      return res
+        .status(400)
+        .json({ success: false, error: 'No fields to update' });
+    query +=
+      updates.join(', ') +
+      ' WHERE user_id = $' +
+      (values.length + 1) +
+      ' RETURNING user_id, name, email, role, is_admin';
+    values.push(userId);
+    const result = await pool.query(query, values);
+    if (result.rows.length === 0)
+      return res.status(404).json({ success: false, error: 'User not found' });
+    // Log action
+    await pool.query(
+      'INSERT INTO admin_logs (admin_id, action, target_type, target_id, details) VALUES ($1, $2, $3, $4, $5)',
+      [
+        req.adminUser.id,
+        'UPDATE_USER_ROLE',
+        'user',
+        userId,
+        JSON.stringify({ role, is_admin }),
+      ],
+    );
+    res.json({ success: true, user: result.rows[0] });
+  } catch (err) {
+    res.status(500).json({ success: false, error: err.message });
+  }
+});
+
+// GET /api/admin/properties – list all properties with optional status filter
+app.get('/api/admin/properties', requireAdmin, async (req, res) => {
+  try {
+    const { status } = req.query;
+    let query = `
+      SELECT p.*, u.name as owner_name, u.email as owner_email,
+             (SELECT COUNT(*) FROM applications WHERE property_id = p.property_id) as application_count
+      FROM properties p
+      JOIN users u ON p.owner_id = u.user_id
+    `;
+    const params = [];
+    if (status) {
+      query += ' WHERE p.status = $1';
+      params.push(status);
+    }
+    query += ' ORDER BY p.date_listed DESC';
+    const result = await pool.query(query, params);
+    res.json({ success: true, properties: result.rows });
+  } catch (err) {
+    res.status(500).json({ success: false, error: err.message });
+  }
+});
+
+// PUT /api/admin/properties/:id/status – approve, reject, or change listing status
+app.put('/api/admin/properties/:id/status', requireAdmin, async (req, res) => {
+  try {
+    const { id } = req.params;
+    const { status, admin_note } = req.body; // status: 'Available', 'Rejected', 'Under Review', etc.
+    if (!status)
+      return res.status(400).json({ success: false, error: 'Status required' });
+    const result = await pool.query(
+      'UPDATE properties SET status = $1 WHERE property_id = $2 RETURNING *',
+      [status, id],
+    );
+    if (result.rows.length === 0)
+      return res
+        .status(404)
+        .json({ success: false, error: 'Property not found' });
+    await pool.query(
+      'INSERT INTO admin_logs (admin_id, action, target_type, target_id, details) VALUES ($1, $2, $3, $4, $5)',
+      [
+        req.adminUser.id,
+        'UPDATE_PROPERTY_STATUS',
+        'property',
+        id,
+        JSON.stringify({ status, admin_note }),
+      ],
+    );
+    res.json({ success: true, property: result.rows[0] });
+  } catch (err) {
+    res.status(500).json({ success: false, error: err.message });
+  }
+});
+
+// GET /api/admin/transactions – all platform transactions
+app.get('/api/admin/transactions', requireAdmin, async (req, res) => {
+  try {
+    const { limit = 100, offset = 0 } = req.query;
+    const result = await pool.query(
+      `
+      SELECT t.*, u.name, u.email
+      FROM transactions t
+      JOIN users u ON t.user_id = u.user_id
+      ORDER BY t.created_at DESC
+      LIMIT $1 OFFSET $2
+    `,
+      [parseInt(limit), parseInt(offset)],
+    );
+    const count = await pool.query('SELECT COUNT(*) FROM transactions');
+    res.json({
+      success: true,
+      transactions: result.rows,
+      total: parseInt(count.rows[0].count),
+    });
+  } catch (err) {
+    res.status(500).json({ success: false, error: err.message });
+  }
+});
+
+// DELETE /api/admin/users/:userId – delete user (admin only)
+app.delete('/api/admin/users/:userId', requireAdmin, async (req, res) => {
+  try {
+    const { userId } = req.params;
+    // Prevent admin from deleting themselves
+    if (userId === req.adminUser.id)
+      return res
+        .status(400)
+        .json({
+          success: false,
+          error: 'Cannot delete your own admin account',
+        });
+    await pool.query('DELETE FROM users WHERE user_id = $1', [userId]);
+    await pool.query(
+      'INSERT INTO admin_logs (admin_id, action, target_type, target_id) VALUES ($1, $2, $3, $4)',
+      [req.adminUser.id, 'DELETE_USER', 'user', userId],
+    );
+    res.json({ success: true, message: 'User deleted' });
+  } catch (err) {
+    res.status(500).json({ success: false, error: err.message });
+  }
+});
+// ==========================================
 // SERVER SETUP
 // ==========================================
 const PORT = process.env.PORT || 5000;
