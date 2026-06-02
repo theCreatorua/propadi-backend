@@ -2105,12 +2105,10 @@ app.post('/api/reviews', async (req, res) => {
       [reviewer_id, tenancy_id],
     );
     if (existing.rows.length > 0) {
-      return res
-        .status(400)
-        .json({
-          success: false,
-          error: 'You have already reviewed this tenancy',
-        });
+      return res.status(400).json({
+        success: false,
+        error: 'You have already reviewed this tenancy',
+      });
     }
 
     await client.query('BEGIN');
@@ -2152,7 +2150,22 @@ app.post('/api/reviews', async (req, res) => {
         [reviewee_id],
       );
     }
+    // --- PUSH NOTIFICATION FOR NEW REVIEW ---
+    // Get reviewer's name
+    const reviewerNameQuery = await pool.query(
+      'SELECT name FROM users WHERE user_id = $1',
+      [reviewer_id],
+    );
+    const reviewerName = reviewerNameQuery.rows[0]?.name || 'Someone';
 
+    // Send push to the reviewee
+    await sendPushToUser(
+      reviewee_id,
+      '⭐ New Review Received',
+      `${reviewerName} gave you a ${rating}-star review.`,
+      { screen: 'Profile' },
+    );
+    // --- END PUSH ---
     await client.query('COMMIT');
     res.json({ success: true, review: result.rows[0] });
   } catch (err) {
