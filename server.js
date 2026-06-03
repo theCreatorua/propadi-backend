@@ -2515,6 +2515,147 @@ app.post('/api/cron/check-viewing-reminders', async (req, res) => {
   }
 });
 
+// POST /api/properties/:id/view – record a view
+app.post('/api/properties/:id/view', async (req, res) => {
+  try {
+    const { id } = req.params;
+    const { viewer_id } = req.body;
+    await pool.query(
+      'INSERT INTO property_views (property_id, viewer_id) VALUES ($1, $2)',
+      [id, viewer_id || null],
+    );
+    res.json({ success: true });
+  } catch (err) {
+    console.error('Record view error:', err);
+    res.status(500).json({ success: false, error: 'Failed to record view' });
+  }
+});
+
+// GET /api/owner/analytics – get aggregated stats for the authenticated owner
+app.get('/api/owner/analytics', async (req, res) => {
+  try {
+    const authHeader = req.headers.authorization;
+    if (!authHeader)
+      return res.status(401).json({ success: false, error: 'Unauthorized' });
+    const token = authHeader.split(' ')[1];
+    const {
+      data: { user },
+      error,
+    } = await supabase.auth.getUser(token);
+    if (error || !user)
+      return res.status(401).json({ success: false, error: 'Invalid token' });
+
+    const ownerId = user.id;
+
+    // Get all properties for this owner
+    const propertiesResult = await pool.query(
+      'SELECT property_id, title, rent_price, date_listed, status FROM properties WHERE owner_id = $1',
+      [ownerId],
+    );
+    const properties = propertiesResult.rows;
+
+    if (properties.length === 0) {
+      return res.json({
+        success: true,
+        analytics: {
+          totalViews: 0,
+          totalApplications: 0,
+          activeTenancies: 0,
+          avgDaysToRent: 0,
+          properties: [],
+        },
+      });
+    }
+
+    const propertyIds = properties.map((p) => p.property_id);
+
+    // Count total views for owner's properties
+    const viewsResult = await pool.query(
+      'SELECT COUNT(*) as total FROM property_views WHERE property_id = ANY($1::uuid[])',
+      [propertyIds],
+    );
+    const totalViews = parseInt(viewsResult.rows[0].total);
+
+    // Count total applications for owner's properties
+    const appsResult = await pool.query(
+      'SELECT COUNT(*) as total FROM applications WHERE property_id = ANY($1::uuid[])',
+      [propertyIds],
+    );
+    const totalApplications = parseInt(appsResult.rows[0].total);
+
+    // Count active tenancies (payment_status = 'Paid' and lease_end_date > NOW())
+    const activeTenanciesResult = await pool.query(
+      `SELECT COUNT(*) as total FROM tenancies 
+       WHERE property_id = ANY($1::uuid[]) 
+       AND payment_status = 'Paid' 
+       AND lease_end_date > NOW()`,
+      [propertyIds],
+    );
+    const activeTenancies = parseInt(activeTenanciesResult.rows[0].total);
+
+    // Calculate average days to rent (from date_listed to first approved application)
+    // For simplicity, we compute per property and average
+    let totalDays = 0;
+    let countWithTenancy = 0;
+    for (const prop of properties) {
+      const tenancyResult = await pool.query(
+        `SELECT MIN(t.lease_start_date) as first_tenancy
+         FROM tenancies t
+         WHERE t.property_id = $1 AND t.payment_status = 'Paid'`,
+        [prop.property_id],
+      );
+      if (tenancyResult.rows[0].first_tenancy) {
+        const listedDate = new Date(prop.date_listed);
+        const startDate = new Date(tenancyResult.rows[0].first_tenancy);
+        const days = Math.ceil(
+          (startDate.getTime() - listedDate.getTime()) / (1000 * 3600 * 24),
+        );
+        totalDays += days;
+        countWithTenancy++;
+      }
+    }
+    const avgDaysToRent =
+      countWithTenancy > 0 ? Math.round(totalDays / countWithTenancy) : 0;
+
+    // Prepare per‑property stats
+    const propertyStats = [];
+    for (const prop of properties) {
+      const viewsCount = await pool.query(
+        'SELECT COUNT(*) as count FROM property_views WHERE property_id = $1',
+        [prop.property_id],
+      );
+      const appsCount = await pool.query(
+        'SELECT COUNT(*) as count FROM applications WHERE property_id = $1',
+        [prop.property_id],
+      );
+      const tenancyCount = await pool.query(
+        `SELECT COUNT(*) as count FROM tenancies WHERE property_id = $1 AND payment_status = 'Paid'`,
+        [prop.property_id],
+      );
+      propertyStats.push({
+        ...prop,
+        views: parseInt(viewsCount.rows[0].count),
+        applications: parseInt(appsCount.rows[0].count),
+        tenancies: parseInt(tenancyCount.rows[0].count),
+      });
+    }
+
+    res.json({
+      success: true,
+      analytics: {
+        totalViews,
+        totalApplications,
+        activeTenancies,
+        avgDaysToRent,
+        properties: propertyStats,
+      },
+    });
+  } catch (err) {
+    console.error('Analytics error:', err);
+    res.status(500).json({ success: false, error: err.message });
+  }
+});
+
 // ==========================================
 // SERVER SETUP
 // ==========================================
