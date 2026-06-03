@@ -2656,6 +2656,259 @@ app.get('/api/owner/analytics', async (req, res) => {
   }
 });
 
+// POST /api/users/onboarding – save profile data after registration
+app.post('/api/users/onboarding', async (req, res) => {
+  try {
+    const authHeader = req.headers.authorization;
+    if (!authHeader)
+      return res.status(401).json({ success: false, error: 'Unauthorized' });
+    const token = authHeader.split(' ')[1];
+    const {
+      data: { user },
+      error,
+    } = await supabase.auth.getUser(token);
+    if (error || !user)
+      return res.status(401).json({ success: false, error: 'Invalid token' });
+
+    const {
+      phone_number,
+      residential_address,
+      address_city,
+      address_state,
+      address_lga,
+      date_of_birth,
+      occupation,
+      nok_full_name,
+      nok_relationship,
+      nok_phone,
+      nok_address,
+      nationality,
+      state_of_origin,
+      lga,
+      marital_status,
+    } = req.body;
+
+    const updateFields = [];
+    const values = [];
+    let paramIndex = 1;
+
+    if (phone_number) {
+      updateFields.push(`phone_number = $${paramIndex}`);
+      values.push(phone_number);
+      paramIndex++;
+    }
+    if (residential_address) {
+      updateFields.push(`residential_address = $${paramIndex}`);
+      values.push(residential_address);
+      paramIndex++;
+    }
+    if (address_city) {
+      updateFields.push(`address_city = $${paramIndex}`);
+      values.push(address_city);
+      paramIndex++;
+    }
+    if (address_state) {
+      updateFields.push(`address_state = $${paramIndex}`);
+      values.push(address_state);
+      paramIndex++;
+    }
+    if (address_lga) {
+      updateFields.push(`address_lga = $${paramIndex}`);
+      values.push(address_lga);
+      paramIndex++;
+    }
+    if (date_of_birth) {
+      updateFields.push(`date_of_birth = $${paramIndex}`);
+      values.push(date_of_birth);
+      paramIndex++;
+    }
+    if (occupation) {
+      updateFields.push(`occupation = $${paramIndex}`);
+      values.push(occupation);
+      paramIndex++;
+    }
+    if (nok_full_name) {
+      updateFields.push(`nok_full_name = $${paramIndex}`);
+      values.push(nok_full_name);
+      paramIndex++;
+    }
+    if (nok_relationship) {
+      updateFields.push(`nok_relationship = $${paramIndex}`);
+      values.push(nok_relationship);
+      paramIndex++;
+    }
+    if (nok_phone) {
+      updateFields.push(`nok_phone = $${paramIndex}`);
+      values.push(nok_phone);
+      paramIndex++;
+    }
+    if (nok_address) {
+      updateFields.push(`nok_address = $${paramIndex}`);
+      values.push(nok_address);
+      paramIndex++;
+    }
+    if (nationality) {
+      updateFields.push(`nationality = $${paramIndex}`);
+      values.push(nationality);
+      paramIndex++;
+    }
+    if (state_of_origin) {
+      updateFields.push(`state_of_origin = $${paramIndex}`);
+      values.push(state_of_origin);
+      paramIndex++;
+    }
+    if (lga) {
+      updateFields.push(`lga = $${paramIndex}`);
+      values.push(lga);
+      paramIndex++;
+    }
+    if (marital_status) {
+      updateFields.push(`marital_status = $${paramIndex}`);
+      values.push(marital_status);
+      paramIndex++;
+    }
+
+    if (updateFields.length === 0) {
+      return res
+        .status(400)
+        .json({ success: false, error: 'No fields to update' });
+    }
+
+    updateFields.push(`kyc_tier = GREATEST(kyc_tier, 1)`); // basic tier after filling profile
+    const query = `UPDATE users SET ${updateFields.join(', ')} WHERE user_id = $${paramIndex} RETURNING user_id, name, email, role, kyc_tier`;
+    values.push(user.id);
+
+    const result = await pool.query(query, values);
+    res.json({ success: true, user: result.rows[0] });
+  } catch (err) {
+    console.error('Onboarding error:', err);
+    res.status(500).json({ success: false, error: err.message });
+  }
+});
+
+// POST /api/users/upload-kyc – upload KYC document (image) to Supabase Storage
+app.post('/api/users/upload-kyc', async (req, res) => {
+  try {
+    const authHeader = req.headers.authorization;
+    if (!authHeader)
+      return res.status(401).json({ success: false, error: 'Unauthorized' });
+    const token = authHeader.split(' ')[1];
+    const {
+      data: { user },
+      error,
+    } = await supabase.auth.getUser(token);
+    if (error || !user)
+      return res.status(401).json({ success: false, error: 'Invalid token' });
+
+    const { base64, fileType } = req.body; // base64 image data
+    if (!base64)
+      return res
+        .status(400)
+        .json({ success: false, error: 'No image provided' });
+
+    const fileName = `kyc_${user.id}_${Date.now()}.${fileType || 'jpg'}`;
+    const { error: uploadError } = await supabase.storage
+      .from('kyc-documents')
+      .upload(fileName, decode(base64), {
+        contentType: `image/${fileType || 'jpeg'}`,
+      });
+    if (uploadError) throw uploadError;
+
+    const {
+      data: { publicUrl },
+    } = supabase.storage.from('kyc-documents').getPublicUrl(fileName);
+
+    await pool.query(
+      "UPDATE users SET kyc_document_url = $1, kyc_document_status = 'pending' WHERE user_id = $2",
+      [publicUrl, user.id],
+    );
+
+    res.json({ success: true, url: publicUrl });
+  } catch (err) {
+    console.error('KYC upload error:', err);
+    res.status(500).json({ success: false, error: 'Upload failed' });
+  }
+});
+
+// POST /api/users/send-otp – send OTP to phone number
+app.post('/api/users/send-otp', async (req, res) => {
+  const { phone_number } = req.body;
+  if (!phone_number)
+    return res
+      .status(400)
+      .json({ success: false, error: 'Phone number required' });
+  const otp = Math.floor(100000 + Math.random() * 900000).toString();
+  // Store OTP in memory or Redis (in production, use database with expiry)
+  // For now, we'll store in a simple map (not persistent across server restarts)
+  if (!global.otpStore) global.otpStore = {};
+  global.otpStore[phone_number] = { otp, expiry: Date.now() + 10 * 60 * 1000 };
+  // TODO: Send SMS using Africa's Talking / Twilio
+  console.log(`[SIMULATED OTP] for ${phone_number}: ${otp}`);
+  res.json({ success: true, message: 'OTP sent (simulated)' });
+});
+
+// POST /api/users/verify-otp
+app.post('/api/users/verify-otp', async (req, res) => {
+  const { phone_number, otp } = req.body;
+  if (!global.otpStore || !global.otpStore[phone_number]) {
+    return res
+      .status(400)
+      .json({ success: false, error: 'No OTP request found' });
+  }
+  const record = global.otpStore[phone_number];
+  if (Date.now() > record.expiry) {
+    delete global.otpStore[phone_number];
+    return res.status(400).json({ success: false, error: 'OTP expired' });
+  }
+  if (record.otp !== otp) {
+    return res.status(400).json({ success: false, error: 'Invalid OTP' });
+  }
+  // Update user
+  const authHeader = req.headers.authorization;
+  if (!authHeader)
+    return res.status(401).json({ success: false, error: 'Unauthorized' });
+  const token = authHeader.split(' ')[1];
+  const {
+    data: { user },
+    error,
+  } = await supabase.auth.getUser(token);
+  if (error || !user)
+    return res.status(401).json({ success: false, error: 'Invalid token' });
+
+  await pool.query(
+    'UPDATE users SET phone_verified = TRUE, kyc_tier = GREATEST(kyc_tier, 2) WHERE user_id = $1',
+    [user.id],
+  );
+  delete global.otpStore[phone_number];
+  res.json({ success: true, message: 'Phone verified' });
+});
+
+// GET /api/users/verification-status
+app.get('/api/users/verification-status', async (req, res) => {
+  try {
+    const authHeader = req.headers.authorization;
+    if (!authHeader)
+      return res.status(401).json({ success: false, error: 'Unauthorized' });
+    const token = authHeader.split(' ')[1];
+    const {
+      data: { user },
+      error,
+    } = await supabase.auth.getUser(token);
+    if (error || !user)
+      return res.status(401).json({ success: false, error: 'Invalid token' });
+
+    const result = await pool.query(
+      `SELECT kyc_tier, phone_verified, nin_verified, address_verified, kyc_document_status,
+              email, phone_number, name, residential_address, date_of_birth
+       FROM users WHERE user_id = $1`,
+      [user.id],
+    );
+    res.json({ success: true, verification: result.rows[0] });
+  } catch (err) {
+    res.status(500).json({ success: false, error: err.message });
+  }
+});
+
 // ==========================================
 // SERVER SETUP
 // ==========================================
