@@ -2278,6 +2278,40 @@ app.get('/api/tenancies/:tenancyId/review-status', async (req, res) => {
   }
 });
 
+// GET /api/notifications/:userId – get all notifications for a user
+app.get('/api/notifications/:userId', async (req, res) => {
+  try {
+    const { userId } = req.params;
+    const result = await pool.query(
+      `SELECT id, title, body, data, read, created_at 
+       FROM notifications 
+       WHERE user_id = $1 
+       ORDER BY created_at DESC`,
+      [userId],
+    );
+    res.json({ success: true, notifications: result.rows });
+  } catch (err) {
+    console.error('Fetch notifications error:', err);
+    res
+      .status(500)
+      .json({ success: false, error: 'Failed to fetch notifications' });
+  }
+});
+
+// PUT /api/notifications/:id/read – mark a single notification as read
+app.put('/api/notifications/:id/read', async (req, res) => {
+  try {
+    const { id } = req.params;
+    await pool.query('UPDATE notifications SET read = TRUE WHERE id = $1', [
+      id,
+    ]);
+    res.json({ success: true });
+  } catch (err) {
+    console.error('Mark read error:', err);
+    res.status(500).json({ success: false, error: 'Failed to update' });
+  }
+});
+
 // ==========================================
 // SERVER SETUP
 // ==========================================
