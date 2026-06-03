@@ -2338,6 +2338,96 @@ app.put('/api/notifications/mark-all-read', async (req, res) => {
 });
 
 // ==========================================
+// RECURRING RENT REMINDERS (Cron job endpoint)
+// ==========================================
+
+app.post('/api/cron/check-rent-reminders', async (req, res) => {
+  // Optional: verify a secret key to prevent public access
+  const secretKey = req.headers['x-cron-secret'];
+  if (secretKey !== process.env.CRON_SECRET) {
+    return res.status(401).json({ success: false, error: 'Unauthorized' });
+  }
+
+  try {
+    const today = new Date();
+    today.setHours(0, 0, 0, 0);
+    const sevenDaysLater = new Date(today);
+    sevenDaysLater.setDate(today.getDate() + 7);
+
+    // Find tenancies ending within the next 7 days, that are paid and not yet fully reminded
+    const query = `
+      SELECT t.tenancy_id, t.rent_amount, t.lease_end_date, t.last_rent_reminder_sent,
+             u.user_id as tenant_id, u.email as tenant_email, u.name as tenant_name,
+             p.title as property_title
+      FROM tenancies t
+      JOIN users u ON t.renter_id = u.user_id
+      JOIN properties p ON t.property_id = p.property_id
+      WHERE t.payment_status = 'Paid'
+        AND t.lease_end_date > $1
+        AND t.lease_end_date <= $2
+        AND (t.last_rent_reminder_sent IS NULL OR t.last_rent_reminder_sent < $1)
+    `;
+    const { rows } = await pool.query(query, [today, sevenDaysLater]);
+
+    let remindersSent = 0;
+    for (const tenancy of rows) {
+      const endDate = new Date(tenancy.lease_end_date);
+      const daysUntilDue = Math.ceil(
+        (endDate.getTime() - today.getTime()) / (1000 * 3600 * 24),
+      );
+
+      let reminderDays = null;
+      if (daysUntilDue === 7) reminderDays = 7;
+      else if (daysUntilDue === 3) reminderDays = 3;
+      else if (daysUntilDue === 1) reminderDays = 1;
+
+      if (reminderDays === null) continue; // only send at exact 7, 3, 1 days before
+
+      const title = `Rent Due in ${reminderDays} Day${reminderDays > 1 ? 's' : ''}`;
+      const body = `Your rent of ₦${tenancy.rent_amount.toLocaleString()} for ${tenancy.property_title} is due on ${endDate.toLocaleDateString()}. Please pay via Propadi to avoid late fees.`;
+
+      // Send push notification
+      await sendPushToUser(tenancy.tenant_id, title, body, {
+        screen: 'TenantWallet',
+      });
+
+      // Send email (optional – using Resend)
+      try {
+        await resend.emails.send({
+          from: 'Propadi <onboarding@resend.dev>',
+          to: tenancy.tenant_email,
+          subject: title,
+          html: `<p>Hello ${tenancy.tenant_name},</p>
+                 <p>${body}</p>
+                 <p>You can make payment securely through the Propadi app.</p>`,
+        });
+      } catch (emailErr) {
+        console.error('Email failed for', tenancy.tenant_email, emailErr);
+      }
+
+      // Update last reminder sent date
+      await pool.query(
+        'UPDATE tenancies SET last_rent_reminder_sent = $1 WHERE tenancy_id = $2',
+        [today, tenancy.tenancy_id],
+      );
+
+      // Optional: log to audit table
+      await pool.query(
+        'INSERT INTO rent_reminder_logs (tenancy_id, days_before) VALUES ($1, $2)',
+        [tenancy.tenancy_id, reminderDays],
+      );
+
+      remindersSent++;
+    }
+
+    res.json({ success: true, remindersSent });
+  } catch (err) {
+    console.error('Cron job error:', err);
+    res.status(500).json({ success: false, error: err.message });
+  }
+});
+
+// ==========================================
 // SERVER SETUP
 // ==========================================
 const PORT = process.env.PORT || 5000;
