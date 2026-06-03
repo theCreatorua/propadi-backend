@@ -2312,6 +2312,31 @@ app.put('/api/notifications/:id/read', async (req, res) => {
   }
 });
 
+// PUT /api/notifications/mark-all-read – mark all notifications for a user as read
+app.put('/api/notifications/mark-all-read', async (req, res) => {
+  try {
+    const authHeader = req.headers.authorization;
+    if (!authHeader)
+      return res.status(401).json({ success: false, error: 'Unauthorized' });
+    const token = authHeader.split(' ')[1];
+    const {
+      data: { user },
+      error,
+    } = await supabase.auth.getUser(token);
+    if (error || !user)
+      return res.status(401).json({ success: false, error: 'Invalid token' });
+
+    await pool.query(
+      'UPDATE notifications SET read = TRUE WHERE user_id = $1',
+      [user.id],
+    );
+    res.json({ success: true });
+  } catch (err) {
+    console.error('Mark all read error:', err);
+    res.status(500).json({ success: false, error: 'Failed to update' });
+  }
+});
+
 // ==========================================
 // SERVER SETUP
 // ==========================================
