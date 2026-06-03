@@ -2428,6 +2428,94 @@ app.post('/api/cron/check-rent-reminders', async (req, res) => {
 });
 
 // ==========================================
+// VIEWING REMINDERS (Cron job endpoint – run hourly)
+// ==========================================
+
+app.post('/api/cron/check-viewing-reminders', async (req, res) => {
+  const secretKey = req.headers['x-cron-secret'];
+  if (secretKey !== process.env.CRON_SECRET) {
+    return res.status(401).json({ success: false, error: 'Unauthorized' });
+  }
+
+  try {
+    const now = new Date();
+    const oneHourLater = new Date(now.getTime() + 60 * 60 * 1000);
+    const threeHoursLater = new Date(now.getTime() + 3 * 60 * 60 * 1000);
+    const twentyFourHoursLater = new Date(now.getTime() + 24 * 60 * 60 * 1000);
+
+    // Find accepted viewings with scheduled start time in the future
+    const query = `
+      SELECT v.viewing_id, v.scheduled_start_time, v.reminder_24h_sent, v.reminder_3h_sent, v.reminder_1h_sent,
+             v.renter_id, v.owner_id, v.property_id,
+             p.title as property_title
+      FROM viewings v
+      JOIN properties p ON v.property_id = p.property_id
+      WHERE v.status = 'Accepted'
+        AND v.scheduled_start_time > NOW()
+    `;
+    const { rows } = await pool.query(query);
+
+    let remindersSent = 0;
+
+    for (const viewing of rows) {
+      const startTime = new Date(viewing.scheduled_start_time);
+      const diffMs = startTime.getTime() - now.getTime();
+      const diffHours = diffMs / (1000 * 3600);
+
+      // Determine which reminders to send (only send each once)
+      let reminderType = null;
+      if (diffHours <= 24 && diffHours > 23 && !viewing.reminder_24h_sent) {
+        reminderType = '24h';
+      } else if (diffHours <= 3 && diffHours > 2 && !viewing.reminder_3h_sent) {
+        reminderType = '3h';
+      } else if (
+        diffHours <= 1 &&
+        diffHours > 0.5 &&
+        !viewing.reminder_1h_sent
+      ) {
+        reminderType = '1h';
+      }
+
+      if (!reminderType) continue;
+
+      const timeString = startTime.toLocaleString();
+      const title = `Viewing Reminder (${reminderType})`;
+      const body = `Your property viewing for "${viewing.property_title}" is scheduled at ${timeString}. Please be prepared.`;
+
+      // Send push to renter
+      await sendPushToUser(viewing.renter_id, title, body, {
+        screen: 'Chat',
+        property_id: viewing.property_id,
+        other_user_id: viewing.owner_id,
+      });
+      // Send push to owner
+      await sendPushToUser(viewing.owner_id, title, body, {
+        screen: 'Chat',
+        property_id: viewing.property_id,
+        other_user_id: viewing.renter_id,
+      });
+
+      // Update the appropriate reminder flag
+      let updateColumn = '';
+      if (reminderType === '24h') updateColumn = 'reminder_24h_sent = TRUE';
+      else if (reminderType === '3h') updateColumn = 'reminder_3h_sent = TRUE';
+      else if (reminderType === '1h') updateColumn = 'reminder_1h_sent = TRUE';
+
+      await pool.query(
+        `UPDATE viewings SET ${updateColumn} WHERE viewing_id = $1`,
+        [viewing.viewing_id],
+      );
+      remindersSent++;
+    }
+
+    res.json({ success: true, remindersSent });
+  } catch (err) {
+    console.error('Viewing reminder cron error:', err);
+    res.status(500).json({ success: false, error: err.message });
+  }
+});
+
+// ==========================================
 // SERVER SETUP
 // ==========================================
 const PORT = process.env.PORT || 5000;
