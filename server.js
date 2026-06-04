@@ -28,7 +28,7 @@ const pool = new Pool({
 // ==========================================
 
 app.post('/api/auth/register', async (req, res) => {
-  const { user_id, email, name } = req.body;
+  const { user_id, email, name, role } = req.body;
 
   try {
     const userCheck = await pool.query('SELECT * FROM users WHERE email = $1', [
@@ -41,8 +41,8 @@ app.post('/api/auth/register', async (req, res) => {
     }
 
     const newUser = await pool.query(
-      'INSERT INTO users (user_id, email, name) VALUES ($1, $2, $3) RETURNING user_id, email, name',
-      [user_id, email, name],
+      'INSERT INTO users (user_id, email, name, role) VALUES ($1, $2, $3, $4) RETURNING user_id, email, name, role',
+      [user_id, email, name, role || 'renter'],
     );
 
     await pool.query(
