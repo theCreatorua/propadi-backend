@@ -259,9 +259,20 @@ app.post('/api/users/:id/verify-nin', async (req, res) => {
 
 app.get('/api/properties', async (req, res) => {
   try {
-    const query = `SELECT * FROM properties WHERE status = 'Available' ORDER BY date_listed DESC;`;
+    const query = `
+      SELECT p.*,
+             (SELECT COUNT(*) FROM properties_amenities WHERE property_id = p.property_id) as verified_amenities_count
+      FROM properties p
+      WHERE p.status = 'Available'
+      ORDER BY p.date_listed DESC
+    `;
     const result = await pool.query(query);
-    res.json({ success: true, properties: result.rows });
+    // Add a boolean flag for convenience
+    const properties = result.rows.map((row) => ({
+      ...row,
+      has_verified_amenities: row.verified_amenities_count > 0,
+    }));
+    res.json({ success: true, properties });
   } catch (err) {
     console.error('Error fetching feed:', err);
     res.status(500).json({ success: false, error: 'Failed to load the feed' });
