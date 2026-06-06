@@ -2785,7 +2785,8 @@ app.post('/api/users/onboarding', async (req, res) => {
         .json({ success: false, error: 'No fields to update' });
     }
 
-    updateFields.push(`kyc_tier = GREATEST(kyc_tier, 1)`); // basic tier after filling profile
+    // Set KYC tier to at least 1 (basic profile completed)
+    updateFields.push(`kyc_tier = GREATEST(kyc_tier, 1)`);
     const query = `UPDATE users SET ${updateFields.join(', ')} WHERE user_id = $${paramIndex} RETURNING user_id, name, email, role, kyc_tier`;
     values.push(user.id);
 
