@@ -2838,8 +2838,7 @@ app.post('/api/users/upload-kyc', async (req, res) => {
         .status(400)
         .json({ success: false, error: 'No image provided' });
 
-    const fileName = `kyc_${user.id}_${Date.now()}.${fileType || 'jpg'}`;
-    // Use native Buffer instead of decode
+    const fileName = `${user.id}/${Date.now()}_kyc.${fileType || 'jpg'}`;
     const buffer = Buffer.from(base64, 'base64');
     const { error: uploadError } = await supabase.storage
       .from('kyc-documents')
