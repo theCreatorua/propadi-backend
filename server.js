@@ -1,6 +1,7 @@
 require('dotenv').config();
 const { createClient } = require('@supabase/supabase-js');
 const crypto = require('crypto');
+const { decode } = require('base64-arraybuffer');
 
 const supabase = createClient(
   process.env.SUPABASE_URL,
@@ -2832,7 +2833,7 @@ app.post('/api/users/upload-kyc', async (req, res) => {
     if (error || !user)
       return res.status(401).json({ success: false, error: 'Invalid token' });
 
-    const { base64, fileType } = req.body; // base64 image data
+    const { base64, fileType } = req.body;
     if (!base64)
       return res
         .status(400)
@@ -2851,8 +2852,8 @@ app.post('/api/users/upload-kyc', async (req, res) => {
     } = supabase.storage.from('kyc-documents').getPublicUrl(fileName);
 
     await pool.query(
-      "UPDATE users SET kyc_document_url = $1, kyc_document_status = 'pending' WHERE user_id = $2",
-      [publicUrl, user.id],
+      'UPDATE users SET kyc_document_url = $1, kyc_document_status = $2 WHERE user_id = $3',
+      [publicUrl, 'pending', user.id],
     );
 
     res.json({ success: true, url: publicUrl });
