@@ -1,7 +1,6 @@
 require('dotenv').config();
 const { createClient } = require('@supabase/supabase-js');
 const crypto = require('crypto');
-const { decode } = require('base64-arraybuffer');
 
 const supabase = createClient(
   process.env.SUPABASE_URL,
@@ -2840,11 +2839,11 @@ app.post('/api/users/upload-kyc', async (req, res) => {
         .json({ success: false, error: 'No image provided' });
 
     const fileName = `kyc_${user.id}_${Date.now()}.${fileType || 'jpg'}`;
+    // Use native Buffer instead of decode
+    const buffer = Buffer.from(base64, 'base64');
     const { error: uploadError } = await supabase.storage
       .from('kyc-documents')
-      .upload(fileName, decode(base64), {
-        contentType: `image/${fileType || 'jpeg'}`,
-      });
+      .upload(fileName, buffer, { contentType: `image/${fileType || 'jpeg'}` });
     if (uploadError) throw uploadError;
 
     const {
