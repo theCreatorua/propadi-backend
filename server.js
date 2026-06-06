@@ -2699,6 +2699,20 @@ app.post('/api/users/onboarding', async (req, res) => {
       marital_status,
     } = req.body;
 
+    // Check if phone number is already used by another user
+    if (phone_number) {
+      const existing = await pool.query(
+        'SELECT user_id FROM users WHERE phone_number = $1 AND user_id != $2',
+        [phone_number, user.id],
+      );
+      if (existing.rows.length > 0) {
+        return res.status(400).json({
+          success: false,
+          error: 'Phone number already registered by another user.',
+        });
+      }
+    }
+
     const updateFields = [];
     const values = [];
     let paramIndex = 1;
@@ -2785,7 +2799,6 @@ app.post('/api/users/onboarding', async (req, res) => {
         .json({ success: false, error: 'No fields to update' });
     }
 
-    // Set KYC tier to at least 1 (basic profile completed)
     updateFields.push(`kyc_tier = GREATEST(kyc_tier, 1)`);
     const query = `UPDATE users SET ${updateFields.join(', ')} WHERE user_id = $${paramIndex} RETURNING user_id, name, email, role, kyc_tier`;
     values.push(user.id);
@@ -2794,6 +2807,13 @@ app.post('/api/users/onboarding', async (req, res) => {
     res.json({ success: true, user: result.rows[0] });
   } catch (err) {
     console.error('Onboarding error:', err);
+    // Handle duplicate phone number gracefully
+    if (err.code === '23505' && err.constraint === 'users_phone_number_key') {
+      return res.status(400).json({
+        success: false,
+        error: 'Phone number already in use by another account.',
+      });
+    }
     res.status(500).json({ success: false, error: err.message });
   }
 });
