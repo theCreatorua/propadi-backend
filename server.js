@@ -2940,6 +2940,83 @@ app.get('/api/users/verification-status', async (req, res) => {
   }
 });
 
+// GET /api/admin/kyc/pending – list users with pending KYC
+app.get('/api/admin/kyc/pending', requireAdmin, async (req, res) => {
+  try {
+    const result = await pool.query(
+      `SELECT user_id, name, email, kyc_document_url, kyc_document_status, created_at
+       FROM users
+       WHERE kyc_document_status = 'pending'
+       ORDER BY created_at ASC`,
+    );
+    res.json({ success: true, users: result.rows });
+  } catch (err) {
+    res.status(500).json({ success: false, error: err.message });
+  }
+});
+
+// PUT /api/admin/kyc/:userId/approve
+app.put('/api/admin/kyc/:userId/approve', requireAdmin, async (req, res) => {
+  try {
+    const { userId } = req.params;
+    await pool.query(
+      `UPDATE users
+       SET address_verified = TRUE,
+           kyc_document_status = 'approved',
+           kyc_tier = GREATEST(kyc_tier, 4)
+       WHERE user_id = $1`,
+      [userId],
+    );
+    await pool.query(
+      'INSERT INTO admin_logs (admin_id, action, target_type, target_id, details) VALUES ($1, $2, $3, $4, $5)',
+      [
+        req.adminUser.id,
+        'APPROVE_KYC',
+        'user',
+        userId,
+        JSON.stringify({ kyc: 'approved' }),
+      ],
+    );
+    res.json({ success: true, message: 'KYC approved' });
+  } catch (err) {
+    res.status(500).json({ success: false, error: err.message });
+  }
+});
+
+// PUT /api/admin/kyc/:userId/reject
+app.put('/api/admin/kyc/:userId/reject', requireAdmin, async (req, res) => {
+  try {
+    const { userId } = req.params;
+    const { reason } = req.body;
+    await pool.query(
+      `UPDATE users
+       SET kyc_document_status = 'rejected',
+           kyc_document_url = NULL
+       WHERE user_id = $1`,
+      [userId],
+    );
+    await pool.query(
+      'INSERT INTO admin_logs (admin_id, action, target_type, target_id, details) VALUES ($1, $2, $3, $4, $5)',
+      [
+        req.adminUser.id,
+        'REJECT_KYC',
+        'user',
+        userId,
+        JSON.stringify({ reason }),
+      ],
+    );
+    // Optionally send push notification to user
+    await sendPushToUser(
+      userId,
+      'KYC Update',
+      `Your document was rejected. Reason: ${reason || 'Please resubmit'}`,
+    );
+    res.json({ success: true, message: 'KYC rejected' });
+  } catch (err) {
+    res.status(500).json({ success: false, error: err.message });
+  }
+});
+
 // ==========================================
 // SERVER SETUP
 // ==========================================
