@@ -3127,23 +3127,19 @@ app.post('/api/admin/kyc/batch-approve', requireAdmin, async (req, res) => {
 // GET /api/admin/kyc/stats – KYC dashboard stats
 app.get('/api/admin/kyc/stats', requireAdmin, async (req, res) => {
   try {
-    // Total pending
     const pendingResult = await pool.query(
       "SELECT COUNT(*) FROM users WHERE kyc_document_status = 'pending'",
     );
-    // Approved this month (based on address_verified and updated_at)
     const approvedResult = await pool.query(
       `SELECT COUNT(*) FROM users 
        WHERE address_verified = TRUE 
-       AND updated_at >= DATE_TRUNC('month', CURRENT_DATE)`,
+       AND date_joined >= DATE_TRUNC('month', CURRENT_DATE)`,
     );
-    // Rejected this month
     const rejectedResult = await pool.query(
       `SELECT COUNT(*) FROM users 
        WHERE kyc_document_status = 'rejected' 
-       AND updated_at >= DATE_TRUNC('month', CURRENT_DATE)`,
+       AND date_joined >= DATE_TRUNC('month', CURRENT_DATE)`,
     );
-    // Total approved ever
     const totalApprovedResult = await pool.query(
       'SELECT COUNT(*) FROM users WHERE address_verified = TRUE',
     );
@@ -3170,17 +3166,19 @@ app.get('/api/admin/kyc/stats', requireAdmin, async (req, res) => {
     res.status(500).json({ success: false, error: err.message });
   }
 });
+
 // GET /api/admin/kyc/all – all KYC submissions (for admin filtering)
 app.get('/api/admin/kyc/all', requireAdmin, async (req, res) => {
   try {
     const result = await pool.query(
-      `SELECT user_id, name, email, kyc_document_url, kyc_document_status, created_at, updated_at
+      `SELECT user_id, name, email, kyc_document_url, kyc_document_status, date_joined as created_at, date_joined as updated_at
        FROM users
        WHERE kyc_document_status IS NOT NULL
-       ORDER BY created_at DESC`,
+       ORDER BY date_joined DESC`,
     );
     res.json({ success: true, users: result.rows });
   } catch (err) {
+    console.error('KYC all error:', err);
     res.status(500).json({ success: false, error: err.message });
   }
 });
