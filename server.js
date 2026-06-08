@@ -2699,6 +2699,8 @@ app.post('/api/users/onboarding', async (req, res) => {
       marital_status,
     } = req.body;
 
+    console.log('📥 Onboarding received:', req.body);
+
     // Check if phone number is already used by another user
     if (phone_number) {
       const existing = await pool.query(
