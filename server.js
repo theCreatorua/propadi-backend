@@ -3133,26 +3133,17 @@ app.get('/api/admin/kyc/stats', requireAdmin, async (req, res) => {
     const pendingResult = await pool.query(
       "SELECT COUNT(*) FROM users WHERE kyc_document_status = 'pending'",
     );
-    // Approved this month (based on kyc_updated_at)
+    // Total approved (address_verified = TRUE)
     const approvedResult = await pool.query(
-      `SELECT COUNT(*) FROM users 
-       WHERE kyc_document_status = 'approved' 
-       AND kyc_updated_at >= DATE_TRUNC('month', CURRENT_DATE)`,
+      'SELECT COUNT(*) FROM users WHERE address_verified = TRUE',
     );
-    // Rejected this month (based on kyc_updated_at)
+    // Total rejected (kyc_document_status = 'rejected')
     const rejectedResult = await pool.query(
-      `SELECT COUNT(*) FROM users 
-       WHERE kyc_document_status = 'rejected' 
-       AND kyc_updated_at >= DATE_TRUNC('month', CURRENT_DATE)`,
-    );
-    // Total approved ever
-    const totalApprovedResult = await pool.query(
-      "SELECT COUNT(*) FROM users WHERE kyc_document_status = 'approved'",
+      "SELECT COUNT(*) FROM users WHERE kyc_document_status = 'rejected'",
     );
     const totalPending = parseInt(pendingResult.rows[0].count);
-    const approvedThisMonth = parseInt(approvedResult.rows[0].count);
-    const rejectedThisMonth = parseInt(rejectedResult.rows[0].count);
-    const totalApproved = parseInt(totalApprovedResult.rows[0].count);
+    const totalApproved = parseInt(approvedResult.rows[0].count);
+    const totalRejected = parseInt(rejectedResult.rows[0].count);
     const approvalRate =
       totalApproved + totalPending > 0
         ? ((totalApproved / (totalApproved + totalPending)) * 100).toFixed(1)
@@ -3162,8 +3153,8 @@ app.get('/api/admin/kyc/stats', requireAdmin, async (req, res) => {
       success: true,
       stats: {
         totalPending,
-        approvedThisMonth,
-        rejectedThisMonth,
+        totalApproved,
+        totalRejected,
         approvalRate,
       },
     });
