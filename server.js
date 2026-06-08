@@ -2669,6 +2669,10 @@ app.get('/api/owner/analytics', async (req, res) => {
 
 // POST /api/users/onboarding – save profile data after registration
 app.post('/api/users/onboarding', async (req, res) => {
+  console.log('📥 Onboarding endpoint hit');
+  console.log('📥 Headers:', req.headers);
+  console.log('📥 Body:', req.body);
+  // ... rest of the endpoint
   try {
     const authHeader = req.headers.authorization;
     if (!authHeader)
@@ -2698,8 +2702,6 @@ app.post('/api/users/onboarding', async (req, res) => {
       lga,
       marital_status,
     } = req.body;
-
-    console.log('📥 Onboarding received:', req.body);
 
     // Check if phone number is already used by another user
     if (phone_number) {
