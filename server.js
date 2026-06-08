@@ -3020,7 +3020,36 @@ app.put('/api/admin/kyc/:userId/reject', requireAdmin, async (req, res) => {
     res.status(500).json({ success: false, error: err.message });
   }
 });
-// added a comment
+// GET /api/users/kyc-status
+app.get('/api/users/kyc-status', async (req, res) => {
+  try {
+    const authHeader = req.headers.authorization;
+    if (!authHeader)
+      return res.status(401).json({ success: false, error: 'Unauthorized' });
+    const token = authHeader.split(' ')[1];
+    const {
+      data: { user },
+      error,
+    } = await supabase.auth.getUser(token);
+    if (error || !user)
+      return res.status(401).json({ success: false, error: 'Invalid token' });
+
+    const result = await pool.query(
+      'SELECT kyc_document_url, kyc_document_status FROM users WHERE user_id = $1',
+      [user.id],
+    );
+    res.json({
+      success: true,
+      data: result.rows[0] || {
+        kyc_document_url: null,
+        kyc_document_status: null,
+      },
+    });
+  } catch (err) {
+    console.error('KYC status error:', err);
+    res.status(500).json({ success: false, error: err.message });
+  }
+});
 // ==========================================
 // SERVER SETUP
 // ==========================================
