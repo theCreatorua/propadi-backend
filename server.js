@@ -2955,6 +2955,7 @@ app.get('/api/admin/kyc/pending', requireAdmin, async (req, res) => {
     );
     res.json({ success: true, users: result.rows });
   } catch (err) {
+    console.error('KYC pending error:', err);
     res.status(500).json({ success: false, error: err.message });
   }
 });
