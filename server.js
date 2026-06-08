@@ -2982,8 +2982,17 @@ app.put('/api/admin/kyc/:userId/approve', requireAdmin, async (req, res) => {
         JSON.stringify({ kyc: 'approved' }),
       ],
     );
+
+    // Send push notification to the user
+    await sendPushToUser(
+      userId,
+      'KYC Approved',
+      'Your address verification has been approved. You now have full access to list properties.',
+    );
+
     res.json({ success: true, message: 'KYC approved' });
   } catch (err) {
+    console.error('KYC approve error:', err);
     res.status(500).json({ success: false, error: err.message });
   }
 });
@@ -3010,14 +3019,16 @@ app.put('/api/admin/kyc/:userId/reject', requireAdmin, async (req, res) => {
         JSON.stringify({ reason }),
       ],
     );
-    // Optionally send push notification to user
-    await sendPushToUser(
-      userId,
-      'KYC Update',
-      `Your document was rejected. Reason: ${reason || 'Please resubmit'}`,
-    );
+
+    // Send push notification to the user
+    const notificationBody = reason
+      ? `Your document was rejected: ${reason}`
+      : 'Your document was rejected. Please resubmit.';
+    await sendPushToUser(userId, 'KYC Update', notificationBody);
+
     res.json({ success: true, message: 'KYC rejected' });
   } catch (err) {
+    console.error('KYC reject error:', err);
     res.status(500).json({ success: false, error: err.message });
   }
 });
@@ -3048,6 +3059,67 @@ app.get('/api/users/kyc-status', async (req, res) => {
     });
   } catch (err) {
     console.error('KYC status error:', err);
+    res.status(500).json({ success: false, error: err.message });
+  }
+});
+
+// GET /api/admin/kyc/pending-count
+app.get('/api/admin/kyc/pending-count', requireAdmin, async (req, res) => {
+  try {
+    const result = await pool.query(
+      'SELECT COUNT(*) as count FROM users WHERE kyc_document_status = $1',
+      ['pending'],
+    );
+    res.json({ success: true, count: parseInt(result.rows[0].count) });
+  } catch (err) {
+    console.error('KYC pending count error:', err);
+    res.status(500).json({ success: false, error: err.message });
+  }
+});
+
+// POST /api/admin/kyc/batch-approve
+app.post('/api/admin/kyc/batch-approve', requireAdmin, async (req, res) => {
+  try {
+    const { userIds } = req.body; // array of user IDs
+    if (!userIds || !userIds.length) {
+      return res
+        .status(400)
+        .json({ success: false, error: 'No user IDs provided' });
+    }
+    const placeholders = userIds.map((_, i) => `$${i + 1}`).join(',');
+    const query = `
+      UPDATE users
+      SET address_verified = TRUE,
+          kyc_document_status = 'approved',
+          kyc_tier = GREATEST(kyc_tier, 4)
+      WHERE user_id IN (${placeholders})
+      RETURNING user_id
+    `;
+    const result = await pool.query(query, userIds);
+
+    // Log each approval
+    for (const userId of result.rows.map((r) => r.user_id)) {
+      await pool.query(
+        'INSERT INTO admin_logs (admin_id, action, target_type, target_id, details) VALUES ($1, $2, $3, $4, $5)',
+        [
+          req.adminUser.id,
+          'BATCH_APPROVE_KYC',
+          'user',
+          userId,
+          JSON.stringify({ batch: true }),
+        ],
+      );
+      // Send push notification (optional, may be too many)
+      await sendPushToUser(
+        userId,
+        'KYC Approved',
+        'Your address verification has been approved.',
+      );
+    }
+
+    res.json({ success: true, approvedCount: result.rowCount });
+  } catch (err) {
+    console.error('Batch approve error:', err);
     res.status(500).json({ success: false, error: err.message });
   }
 });
