@@ -3133,21 +3133,21 @@ app.get('/api/admin/kyc/stats', requireAdmin, async (req, res) => {
     const pendingResult = await pool.query(
       "SELECT COUNT(*) FROM users WHERE kyc_document_status = 'pending'",
     );
-    // Approved this month
+    // Approved this month (based on kyc_updated_at)
     const approvedResult = await pool.query(
       `SELECT COUNT(*) FROM users 
-       WHERE address_verified = TRUE 
-       AND date_joined >= DATE_TRUNC('month', CURRENT_DATE)`,
+       WHERE kyc_document_status = 'approved' 
+       AND kyc_updated_at >= DATE_TRUNC('month', CURRENT_DATE)`,
     );
-    // Rejected this month
+    // Rejected this month (based on kyc_updated_at)
     const rejectedResult = await pool.query(
       `SELECT COUNT(*) FROM users 
        WHERE kyc_document_status = 'rejected' 
-       AND date_joined >= DATE_TRUNC('month', CURRENT_DATE)`,
+       AND kyc_updated_at >= DATE_TRUNC('month', CURRENT_DATE)`,
     );
     // Total approved ever
     const totalApprovedResult = await pool.query(
-      'SELECT COUNT(*) FROM users WHERE address_verified = TRUE',
+      "SELECT COUNT(*) FROM users WHERE kyc_document_status = 'approved'",
     );
     const totalPending = parseInt(pendingResult.rows[0].count);
     const approvedThisMonth = parseInt(approvedResult.rows[0].count);
@@ -3177,7 +3177,8 @@ app.get('/api/admin/kyc/stats', requireAdmin, async (req, res) => {
 app.get('/api/admin/kyc/all', requireAdmin, async (req, res) => {
   try {
     const result = await pool.query(
-      `SELECT user_id, name, email, kyc_document_url, kyc_document_status, date_joined as created_at, date_joined as updated_at
+      `SELECT user_id, name, email, kyc_document_url, kyc_document_status, 
+              date_joined as created_at, kyc_updated_at
        FROM users
        WHERE kyc_document_status IS NOT NULL
        ORDER BY date_joined DESC`,
