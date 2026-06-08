@@ -3132,7 +3132,7 @@ app.get('/api/admin/kyc/stats', requireAdmin, async (req, res) => {
     );
     const approvedResult = await pool.query(
       `SELECT COUNT(*) FROM users 
-       WHERE address_verified = TRUE 
+       WHERE kyc_document_status = 'approved' 
        AND date_joined >= DATE_TRUNC('month', CURRENT_DATE)`,
     );
     const rejectedResult = await pool.query(
@@ -3141,7 +3141,7 @@ app.get('/api/admin/kyc/stats', requireAdmin, async (req, res) => {
        AND date_joined >= DATE_TRUNC('month', CURRENT_DATE)`,
     );
     const totalApprovedResult = await pool.query(
-      'SELECT COUNT(*) FROM users WHERE address_verified = TRUE',
+      "SELECT COUNT(*) FROM users WHERE kyc_document_status = 'approved'",
     );
     const totalPending = parseInt(pendingResult.rows[0].count);
     const approvedThisMonth = parseInt(approvedResult.rows[0].count);
