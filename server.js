@@ -3123,6 +3123,53 @@ app.post('/api/admin/kyc/batch-approve', requireAdmin, async (req, res) => {
     res.status(500).json({ success: false, error: err.message });
   }
 });
+
+// GET /api/admin/kyc/stats – KYC dashboard stats
+app.get('/api/admin/kyc/stats', requireAdmin, async (req, res) => {
+  try {
+    // Total pending
+    const pendingResult = await pool.query(
+      "SELECT COUNT(*) FROM users WHERE kyc_document_status = 'pending'",
+    );
+    // Approved this month (based on address_verified and updated_at)
+    const approvedResult = await pool.query(
+      `SELECT COUNT(*) FROM users 
+       WHERE address_verified = TRUE 
+       AND updated_at >= DATE_TRUNC('month', CURRENT_DATE)`,
+    );
+    // Rejected this month
+    const rejectedResult = await pool.query(
+      `SELECT COUNT(*) FROM users 
+       WHERE kyc_document_status = 'rejected' 
+       AND updated_at >= DATE_TRUNC('month', CURRENT_DATE)`,
+    );
+    // Total approved ever
+    const totalApprovedResult = await pool.query(
+      'SELECT COUNT(*) FROM users WHERE address_verified = TRUE',
+    );
+    const totalPending = parseInt(pendingResult.rows[0].count);
+    const approvedThisMonth = parseInt(approvedResult.rows[0].count);
+    const rejectedThisMonth = parseInt(rejectedResult.rows[0].count);
+    const totalApproved = parseInt(totalApprovedResult.rows[0].count);
+    const approvalRate =
+      totalApproved + totalPending > 0
+        ? ((totalApproved / (totalApproved + totalPending)) * 100).toFixed(1)
+        : '0';
+
+    res.json({
+      success: true,
+      stats: {
+        totalPending,
+        approvedThisMonth,
+        rejectedThisMonth,
+        approvalRate,
+      },
+    });
+  } catch (err) {
+    console.error('KYC stats error:', err);
+    res.status(500).json({ success: false, error: err.message });
+  }
+});
 // ==========================================
 // SERVER SETUP
 // ==========================================
