@@ -2948,10 +2948,10 @@ app.get('/api/users/verification-status', async (req, res) => {
 app.get('/api/admin/kyc/pending', requireAdmin, async (req, res) => {
   try {
     const result = await pool.query(
-      `SELECT user_id, name, email, kyc_document_url, kyc_document_status, created_at
+      `SELECT user_id, name, email, kyc_document_url, kyc_document_status, date_joined as created_at
        FROM users
        WHERE kyc_document_status = 'pending'
-       ORDER BY created_at ASC`,
+       ORDER BY date_joined ASC`,
     );
     res.json({ success: true, users: result.rows });
   } catch (err) {
