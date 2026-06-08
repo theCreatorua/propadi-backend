@@ -2944,7 +2944,7 @@ app.get('/api/users/verification-status', async (req, res) => {
   }
 });
 
-// GET /api/admin/kyc/pending – list users with pending KYC
+// GET /api/admin/kyc/pending – list users with pending KYC documents
 app.get('/api/admin/kyc/pending', requireAdmin, async (req, res) => {
   try {
     const result = await pool.query(
@@ -2964,15 +2964,16 @@ app.get('/api/admin/kyc/pending', requireAdmin, async (req, res) => {
 app.put('/api/admin/kyc/:userId/approve', requireAdmin, async (req, res) => {
   try {
     const { userId } = req.params;
+    // Update user: address_verified = TRUE, kyc_document_status = 'approved', increase kyc_tier
     await pool.query(
       `UPDATE users
        SET address_verified = TRUE,
            kyc_document_status = 'approved',
-           kyc_tier = GREATEST(kyc_tier, 4),
-           kyc_approved_at = NOW()
+           kyc_tier = GREATEST(kyc_tier, 4)
        WHERE user_id = $1`,
       [userId],
     );
+    // Log admin action
     await pool.query(
       'INSERT INTO admin_logs (admin_id, action, target_type, target_id, details) VALUES ($1, $2, $3, $4, $5)',
       [
@@ -2983,14 +2984,14 @@ app.put('/api/admin/kyc/:userId/approve', requireAdmin, async (req, res) => {
         JSON.stringify({ kyc: 'approved' }),
       ],
     );
-
-    // Send push notification to the user
-    await sendPushToUser(
-      userId,
-      'KYC Approved',
-      'Your address verification has been approved. You now have full access to list properties.',
-    );
-
+    // Send push notification (if function exists)
+    if (typeof sendPushToUser === 'function') {
+      await sendPushToUser(
+        userId,
+        'KYC Approved',
+        'Your address verification has been approved. You now have full access to list properties.',
+      );
+    }
     res.json({ success: true, message: 'KYC approved' });
   } catch (err) {
     console.error('KYC approve error:', err);
@@ -3020,19 +3021,19 @@ app.put('/api/admin/kyc/:userId/reject', requireAdmin, async (req, res) => {
         JSON.stringify({ reason }),
       ],
     );
-
-    // Send push notification to the user
     const notificationBody = reason
       ? `Your document was rejected: ${reason}`
       : 'Your document was rejected. Please resubmit.';
-    await sendPushToUser(userId, 'KYC Update', notificationBody);
-
+    if (typeof sendPushToUser === 'function') {
+      await sendPushToUser(userId, 'KYC Update', notificationBody);
+    }
     res.json({ success: true, message: 'KYC rejected' });
   } catch (err) {
     console.error('KYC reject error:', err);
     res.status(500).json({ success: false, error: err.message });
   }
 });
+
 // GET /api/users/kyc-status
 app.get('/api/users/kyc-status', async (req, res) => {
   try {
@@ -3081,7 +3082,7 @@ app.get('/api/admin/kyc/pending-count', requireAdmin, async (req, res) => {
 // POST /api/admin/kyc/batch-approve
 app.post('/api/admin/kyc/batch-approve', requireAdmin, async (req, res) => {
   try {
-    const { userIds } = req.body; // array of user IDs
+    const { userIds } = req.body;
     if (!userIds || !userIds.length) {
       return res
         .status(400)
@@ -3097,27 +3098,25 @@ app.post('/api/admin/kyc/batch-approve', requireAdmin, async (req, res) => {
       RETURNING user_id
     `;
     const result = await pool.query(query, userIds);
-
-    // Log each approval
-    for (const userId of result.rows.map((r) => r.user_id)) {
+    for (const row of result.rows) {
       await pool.query(
         'INSERT INTO admin_logs (admin_id, action, target_type, target_id, details) VALUES ($1, $2, $3, $4, $5)',
         [
           req.adminUser.id,
           'BATCH_APPROVE_KYC',
           'user',
-          userId,
+          row.user_id,
           JSON.stringify({ batch: true }),
         ],
       );
-      // Send push notification (optional, may be too many)
-      await sendPushToUser(
-        userId,
-        'KYC Approved',
-        'Your address verification has been approved.',
-      );
+      if (typeof sendPushToUser === 'function') {
+        await sendPushToUser(
+          row.user_id,
+          'KYC Approved',
+          'Your address verification has been approved.',
+        );
+      }
     }
-
     res.json({ success: true, approvedCount: result.rowCount });
   } catch (err) {
     console.error('Batch approve error:', err);
@@ -3125,24 +3124,28 @@ app.post('/api/admin/kyc/batch-approve', requireAdmin, async (req, res) => {
   }
 });
 
-// GET /api/admin/kyc/stats – KYC dashboard stats
+// GET /api/admin/kyc/stats – KYC dashboard statistics
 app.get('/api/admin/kyc/stats', requireAdmin, async (req, res) => {
   try {
+    // Total pending
     const pendingResult = await pool.query(
       "SELECT COUNT(*) FROM users WHERE kyc_document_status = 'pending'",
     );
+    // Approved this month (based on address_verified and date_joined)
     const approvedResult = await pool.query(
       `SELECT COUNT(*) FROM users 
-       WHERE kyc_document_status = 'approved' 
-       AND kyc_approved_at >= DATE_TRUNC('month', CURRENT_DATE)`,
+       WHERE address_verified = TRUE 
+       AND date_joined >= DATE_TRUNC('month', CURRENT_DATE)`,
     );
+    // Rejected this month (based on kyc_document_status = 'rejected' and date_joined)
     const rejectedResult = await pool.query(
       `SELECT COUNT(*) FROM users 
        WHERE kyc_document_status = 'rejected' 
-       AND updated_at >= DATE_TRUNC('month', CURRENT_DATE)`,
+       AND date_joined >= DATE_TRUNC('month', CURRENT_DATE)`,
     );
+    // Total approved ever
     const totalApprovedResult = await pool.query(
-      "SELECT COUNT(*) FROM users WHERE kyc_document_status = 'approved'",
+      'SELECT COUNT(*) FROM users WHERE address_verified = TRUE',
     );
     const totalPending = parseInt(pendingResult.rows[0].count);
     const approvedThisMonth = parseInt(approvedResult.rows[0].count);
