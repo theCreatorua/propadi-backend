@@ -2967,10 +2967,11 @@ app.put('/api/admin/kyc/:userId/approve', requireAdmin, async (req, res) => {
     // Update user: address_verified = TRUE, kyc_document_status = 'approved', increase kyc_tier
     await pool.query(
       `UPDATE users
-       SET address_verified = TRUE,
-           kyc_document_status = 'approved',
-           kyc_tier = GREATEST(kyc_tier, 4)
-       WHERE user_id = $1`,
+   SET address_verified = TRUE,
+       kyc_document_status = 'approved',
+       kyc_tier = GREATEST(kyc_tier, 4),
+       kyc_updated_at = NOW()
+   WHERE user_id = $1`,
       [userId],
     );
     // Log admin action
@@ -3006,9 +3007,10 @@ app.put('/api/admin/kyc/:userId/reject', requireAdmin, async (req, res) => {
     const { reason } = req.body;
     await pool.query(
       `UPDATE users
-       SET kyc_document_status = 'rejected',
-           kyc_document_url = NULL
-       WHERE user_id = $1`,
+   SET kyc_document_status = 'rejected',
+       kyc_document_url = NULL,
+       kyc_updated_at = NOW()
+   WHERE user_id = $1`,
       [userId],
     );
     await pool.query(
