@@ -3170,6 +3170,20 @@ app.get('/api/admin/kyc/stats', requireAdmin, async (req, res) => {
     res.status(500).json({ success: false, error: err.message });
   }
 });
+// GET /api/admin/kyc/all – all KYC submissions (for admin filtering)
+app.get('/api/admin/kyc/all', requireAdmin, async (req, res) => {
+  try {
+    const result = await pool.query(
+      `SELECT user_id, name, email, kyc_document_url, kyc_document_status, created_at, updated_at
+       FROM users
+       WHERE kyc_document_status IS NOT NULL
+       ORDER BY created_at DESC`,
+    );
+    res.json({ success: true, users: result.rows });
+  } catch (err) {
+    res.status(500).json({ success: false, error: err.message });
+  }
+});
 // ==========================================
 // SERVER SETUP
 // ==========================================
