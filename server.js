@@ -2968,7 +2968,8 @@ app.put('/api/admin/kyc/:userId/approve', requireAdmin, async (req, res) => {
       `UPDATE users
        SET address_verified = TRUE,
            kyc_document_status = 'approved',
-           kyc_tier = GREATEST(kyc_tier, 4)
+           kyc_tier = GREATEST(kyc_tier, 4),
+           kyc_approved_at = NOW()
        WHERE user_id = $1`,
       [userId],
     );
@@ -3133,12 +3134,12 @@ app.get('/api/admin/kyc/stats', requireAdmin, async (req, res) => {
     const approvedResult = await pool.query(
       `SELECT COUNT(*) FROM users 
        WHERE kyc_document_status = 'approved' 
-       AND date_joined >= DATE_TRUNC('month', CURRENT_DATE)`,
+       AND kyc_approved_at >= DATE_TRUNC('month', CURRENT_DATE)`,
     );
     const rejectedResult = await pool.query(
       `SELECT COUNT(*) FROM users 
        WHERE kyc_document_status = 'rejected' 
-       AND date_joined >= DATE_TRUNC('month', CURRENT_DATE)`,
+       AND updated_at >= DATE_TRUNC('month', CURRENT_DATE)`,
     );
     const totalApprovedResult = await pool.query(
       "SELECT COUNT(*) FROM users WHERE kyc_document_status = 'approved'",
