@@ -2035,6 +2035,7 @@ app.put('/api/admin/properties/:id/status', requireAdmin, async (req, res) => {
         JSON.stringify({ status, admin_note }),
       ],
     );
+
     res.json({ success: true, property: result.rows[0] });
   } catch (err) {
     res.status(500).json({ success: false, error: err.message });
@@ -3236,6 +3237,30 @@ app.put('/api/admin/properties/:id/status', requireAdmin, async (req, res) => {
         JSON.stringify({ status, is_featured }),
       ],
     );
+
+    // Send push notification to property owner
+    const propertyResult = await pool.query(
+      'SELECT owner_id, title FROM properties WHERE property_id = $1',
+      [id],
+    );
+    if (propertyResult.rows.length > 0) {
+      const ownerId = propertyResult.rows[0].owner_id;
+      const propertyTitle = propertyResult.rows[0].title;
+      let title = '';
+      let body = '';
+      if (status === 'Available') {
+        title = 'Property Approved';
+        body = `Your property "${propertyTitle}" has been approved and is now live.`;
+      } else if (status === 'Rejected') {
+        title = 'Property Rejected';
+        body = `Your property "${propertyTitle}" was not approved. Please check the listing details.`;
+      } else if (is_featured !== undefined) {
+        title = is_featured ? 'Property Featured' : 'Property Unfeatured';
+        body = `Your property "${propertyTitle}" has been ${is_featured ? 'marked as featured' : 'removed from featured listings'}.`;
+      }
+      if (title)
+        await sendPushToUser(ownerId, title, body, { screen: 'MyProperties' });
+    }
     res.json({ success: true, property: result.rows[0] });
   } catch (err) {
     console.error('Update property status error:', err);
