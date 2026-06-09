@@ -3209,16 +3209,23 @@ app.get('/api/admin/properties', requireAdmin, async (req, res) => {
 app.put('/api/admin/properties/:id/status', requireAdmin, async (req, res) => {
   try {
     const { id } = req.params;
-    const { status, is_featured } = req.body; // status: 'Available', 'Rejected', 'Under Review'
-    let query = 'UPDATE properties SET status = COALESCE($1, status)';
-    const values = [status || null];
-    let paramIndex = 2;
-    if (is_featured !== undefined) {
-      query += `, is_featured = $${paramIndex}`;
-      values.push(is_featured);
-      paramIndex++;
+    const { status, is_featured } = req.body;
+    let updates = [];
+    const values = [];
+    if (status !== undefined) {
+      updates.push(`status = $${values.length + 1}`);
+      values.push(status);
     }
-    query += ` WHERE property_id = $${paramIndex} RETURNING *`;
+    if (is_featured !== undefined) {
+      updates.push(`is_featured = $${values.length + 1}`);
+      values.push(is_featured);
+    }
+    if (updates.length === 0) {
+      return res
+        .status(400)
+        .json({ success: false, error: 'No fields to update' });
+    }
+    const query = `UPDATE properties SET ${updates.join(', ')} WHERE property_id = $${values.length + 1} RETURNING *`;
     values.push(id);
     const result = await pool.query(query, values);
     if (result.rows.length === 0) {
@@ -3226,44 +3233,37 @@ app.put('/api/admin/properties/:id/status', requireAdmin, async (req, res) => {
         .status(404)
         .json({ success: false, error: 'Property not found' });
     }
-    // Log admin action
-    await pool.query(
-      'INSERT INTO admin_logs (admin_id, action, target_type, target_id, details) VALUES ($1, $2, $3, $4, $5)',
-      [
-        req.adminUser.id,
-        'UPDATE_PROPERTY_STATUS',
-        'property',
-        id,
-        JSON.stringify({ status, is_featured }),
-      ],
-    );
-
-    // Send push notification to property owner
-    const propertyResult = await pool.query(
-      'SELECT owner_id, title FROM properties WHERE property_id = $1',
-      [id],
-    );
-    if (propertyResult.rows.length > 0) {
-      const ownerId = propertyResult.rows[0].owner_id;
-      const propertyTitle = propertyResult.rows[0].title;
-      let title = '';
-      let body = '';
-      if (status === 'Available') {
-        title = 'Property Approved';
-        body = `Your property "${propertyTitle}" has been approved and is now live.`;
-      } else if (status === 'Rejected') {
-        title = 'Property Rejected';
-        body = `Your property "${propertyTitle}" was not approved. Please check the listing details.`;
-      } else if (is_featured !== undefined) {
-        title = is_featured ? 'Property Featured' : 'Property Unfeatured';
-        body = `Your property "${propertyTitle}" has been ${is_featured ? 'marked as featured' : 'removed from featured listings'}.`;
+    // Optional: send push notification to owner
+    try {
+      const property = result.rows[0];
+      const ownerResult = await pool.query(
+        'SELECT user_id FROM users WHERE user_id = $1',
+        [property.owner_id],
+      );
+      if (ownerResult.rows.length > 0) {
+        let title = '';
+        let body = '';
+        if (status === 'Available') {
+          title = 'Property Approved';
+          body = `Your property "${property.title}" has been approved and is now live.`;
+        } else if (status === 'Rejected') {
+          title = 'Property Rejected';
+          body = `Your property "${property.title}" was not approved. Please check the listing details.`;
+        } else if (is_featured !== undefined) {
+          title = is_featured ? 'Property Featured' : 'Property Unfeatured';
+          body = `Your property "${property.title}" has been ${is_featured ? 'marked as featured' : 'removed from featured listings'}.`;
+        }
+        if (title)
+          await sendPushToUser(property.owner_id, title, body, {
+            screen: 'MyProperties',
+          });
       }
-      if (title)
-        await sendPushToUser(ownerId, title, body, { screen: 'MyProperties' });
+    } catch (pushErr) {
+      console.error('Push notification failed', pushErr);
     }
     res.json({ success: true, property: result.rows[0] });
   } catch (err) {
-    console.error('Update property status error:', err);
+    console.error('Update property error:', err);
     res.status(500).json({ success: false, error: err.message });
   }
 });
