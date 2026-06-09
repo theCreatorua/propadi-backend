@@ -3180,6 +3180,69 @@ app.get('/api/admin/kyc/all', requireAdmin, async (req, res) => {
     res.status(500).json({ success: false, error: err.message });
   }
 });
+// GET /api/admin/properties – list all properties (admin)
+app.get('/api/admin/properties', requireAdmin, async (req, res) => {
+  try {
+    const { status } = req.query;
+    let query = `
+      SELECT p.*, u.name as owner_name, u.email as owner_email,
+             (SELECT COUNT(*) FROM applications WHERE property_id = p.property_id) as application_count
+      FROM properties p
+      JOIN users u ON p.owner_id = u.user_id
+    `;
+    const params = [];
+    if (status && status !== 'all') {
+      query += ' WHERE p.status = $1';
+      params.push(status);
+    }
+    query += ' ORDER BY p.date_listed DESC';
+    const result = await pool.query(query, params);
+    res.json({ success: true, properties: result.rows });
+  } catch (err) {
+    console.error('Admin properties error:', err);
+    res.status(500).json({ success: false, error: err.message });
+  }
+});
+
+// PUT /api/admin/properties/:id/status – update property status
+app.put('/api/admin/properties/:id/status', requireAdmin, async (req, res) => {
+  try {
+    const { id } = req.params;
+    const { status, is_featured } = req.body; // status: 'Available', 'Rejected', 'Under Review'
+    let query = 'UPDATE properties SET status = COALESCE($1, status)';
+    const values = [status || null];
+    let paramIndex = 2;
+    if (is_featured !== undefined) {
+      query += `, is_featured = $${paramIndex}`;
+      values.push(is_featured);
+      paramIndex++;
+    }
+    query += ` WHERE property_id = $${paramIndex} RETURNING *`;
+    values.push(id);
+    const result = await pool.query(query, values);
+    if (result.rows.length === 0) {
+      return res
+        .status(404)
+        .json({ success: false, error: 'Property not found' });
+    }
+    // Log admin action
+    await pool.query(
+      'INSERT INTO admin_logs (admin_id, action, target_type, target_id, details) VALUES ($1, $2, $3, $4, $5)',
+      [
+        req.adminUser.id,
+        'UPDATE_PROPERTY_STATUS',
+        'property',
+        id,
+        JSON.stringify({ status, is_featured }),
+      ],
+    );
+    res.json({ success: true, property: result.rows[0] });
+  } catch (err) {
+    console.error('Update property status error:', err);
+    res.status(500).json({ success: false, error: err.message });
+  }
+});
+
 // ==========================================
 // SERVER SETUP
 // ==========================================
