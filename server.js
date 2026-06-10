@@ -267,7 +267,6 @@ app.get('/api/properties', async (req, res) => {
       ORDER BY p.date_listed DESC
     `;
     const result = await pool.query(query);
-    // Add a boolean flag for convenience
     const properties = result.rows.map((row) => ({
       ...row,
       has_verified_amenities: row.verified_amenities_count > 0,
@@ -279,7 +278,6 @@ app.get('/api/properties', async (req, res) => {
   }
 });
 
-// NEW SEARCH ENDPOINT
 app.get('/api/properties/search', async (req, res) => {
   try {
     const { state, lga, city, minPrice, maxPrice, bedrooms, amenities, query } =
@@ -544,7 +542,6 @@ app.post('/api/messages', async (req, res) => {
       [property_id, sender_id, receiver_id, content],
     );
 
-    // Push notification for chat
     const senderNameQuery = await pool.query(
       'SELECT name FROM users WHERE user_id = $1',
       [sender_id],
@@ -654,7 +651,6 @@ app.post('/api/viewings', async (req, res) => {
       [property_id, renter_id, landlord_id, messageContent],
     );
 
-    // Push notification to owner
     const ownerNameQuery = await pool.query(
       'SELECT name FROM users WHERE user_id = $1',
       [landlord_id],
@@ -1859,7 +1855,6 @@ app.put('/api/maintenance/:id', async (req, res) => {
 // ADMIN DASHBOARD ENDPOINTS
 // ==========================================
 
-// Middleware to verify admin role
 const requireAdmin = async (req, res, next) => {
   try {
     const authHeader = req.headers.authorization;
@@ -1892,7 +1887,6 @@ const requireAdmin = async (req, res, next) => {
   }
 };
 
-// GET /api/admin/stats – platform statistics
 app.get('/api/admin/stats', requireAdmin, async (req, res) => {
   try {
     const usersCount = await pool.query('SELECT COUNT(*) FROM users');
@@ -1922,7 +1916,6 @@ app.get('/api/admin/stats', requireAdmin, async (req, res) => {
   }
 });
 
-// GET /api/admin/users – list all users (with optional role filter)
 app.get('/api/admin/users', requireAdmin, async (req, res) => {
   try {
     const { role } = req.query;
@@ -1941,7 +1934,6 @@ app.get('/api/admin/users', requireAdmin, async (req, res) => {
   }
 });
 
-// PUT /api/admin/users/:userId/role – update user role (owner/renter) or admin flag
 app.put('/api/admin/users/:userId', requireAdmin, async (req, res) => {
   try {
     const { userId } = req.params;
@@ -1970,7 +1962,6 @@ app.put('/api/admin/users/:userId', requireAdmin, async (req, res) => {
     const result = await pool.query(query, values);
     if (result.rows.length === 0)
       return res.status(404).json({ success: false, error: 'User not found' });
-    // Log action
     await pool.query(
       'INSERT INTO admin_logs (admin_id, action, target_type, target_id, details) VALUES ($1, $2, $3, $4, $5)',
       [
@@ -1987,62 +1978,72 @@ app.put('/api/admin/users/:userId', requireAdmin, async (req, res) => {
   }
 });
 
-// GET /api/admin/properties – list all properties with optional status filter
-app.get('/api/admin/properties', requireAdmin, async (req, res) => {
-  try {
-    const { status } = req.query;
-    let query = `
-      SELECT p.*, u.name as owner_name, u.email as owner_email,
-             (SELECT COUNT(*) FROM applications WHERE property_id = p.property_id) as application_count
-      FROM properties p
-      JOIN users u ON p.owner_id = u.user_id
-    `;
-    const params = [];
-    if (status) {
-      query += ' WHERE p.status = $1';
-      params.push(status);
-    }
-    query += ' ORDER BY p.date_listed DESC';
-    const result = await pool.query(query, params);
-    res.json({ success: true, properties: result.rows });
-  } catch (err) {
-    res.status(500).json({ success: false, error: err.message });
-  }
-});
-
-// PUT /api/admin/properties/:id/status – approve, reject, or change listing status
+// ✅ FIXED: Admin property status route – supports both `status` and `is_featured`
 app.put('/api/admin/properties/:id/status', requireAdmin, async (req, res) => {
   try {
     const { id } = req.params;
-    const { status, admin_note } = req.body; // status: 'Available', 'Rejected', 'Under Review', etc.
-    if (!status)
-      return res.status(400).json({ success: false, error: 'Status required' });
-    const result = await pool.query(
-      'UPDATE properties SET status = $1 WHERE property_id = $2 RETURNING *',
-      [status, id],
-    );
-    if (result.rows.length === 0)
+    const { status, is_featured } = req.body;
+
+    let updates = [];
+    const values = [];
+
+    if (status !== undefined) {
+      updates.push(`status = $${values.length + 1}`);
+      values.push(status);
+    }
+    if (is_featured !== undefined) {
+      updates.push(`is_featured = $${values.length + 1}`);
+      values.push(is_featured);
+    }
+
+    if (updates.length === 0) {
+      return res
+        .status(400)
+        .json({ success: false, error: 'No fields to update' });
+    }
+
+    const query = `UPDATE properties SET ${updates.join(', ')} WHERE property_id = $${values.length + 1} RETURNING *`;
+    values.push(id);
+
+    const result = await pool.query(query, values);
+    if (result.rows.length === 0) {
       return res
         .status(404)
         .json({ success: false, error: 'Property not found' });
-    await pool.query(
-      'INSERT INTO admin_logs (admin_id, action, target_type, target_id, details) VALUES ($1, $2, $3, $4, $5)',
-      [
-        req.adminUser.id,
-        'UPDATE_PROPERTY_STATUS',
-        'property',
-        id,
-        JSON.stringify({ status, admin_note }),
-      ],
-    );
+    }
 
-    res.json({ success: true, property: result.rows[0] });
+    const property = result.rows[0];
+
+    // Send push notification only for status changes (not for featured toggles)
+    if (status !== undefined) {
+      try {
+        let title = '',
+          body = '';
+        if (status === 'Available') {
+          title = 'Property Approved';
+          body = `Your property "${property.title}" has been approved and is now live.`;
+        } else if (status === 'Rejected') {
+          title = 'Property Rejected';
+          body = `Your property "${property.title}" was not approved. Please check the listing details.`;
+        }
+        if (title) {
+          await sendPushToUser(property.owner_id, title, body, {
+            screen: 'MyProperties',
+          });
+        }
+      } catch (pushErr) {
+        console.error('Push notification failed', pushErr);
+      }
+    }
+
+    // Always return the full updated property
+    res.json({ success: true, property });
   } catch (err) {
+    console.error('Update property error:', err);
     res.status(500).json({ success: false, error: err.message });
   }
 });
 
-// GET /api/admin/transactions – all platform transactions
 app.get('/api/admin/transactions', requireAdmin, async (req, res) => {
   try {
     const { limit = 100, offset = 0 } = req.query;
@@ -2067,11 +2068,9 @@ app.get('/api/admin/transactions', requireAdmin, async (req, res) => {
   }
 });
 
-// DELETE /api/admin/users/:userId – delete user (admin only)
 app.delete('/api/admin/users/:userId', requireAdmin, async (req, res) => {
   try {
     const { userId } = req.params;
-    // Prevent admin from deleting themselves
     if (userId === req.adminUser.id)
       return res.status(400).json({
         success: false,
@@ -2092,7 +2091,6 @@ app.delete('/api/admin/users/:userId', requireAdmin, async (req, res) => {
 // RATING & REVIEW SYSTEM
 // ==========================================
 
-// POST /api/reviews – submit a review
 app.post('/api/reviews', async (req, res) => {
   const client = await pool.connect();
   try {
@@ -2111,7 +2109,6 @@ app.post('/api/reviews', async (req, res) => {
         .json({ success: false, error: 'Invalid review data' });
     }
 
-    // Check if user already reviewed this tenancy (one review per tenancy per user)
     const existing = await client.query(
       'SELECT id FROM reviews WHERE reviewer_id = $1 AND tenancy_id = $2',
       [reviewer_id, tenancy_id],
@@ -2138,7 +2135,6 @@ app.post('/api/reviews', async (req, res) => {
       ],
     );
 
-    // Update average rating for reviewee
     const avgResult = await client.query(
       'SELECT AVG(rating)::DECIMAL(10,2) as avg FROM reviews WHERE reviewee_id = $1',
       [reviewee_id],
@@ -2149,8 +2145,6 @@ app.post('/api/reviews', async (req, res) => {
       reviewee_id,
     ]);
 
-    // Optional: adjust trust score based on rating
-    // (e.g., +2 for 5-star, -1 for 1-star)
     if (rating === 5) {
       await client.query(
         'UPDATE users SET renter_score = renter_score + 2 WHERE user_id = $1',
@@ -2162,22 +2156,18 @@ app.post('/api/reviews', async (req, res) => {
         [reviewee_id],
       );
     }
-    // --- PUSH NOTIFICATION FOR NEW REVIEW ---
-    // Get reviewer's name
+
     const reviewerNameQuery = await pool.query(
       'SELECT name FROM users WHERE user_id = $1',
       [reviewer_id],
     );
     const reviewerName = reviewerNameQuery.rows[0]?.name || 'Someone';
-
-    // Send push to the reviewee
     await sendPushToUser(
       reviewee_id,
       '⭐ New Review Received',
       `${reviewerName} gave you a ${rating}-star review.`,
       { screen: 'Profile' },
     );
-    // --- END PUSH ---
     await client.query('COMMIT');
     res.json({ success: true, review: result.rows[0] });
   } catch (err) {
@@ -2189,20 +2179,20 @@ app.post('/api/reviews', async (req, res) => {
   }
 });
 
-// GET /api/users/:userId/reviews – get all reviews for a user
+// ✅ FIXED: reviews query – uses profile_picture_url as avatar_url
 app.get('/api/users/:userId/reviews', async (req, res) => {
   try {
     const { userId } = req.params;
     const result = await pool.query(
       `SELECT r.*, 
-          u.name as reviewer_name, u.profile_picture_url as avatar_url,
-          p.title as property_title
-   FROM reviews r
-   JOIN users u ON r.reviewer_id = u.user_id
-   LEFT JOIN tenancies t ON r.tenancy_id = t.tenancy_id
-   LEFT JOIN properties p ON t.property_id = p.property_id
-   WHERE r.reviewee_id = $1
-   ORDER BY r.created_at DESC`,
+              u.name as reviewer_name, u.profile_picture_url as avatar_url,
+              p.title as property_title
+       FROM reviews r
+       JOIN users u ON r.reviewer_id = u.user_id
+       LEFT JOIN tenancies t ON r.tenancy_id = t.tenancy_id
+       LEFT JOIN properties p ON t.property_id = p.property_id
+       WHERE r.reviewee_id = $1
+       ORDER BY r.created_at DESC`,
       [userId],
     );
     res.json({ success: true, reviews: result.rows });
@@ -2212,7 +2202,6 @@ app.get('/api/users/:userId/reviews', async (req, res) => {
   }
 });
 
-// GET /api/tenancies/:tenancyId/review-status – check if current user can review
 app.get('/api/tenancies/:tenancyId/review-status', async (req, res) => {
   try {
     const { tenancyId } = req.params;
@@ -2227,7 +2216,6 @@ app.get('/api/tenancies/:tenancyId/review-status', async (req, res) => {
     if (error || !user)
       return res.status(401).json({ success: false, error: 'Invalid token' });
 
-    // Check if tenancy belongs to user (as renter or owner) and is paid/ended
     const tenancyResult = await pool.query(
       `SELECT renter_id, owner_id, lease_end_date, payment_status 
        FROM tenancies WHERE tenancy_id = $1`,
@@ -2251,7 +2239,6 @@ app.get('/api/tenancies/:tenancyId/review-status', async (req, res) => {
       });
     }
 
-    // Check if tenancy is completed (lease_end_date passed) or payment_status = 'Paid' and ended
     const now = new Date();
     const leaseEnd = new Date(tenancy.lease_end_date);
     const isCompleted = leaseEnd < now;
@@ -2263,7 +2250,6 @@ app.get('/api/tenancies/:tenancyId/review-status', async (req, res) => {
       });
     }
 
-    // Check if user already reviewed
     const existing = await pool.query(
       'SELECT id FROM reviews WHERE reviewer_id = $1 AND tenancy_id = $2',
       [user.id, tenancyId],
@@ -2290,7 +2276,6 @@ app.get('/api/tenancies/:tenancyId/review-status', async (req, res) => {
   }
 });
 
-// GET /api/notifications/:userId – get all notifications for a user
 app.get('/api/notifications/:userId', async (req, res) => {
   try {
     const { userId } = req.params;
@@ -2310,7 +2295,6 @@ app.get('/api/notifications/:userId', async (req, res) => {
   }
 });
 
-// PUT /api/notifications/:id/read – mark a single notification as read
 app.put('/api/notifications/:id/read', async (req, res) => {
   try {
     const { id } = req.params;
@@ -2324,7 +2308,6 @@ app.put('/api/notifications/:id/read', async (req, res) => {
   }
 });
 
-// PUT /api/notifications/mark-all-read – mark all notifications for a user as read
 app.put('/api/notifications/mark-all-read', async (req, res) => {
   try {
     const authHeader = req.headers.authorization;
@@ -2350,11 +2333,10 @@ app.put('/api/notifications/mark-all-read', async (req, res) => {
 });
 
 // ==========================================
-// RECURRING RENT REMINDERS (Cron job endpoint)
+// RECURRING RENT REMINDERS
 // ==========================================
 
 app.post('/api/cron/check-rent-reminders', async (req, res) => {
-  // Optional: verify a secret key to prevent public access
   const secretKey = req.headers['x-cron-secret'];
   if (secretKey !== process.env.CRON_SECRET) {
     return res.status(401).json({ success: false, error: 'Unauthorized' });
@@ -2366,7 +2348,6 @@ app.post('/api/cron/check-rent-reminders', async (req, res) => {
     const sevenDaysLater = new Date(today);
     sevenDaysLater.setDate(today.getDate() + 7);
 
-    // Find tenancies ending within the next 7 days, that are paid and not yet fully reminded
     const query = `
       SELECT t.tenancy_id, t.rent_amount, t.lease_end_date, t.last_rent_reminder_sent,
              u.user_id as tenant_id, u.email as tenant_email, u.name as tenant_name,
@@ -2393,17 +2374,15 @@ app.post('/api/cron/check-rent-reminders', async (req, res) => {
       else if (daysUntilDue === 3) reminderDays = 3;
       else if (daysUntilDue === 1) reminderDays = 1;
 
-      if (reminderDays === null) continue; // only send at exact 7, 3, 1 days before
+      if (reminderDays === null) continue;
 
       const title = `Rent Due in ${reminderDays} Day${reminderDays > 1 ? 's' : ''}`;
       const body = `Your rent of ₦${tenancy.rent_amount.toLocaleString()} for ${tenancy.property_title} is due on ${endDate.toLocaleDateString()}. Please pay via Propadi to avoid late fees.`;
 
-      // Send push notification
       await sendPushToUser(tenancy.tenant_id, title, body, {
         screen: 'TenantWallet',
       });
 
-      // Send email (optional – using Resend)
       try {
         await resend.emails.send({
           from: 'Propadi <onboarding@resend.dev>',
@@ -2417,18 +2396,14 @@ app.post('/api/cron/check-rent-reminders', async (req, res) => {
         console.error('Email failed for', tenancy.tenant_email, emailErr);
       }
 
-      // Update last reminder sent date
       await pool.query(
         'UPDATE tenancies SET last_rent_reminder_sent = $1 WHERE tenancy_id = $2',
         [today, tenancy.tenancy_id],
       );
-
-      // Optional: log to audit table
       await pool.query(
         'INSERT INTO rent_reminder_logs (tenancy_id, days_before) VALUES ($1, $2)',
         [tenancy.tenancy_id, reminderDays],
       );
-
       remindersSent++;
     }
 
@@ -2440,7 +2415,7 @@ app.post('/api/cron/check-rent-reminders', async (req, res) => {
 });
 
 // ==========================================
-// VIEWING REMINDERS (Cron job endpoint – run hourly)
+// VIEWING REMINDERS
 // ==========================================
 
 app.post('/api/cron/check-viewing-reminders', async (req, res) => {
@@ -2455,7 +2430,6 @@ app.post('/api/cron/check-viewing-reminders', async (req, res) => {
     const threeHoursLater = new Date(now.getTime() + 3 * 60 * 60 * 1000);
     const twentyFourHoursLater = new Date(now.getTime() + 24 * 60 * 60 * 1000);
 
-    // Find accepted viewings with scheduled start time in the future
     const query = `
       SELECT v.viewing_id, v.scheduled_start_time, v.reminder_24h_sent, v.reminder_3h_sent, v.reminder_1h_sent,
              v.renter_id, v.owner_id, v.property_id,
@@ -2474,7 +2448,6 @@ app.post('/api/cron/check-viewing-reminders', async (req, res) => {
       const diffMs = startTime.getTime() - now.getTime();
       const diffHours = diffMs / (1000 * 3600);
 
-      // Determine which reminders to send (only send each once)
       let reminderType = null;
       if (diffHours <= 24 && diffHours > 23 && !viewing.reminder_24h_sent) {
         reminderType = '24h';
@@ -2494,20 +2467,17 @@ app.post('/api/cron/check-viewing-reminders', async (req, res) => {
       const title = `Viewing Reminder (${reminderType})`;
       const body = `Your property viewing for "${viewing.property_title}" is scheduled at ${timeString}. Please be prepared.`;
 
-      // Send push to renter
       await sendPushToUser(viewing.renter_id, title, body, {
         screen: 'Chat',
         property_id: viewing.property_id,
         other_user_id: viewing.owner_id,
       });
-      // Send push to owner
       await sendPushToUser(viewing.owner_id, title, body, {
         screen: 'Chat',
         property_id: viewing.property_id,
         other_user_id: viewing.renter_id,
       });
 
-      // Update the appropriate reminder flag
       let updateColumn = '';
       if (reminderType === '24h') updateColumn = 'reminder_24h_sent = TRUE';
       else if (reminderType === '3h') updateColumn = 'reminder_3h_sent = TRUE';
@@ -2527,7 +2497,6 @@ app.post('/api/cron/check-viewing-reminders', async (req, res) => {
   }
 });
 
-// POST /api/properties/:id/view – record a view
 app.post('/api/properties/:id/view', async (req, res) => {
   try {
     const { id } = req.params;
@@ -2543,7 +2512,6 @@ app.post('/api/properties/:id/view', async (req, res) => {
   }
 });
 
-// GET /api/owner/analytics – get aggregated stats for the authenticated owner
 app.get('/api/owner/analytics', async (req, res) => {
   try {
     const authHeader = req.headers.authorization;
@@ -2559,7 +2527,6 @@ app.get('/api/owner/analytics', async (req, res) => {
 
     const ownerId = user.id;
 
-    // Get all properties for this owner
     const propertiesResult = await pool.query(
       'SELECT property_id, title, rent_price, date_listed, status FROM properties WHERE owner_id = $1',
       [ownerId],
@@ -2581,21 +2548,18 @@ app.get('/api/owner/analytics', async (req, res) => {
 
     const propertyIds = properties.map((p) => p.property_id);
 
-    // Count total views for owner's properties
     const viewsResult = await pool.query(
       'SELECT COUNT(*) as total FROM property_views WHERE property_id = ANY($1::uuid[])',
       [propertyIds],
     );
     const totalViews = parseInt(viewsResult.rows[0].total);
 
-    // Count total applications for owner's properties
     const appsResult = await pool.query(
       'SELECT COUNT(*) as total FROM applications WHERE property_id = ANY($1::uuid[])',
       [propertyIds],
     );
     const totalApplications = parseInt(appsResult.rows[0].total);
 
-    // Count active tenancies (payment_status = 'Paid' and lease_end_date > NOW())
     const activeTenanciesResult = await pool.query(
       `SELECT COUNT(*) as total FROM tenancies 
        WHERE property_id = ANY($1::uuid[]) 
@@ -2605,8 +2569,6 @@ app.get('/api/owner/analytics', async (req, res) => {
     );
     const activeTenancies = parseInt(activeTenanciesResult.rows[0].total);
 
-    // Calculate average days to rent (from date_listed to first approved application)
-    // For simplicity, we compute per property and average
     let totalDays = 0;
     let countWithTenancy = 0;
     for (const prop of properties) {
@@ -2629,7 +2591,6 @@ app.get('/api/owner/analytics', async (req, res) => {
     const avgDaysToRent =
       countWithTenancy > 0 ? Math.round(totalDays / countWithTenancy) : 0;
 
-    // Prepare per‑property stats
     const propertyStats = [];
     for (const prop of properties) {
       const viewsCount = await pool.query(
@@ -2668,12 +2629,10 @@ app.get('/api/owner/analytics', async (req, res) => {
   }
 });
 
-// POST /api/users/onboarding – save profile data after registration
 app.post('/api/users/onboarding', async (req, res) => {
   console.log('📥 Onboarding endpoint hit');
   console.log('📥 Headers:', req.headers);
   console.log('📥 Body:', req.body);
-  // ... rest of the endpoint
   try {
     const authHeader = req.headers.authorization;
     if (!authHeader)
@@ -2704,7 +2663,6 @@ app.post('/api/users/onboarding', async (req, res) => {
       marital_status,
     } = req.body;
 
-    // Check if phone number is already used by another user
     if (phone_number) {
       const existing = await pool.query(
         'SELECT user_id FROM users WHERE phone_number = $1 AND user_id != $2',
@@ -2804,7 +2762,6 @@ app.post('/api/users/onboarding', async (req, res) => {
         .json({ success: false, error: 'No fields to update' });
     }
 
-    // Set KYC tier to at least 1 (basic profile completed)
     updateFields.push(`kyc_tier = GREATEST(kyc_tier, 1)`);
     const query = `UPDATE users SET ${updateFields.join(', ')} WHERE user_id = $${paramIndex} RETURNING user_id, name, email, role, kyc_tier`;
     values.push(user.id);
@@ -2823,7 +2780,6 @@ app.post('/api/users/onboarding', async (req, res) => {
   }
 });
 
-// POST /api/users/upload-kyc – upload KYC document (image) to Supabase Storage
 app.post('/api/users/upload-kyc', async (req, res) => {
   try {
     const authHeader = req.headers.authorization;
@@ -2866,7 +2822,6 @@ app.post('/api/users/upload-kyc', async (req, res) => {
   }
 });
 
-// POST /api/users/send-otp – send OTP to phone number
 app.post('/api/users/send-otp', async (req, res) => {
   const { phone_number } = req.body;
   if (!phone_number)
@@ -2874,16 +2829,12 @@ app.post('/api/users/send-otp', async (req, res) => {
       .status(400)
       .json({ success: false, error: 'Phone number required' });
   const otp = Math.floor(100000 + Math.random() * 900000).toString();
-  // Store OTP in memory or Redis (in production, use database with expiry)
-  // For now, we'll store in a simple map (not persistent across server restarts)
   if (!global.otpStore) global.otpStore = {};
   global.otpStore[phone_number] = { otp, expiry: Date.now() + 10 * 60 * 1000 };
-  // TODO: Send SMS using Africa's Talking / Twilio
   console.log(`[SIMULATED OTP] for ${phone_number}: ${otp}`);
   res.json({ success: true, message: 'OTP sent (simulated)' });
 });
 
-// POST /api/users/verify-otp
 app.post('/api/users/verify-otp', async (req, res) => {
   const { phone_number, otp } = req.body;
   if (!global.otpStore || !global.otpStore[phone_number]) {
@@ -2899,7 +2850,6 @@ app.post('/api/users/verify-otp', async (req, res) => {
   if (record.otp !== otp) {
     return res.status(400).json({ success: false, error: 'Invalid OTP' });
   }
-  // Update user
   const authHeader = req.headers.authorization;
   if (!authHeader)
     return res.status(401).json({ success: false, error: 'Unauthorized' });
@@ -2919,7 +2869,6 @@ app.post('/api/users/verify-otp', async (req, res) => {
   res.json({ success: true, message: 'Phone verified' });
 });
 
-// GET /api/users/verification-status
 app.get('/api/users/verification-status', async (req, res) => {
   try {
     const authHeader = req.headers.authorization;
@@ -2945,7 +2894,6 @@ app.get('/api/users/verification-status', async (req, res) => {
   }
 });
 
-// GET /api/admin/kyc/pending – list users with pending KYC documents
 app.get('/api/admin/kyc/pending', requireAdmin, async (req, res) => {
   try {
     const result = await pool.query(
@@ -2961,11 +2909,9 @@ app.get('/api/admin/kyc/pending', requireAdmin, async (req, res) => {
   }
 });
 
-// PUT /api/admin/kyc/:userId/approve
 app.put('/api/admin/kyc/:userId/approve', requireAdmin, async (req, res) => {
   try {
     const { userId } = req.params;
-    // Update user: address_verified = TRUE, kyc_document_status = 'approved', increase kyc_tier
     await pool.query(
       `UPDATE users
    SET address_verified = TRUE,
@@ -2975,7 +2921,6 @@ app.put('/api/admin/kyc/:userId/approve', requireAdmin, async (req, res) => {
    WHERE user_id = $1`,
       [userId],
     );
-    // Log admin action
     await pool.query(
       'INSERT INTO admin_logs (admin_id, action, target_type, target_id, details) VALUES ($1, $2, $3, $4, $5)',
       [
@@ -2986,7 +2931,6 @@ app.put('/api/admin/kyc/:userId/approve', requireAdmin, async (req, res) => {
         JSON.stringify({ kyc: 'approved' }),
       ],
     );
-    // Send push notification (if function exists)
     if (typeof sendPushToUser === 'function') {
       await sendPushToUser(
         userId,
@@ -3001,7 +2945,6 @@ app.put('/api/admin/kyc/:userId/approve', requireAdmin, async (req, res) => {
   }
 });
 
-// PUT /api/admin/kyc/:userId/reject
 app.put('/api/admin/kyc/:userId/reject', requireAdmin, async (req, res) => {
   try {
     const { userId } = req.params;
@@ -3037,7 +2980,6 @@ app.put('/api/admin/kyc/:userId/reject', requireAdmin, async (req, res) => {
   }
 });
 
-// GET /api/users/kyc-status
 app.get('/api/users/kyc-status', async (req, res) => {
   try {
     const authHeader = req.headers.authorization;
@@ -3068,7 +3010,6 @@ app.get('/api/users/kyc-status', async (req, res) => {
   }
 });
 
-// GET /api/admin/kyc/pending-count
 app.get('/api/admin/kyc/pending-count', requireAdmin, async (req, res) => {
   try {
     const result = await pool.query(
@@ -3082,7 +3023,6 @@ app.get('/api/admin/kyc/pending-count', requireAdmin, async (req, res) => {
   }
 });
 
-// POST /api/admin/kyc/batch-approve
 app.post('/api/admin/kyc/batch-approve', requireAdmin, async (req, res) => {
   try {
     const { userIds } = req.body;
@@ -3127,18 +3067,14 @@ app.post('/api/admin/kyc/batch-approve', requireAdmin, async (req, res) => {
   }
 });
 
-// GET /api/admin/kyc/stats – KYC dashboard statistics
 app.get('/api/admin/kyc/stats', requireAdmin, async (req, res) => {
   try {
-    // Total pending
     const pendingResult = await pool.query(
       "SELECT COUNT(*) FROM users WHERE kyc_document_status = 'pending'",
     );
-    // Total approved (address_verified = TRUE)
     const approvedResult = await pool.query(
       'SELECT COUNT(*) FROM users WHERE address_verified = TRUE',
     );
-    // Total rejected (kyc_document_status = 'rejected')
     const rejectedResult = await pool.query(
       "SELECT COUNT(*) FROM users WHERE kyc_document_status = 'rejected'",
     );
@@ -3165,7 +3101,6 @@ app.get('/api/admin/kyc/stats', requireAdmin, async (req, res) => {
   }
 });
 
-// GET /api/admin/kyc/all – all KYC submissions (for admin filtering)
 app.get('/api/admin/kyc/all', requireAdmin, async (req, res) => {
   try {
     const result = await pool.query(
@@ -3181,99 +3116,7 @@ app.get('/api/admin/kyc/all', requireAdmin, async (req, res) => {
     res.status(500).json({ success: false, error: err.message });
   }
 });
-// GET /api/admin/properties – list all properties (admin)
-app.get('/api/admin/properties', requireAdmin, async (req, res) => {
-  try {
-    const { status } = req.query;
-    let query = `
-      SELECT p.*, u.name as owner_name, u.email as owner_email,
-             (SELECT COUNT(*) FROM applications WHERE property_id = p.property_id) as application_count
-      FROM properties p
-      JOIN users u ON p.owner_id = u.user_id
-    `;
-    const params = [];
-    if (status && status !== 'all') {
-      query += ' WHERE p.status = $1';
-      params.push(status);
-    }
-    query += ' ORDER BY p.date_listed DESC';
-    const result = await pool.query(query, params);
-    res.json({ success: true, properties: result.rows });
-  } catch (err) {
-    console.error('Admin properties error:', err);
-    res.status(500).json({ success: false, error: err.message });
-  }
-});
 
-// PUT /api/admin/properties/:id/status – update property status or featured flag
-app.put('/api/admin/properties/:id/status', requireAdmin, async (req, res) => {
-  try {
-    const { id } = req.params;
-    const { status, is_featured } = req.body;
-
-    let updates = [];
-    const values = [];
-
-    if (status !== undefined) {
-      updates.push(`status = $${values.length + 1}`);
-      values.push(status);
-    }
-    if (is_featured !== undefined) {
-      updates.push(`is_featured = $${values.length + 1}`);
-      values.push(is_featured);
-    }
-
-    if (updates.length === 0) {
-      return res
-        .status(400)
-        .json({ success: false, error: 'No fields to update' });
-    }
-
-    const query = `UPDATE properties SET ${updates.join(', ')} WHERE property_id = $${values.length + 1} RETURNING *`;
-    values.push(id);
-
-    const result = await pool.query(query, values);
-    if (result.rows.length === 0) {
-      return res
-        .status(404)
-        .json({ success: false, error: 'Property not found' });
-    }
-
-    const property = result.rows[0];
-
-    // Send push notification only for status changes (not for featured toggles)
-    if (status !== undefined) {
-      try {
-        let title = '',
-          body = '';
-        if (status === 'Available') {
-          title = 'Property Approved';
-          body = `Your property "${property.title}" has been approved and is now live.`;
-        } else if (status === 'Rejected') {
-          title = 'Property Rejected';
-          body = `Your property "${property.title}" was not approved. Please check the listing details.`;
-        }
-        if (title) {
-          await sendPushToUser(property.owner_id, title, body, {
-            screen: 'MyProperties',
-          });
-        }
-      } catch (pushErr) {
-        console.error('Push notification failed', pushErr);
-      }
-    }
-
-    // Always return the full updated property
-    res.json({ success: true, property });
-  } catch (err) {
-    console.error('Update property error:', err);
-    res.status(500).json({ success: false, error: err.message });
-  }
-});
-
-// ==========================================
-// SERVER SETUP
-// ==========================================
 const PORT = process.env.PORT || 5000;
 app.listen(PORT, () => {
   console.log(`Server running on port ${PORT}`);
