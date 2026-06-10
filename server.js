@@ -2195,14 +2195,14 @@ app.get('/api/users/:userId/reviews', async (req, res) => {
     const { userId } = req.params;
     const result = await pool.query(
       `SELECT r.*, 
-              u.name as reviewer_name, u.avatar_url,
-              p.title as property_title
-       FROM reviews r
-       JOIN users u ON r.reviewer_id = u.user_id
-       LEFT JOIN tenancies t ON r.tenancy_id = t.tenancy_id
-       LEFT JOIN properties p ON t.property_id = p.property_id
-       WHERE r.reviewee_id = $1
-       ORDER BY r.created_at DESC`,
+          u.name as reviewer_name, u.profile_picture_url as avatar_url,
+          p.title as property_title
+   FROM reviews r
+   JOIN users u ON r.reviewer_id = u.user_id
+   LEFT JOIN tenancies t ON r.tenancy_id = t.tenancy_id
+   LEFT JOIN properties p ON t.property_id = p.property_id
+   WHERE r.reviewee_id = $1
+   ORDER BY r.created_at DESC`,
       [userId],
     );
     res.json({ success: true, reviews: result.rows });
@@ -3233,35 +3233,31 @@ app.put('/api/admin/properties/:id/status', requireAdmin, async (req, res) => {
         .status(404)
         .json({ success: false, error: 'Property not found' });
     }
-    // Optional: send push notification to owner
-    try {
-      const property = result.rows[0];
-      const ownerResult = await pool.query(
-        'SELECT user_id FROM users WHERE user_id = $1',
-        [property.owner_id],
-      );
-      if (ownerResult.rows.length > 0) {
-        let title = '';
-        let body = '';
+    const property = result.rows[0];
+
+    // Send push notification only if explicitly a status change (not just featured toggle)
+    if (status !== undefined) {
+      try {
+        let title = '',
+          body = '';
         if (status === 'Available') {
           title = 'Property Approved';
           body = `Your property "${property.title}" has been approved and is now live.`;
         } else if (status === 'Rejected') {
           title = 'Property Rejected';
           body = `Your property "${property.title}" was not approved. Please check the listing details.`;
-        } else if (is_featured !== undefined) {
-          title = is_featured ? 'Property Featured' : 'Property Unfeatured';
-          body = `Your property "${property.title}" has been ${is_featured ? 'marked as featured' : 'removed from featured listings'}.`;
         }
         if (title)
           await sendPushToUser(property.owner_id, title, body, {
             screen: 'MyProperties',
           });
+      } catch (pushErr) {
+        console.error('Push notification failed', pushErr);
       }
-    } catch (pushErr) {
-      console.error('Push notification failed', pushErr);
     }
-    res.json({ success: true, property: result.rows[0] });
+
+    // Always return the updated property including is_featured
+    res.json({ success: true, property });
   } catch (err) {
     console.error('Update property error:', err);
     res.status(500).json({ success: false, error: err.message });
