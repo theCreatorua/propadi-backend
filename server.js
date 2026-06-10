@@ -530,6 +530,144 @@ app.put('/api/admin/withdrawals/:id', async (req, res) => {
   }
 });
 
+// GET /api/admin/disputes – list all disputes with filters
+app.get('/api/admin/disputes', requireAdmin, async (req, res) => {
+  try {
+    const { status, reference_type, limit = 50, offset = 0 } = req.query;
+    let query = `
+      SELECT d.*, 
+             u_raiser.name as raiser_name, u_raiser.email as raiser_email,
+             u_target.name as target_name, u_target.email as target_email,
+             u_resolver.name as resolver_name
+      FROM disputes d
+      LEFT JOIN users u_raiser ON d.raised_by = u_raiser.user_id
+      LEFT JOIN users u_target ON d.raised_against = u_target.user_id
+      LEFT JOIN users u_resolver ON d.resolved_by = u_resolver.user_id
+      WHERE 1=1
+    `;
+    const values = [];
+    let paramIndex = 1;
+
+    if (status && status !== 'all') {
+      query += ` AND d.status = $${paramIndex}`;
+      values.push(status);
+      paramIndex++;
+    }
+    if (reference_type && reference_type !== 'all') {
+      query += ` AND d.reference_type = $${paramIndex}`;
+      values.push(reference_type);
+      paramIndex++;
+    }
+
+    query += ` ORDER BY d.created_at DESC LIMIT $${paramIndex} OFFSET $${paramIndex + 1}`;
+    values.push(parseInt(limit), parseInt(offset));
+
+    const result = await pool.query(query, values);
+    res.json({ success: true, disputes: result.rows });
+  } catch (err) {
+    console.error('Admin disputes fetch error:', err);
+    res.status(500).json({ success: false, error: err.message });
+  }
+});
+
+// PUT /api/admin/disputes/:id – update status and admin notes
+app.put('/api/admin/disputes/:id', requireAdmin, async (req, res) => {
+  const client = await pool.connect();
+  try {
+    const { id } = req.params;
+    const { status, admin_notes } = req.body;
+
+    if (!status) {
+      return res
+        .status(400)
+        .json({ success: false, error: 'Status is required' });
+    }
+
+    await client.query('BEGIN');
+
+    const updateFields = [];
+    const values = [];
+    let paramIndex = 1;
+
+    updateFields.push(`status = $${paramIndex}`);
+    values.push(status);
+    paramIndex++;
+
+    if (admin_notes !== undefined) {
+      updateFields.push(`admin_notes = $${paramIndex}`);
+      values.push(admin_notes);
+      paramIndex++;
+    }
+
+    if (status === 'resolved' || status === 'dismissed') {
+      updateFields.push(`resolved_at = NOW(), resolved_by = $${paramIndex}`);
+      values.push(req.adminUser.id);
+      paramIndex++;
+    }
+
+    const query = `UPDATE disputes SET ${updateFields.join(', ')} WHERE dispute_id = $${paramIndex} RETURNING *`;
+    values.push(id);
+
+    const result = await client.query(query, values);
+    if (result.rows.length === 0) {
+      await client.query('ROLLBACK');
+      return res
+        .status(404)
+        .json({ success: false, error: 'Dispute not found' });
+    }
+
+    // Log admin action
+    await client.query(
+      `INSERT INTO admin_logs (admin_id, action, target_type, target_id, details)
+       VALUES ($1, $2, $3, $4, $5)`,
+      [
+        req.adminUser.id,
+        'UPDATE_DISPUTE',
+        'dispute',
+        id,
+        JSON.stringify({ status, admin_notes }),
+      ],
+    );
+
+    await client.query('COMMIT');
+    res.json({ success: true, dispute: result.rows[0] });
+  } catch (err) {
+    await client.query('ROLLBACK');
+    console.error('Admin dispute update error:', err);
+    res.status(500).json({ success: false, error: err.message });
+  } finally {
+    client.release();
+  }
+});
+
+// POST /api/admin/disputes – create a new dispute (optional, could be user-initiated)
+app.post('/api/admin/disputes', requireAdmin, async (req, res) => {
+  try {
+    const { reference_type, reference_id, raised_by, raised_against, reason } =
+      req.body;
+    if (!reference_type || !reference_id || !reason) {
+      return res
+        .status(400)
+        .json({ success: false, error: 'Missing required fields' });
+    }
+    const result = await pool.query(
+      `INSERT INTO disputes (reference_type, reference_id, raised_by, raised_against, reason, status)
+       VALUES ($1, $2, $3, $4, $5, 'open') RETURNING *`,
+      [
+        reference_type,
+        reference_id,
+        raised_by || null,
+        raised_against || null,
+        reason,
+      ],
+    );
+    res.json({ success: true, dispute: result.rows[0] });
+  } catch (err) {
+    console.error('Create dispute error:', err);
+    res.status(500).json({ success: false, error: err.message });
+  }
+});
+
 // ==========================================
 // MESSAGING ROUTES
 // ==========================================
@@ -2086,18 +2224,34 @@ app.get('/api/admin/stats', requireAdmin, async (req, res) => {
   }
 });
 
-// GET /api/admin/users – list all users (with optional role filter)
+// GET /api/admin/users – list all users with optional role filter and sorting
 app.get('/api/admin/users', requireAdmin, async (req, res) => {
   try {
-    const { role } = req.query;
-    let query =
-      'SELECT user_id, name, email, role, is_admin, renter_score, kyc_status, date_joined FROM users';
+    const { role, sort_by } = req.query;
+    let query = `
+      SELECT user_id, name, email, role, is_admin, renter_score, kyc_status, date_joined 
+      FROM users
+    `;
     const params = [];
+    const conditions = [];
+
     if (role) {
-      query += ' WHERE role = $1';
+      conditions.push(`role = $${params.length + 1}`);
       params.push(role);
     }
-    query += ' ORDER BY date_joined DESC';
+    if (conditions.length) {
+      query += ' WHERE ' + conditions.join(' AND ');
+    }
+
+    // Sorting
+    if (sort_by === 'renter_score_asc') {
+      query += ' ORDER BY renter_score ASC NULLS LAST';
+    } else if (sort_by === 'renter_score_desc') {
+      query += ' ORDER BY renter_score DESC NULLS LAST';
+    } else {
+      query += ' ORDER BY date_joined DESC';
+    }
+
     const result = await pool.query(query, params);
     res.json({ success: true, users: result.rows });
   } catch (err) {
@@ -3412,6 +3566,65 @@ app.put('/api/admin/properties/:id/status', requireAdmin, async (req, res) => {
     res.json({ success: true, property });
   } catch (err) {
     console.error('Update property error:', err);
+    res.status(500).json({ success: false, error: err.message });
+  }
+});
+
+// POST /api/admin/broadcast – send push notification to all users (or filtered by role)
+app.post('/api/admin/broadcast', requireAdmin, async (req, res) => {
+  try {
+    const { title, body, role } = req.body; // role: 'all', 'owner', 'renter'
+
+    if (!title || !body) {
+      return res
+        .status(400)
+        .json({ success: false, error: 'Title and body are required' });
+    }
+
+    let userQuery = 'SELECT user_id FROM users';
+    const params = [];
+    if (role && role !== 'all') {
+      userQuery += ' WHERE role = $1';
+      params.push(role);
+    }
+
+    const { rows: users } = await pool.query(userQuery, params);
+
+    let successCount = 0;
+    let failCount = 0;
+
+    for (const user of users) {
+      try {
+        await sendPushToUser(user.user_id, title, body, {
+          screen: 'AdminBroadcast',
+        });
+        successCount++;
+      } catch (err) {
+        console.error(`Failed to send to ${user.user_id}:`, err);
+        failCount++;
+      }
+    }
+
+    // Log the broadcast action
+    await pool.query(
+      `INSERT INTO admin_logs (admin_id, action, target_type, details) 
+       VALUES ($1, $2, $3, $4)`,
+      [
+        req.adminUser.id,
+        'BROADCAST',
+        'system',
+        JSON.stringify({ title, body, role, successCount, failCount }),
+      ],
+    );
+
+    res.json({
+      success: true,
+      message: `Broadcast sent to ${successCount} users. Failed: ${failCount}`,
+      successCount,
+      failCount,
+    });
+  } catch (err) {
+    console.error('Broadcast error:', err);
     res.status(500).json({ success: false, error: err.message });
   }
 });
