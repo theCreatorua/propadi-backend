@@ -3205,13 +3205,15 @@ app.get('/api/admin/properties', requireAdmin, async (req, res) => {
   }
 });
 
-// PUT /api/admin/properties/:id/status – update property status
+// PUT /api/admin/properties/:id/status – update property status or featured flag
 app.put('/api/admin/properties/:id/status', requireAdmin, async (req, res) => {
   try {
     const { id } = req.params;
     const { status, is_featured } = req.body;
+
     let updates = [];
     const values = [];
+
     if (status !== undefined) {
       updates.push(`status = $${values.length + 1}`);
       values.push(status);
@@ -3220,22 +3222,26 @@ app.put('/api/admin/properties/:id/status', requireAdmin, async (req, res) => {
       updates.push(`is_featured = $${values.length + 1}`);
       values.push(is_featured);
     }
+
     if (updates.length === 0) {
       return res
         .status(400)
         .json({ success: false, error: 'No fields to update' });
     }
+
     const query = `UPDATE properties SET ${updates.join(', ')} WHERE property_id = $${values.length + 1} RETURNING *`;
     values.push(id);
+
     const result = await pool.query(query, values);
     if (result.rows.length === 0) {
       return res
         .status(404)
         .json({ success: false, error: 'Property not found' });
     }
+
     const property = result.rows[0];
 
-    // Send push notification only if explicitly a status change (not just featured toggle)
+    // Send push notification only for status changes (not for featured toggles)
     if (status !== undefined) {
       try {
         let title = '',
@@ -3247,16 +3253,17 @@ app.put('/api/admin/properties/:id/status', requireAdmin, async (req, res) => {
           title = 'Property Rejected';
           body = `Your property "${property.title}" was not approved. Please check the listing details.`;
         }
-        if (title)
+        if (title) {
           await sendPushToUser(property.owner_id, title, body, {
             screen: 'MyProperties',
           });
+        }
       } catch (pushErr) {
         console.error('Push notification failed', pushErr);
       }
     }
 
-    // Always return the updated property including is_featured
+    // Always return the full updated property
     res.json({ success: true, property });
   } catch (err) {
     console.error('Update property error:', err);
