@@ -1892,6 +1892,170 @@ const requireAdmin = async (req, res, next) => {
   }
 };
 
+// GET /api/admin/maintenance – list all maintenance tickets with filters
+app.get('/api/admin/maintenance', requireAdmin, async (req, res) => {
+  try {
+    const {
+      status,
+      property_id,
+      owner_id,
+      renter_id,
+      limit = 50,
+      offset = 0,
+    } = req.query;
+
+    let query = `
+      SELECT 
+        m.request_id as id,
+        m.category,
+        m.title,
+        m.description,
+        m.status,
+        m.date_submitted as created_at,
+        m.date_resolved as resolved_at,
+        m.media_url,
+        p.title as property_title,
+        p.property_id,
+        u_owner.name as owner_name,
+        u_owner.user_id as owner_id,
+        u_renter.name as renter_name,
+        u_renter.user_id as renter_id
+      FROM maintenance_requests m
+      JOIN properties p ON m.property_id = p.property_id
+      JOIN users u_owner ON m.owner_id = u_owner.user_id
+      JOIN users u_renter ON m.renter_id = u_renter.user_id
+      WHERE 1=1
+    `;
+    const values = [];
+    let paramIndex = 1;
+
+    if (status && status !== 'all') {
+      query += ` AND m.status = $${paramIndex}`;
+      values.push(status);
+      paramIndex++;
+    }
+    if (property_id) {
+      query += ` AND m.property_id = $${paramIndex}`;
+      values.push(property_id);
+      paramIndex++;
+    }
+    if (owner_id) {
+      query += ` AND m.owner_id = $${paramIndex}`;
+      values.push(owner_id);
+      paramIndex++;
+    }
+    if (renter_id) {
+      query += ` AND m.renter_id = $${paramIndex}`;
+      values.push(renter_id);
+      paramIndex++;
+    }
+
+    query += ` ORDER BY m.date_submitted DESC LIMIT $${paramIndex} OFFSET $${paramIndex + 1}`;
+    values.push(parseInt(limit), parseInt(offset));
+
+    const result = await pool.query(query, values);
+
+    // Also get total count for pagination (simplified – optional)
+    const countResult = await pool.query(
+      `SELECT COUNT(*) as total FROM maintenance_requests`,
+    );
+
+    res.json({
+      success: true,
+      tickets: result.rows,
+      total: parseInt(countResult.rows[0].total),
+    });
+  } catch (err) {
+    console.error('Admin maintenance fetch error:', err);
+    res.status(500).json({ success: false, error: err.message });
+  }
+});
+
+// PUT /api/admin/maintenance/:id – update status, add admin note, notify parties
+app.put('/api/admin/maintenance/:id', requireAdmin, async (req, res) => {
+  const client = await pool.connect();
+  try {
+    const { id } = req.params;
+    const { status, admin_note } = req.body;
+
+    if (!status) {
+      return res
+        .status(400)
+        .json({ success: false, error: 'Status is required' });
+    }
+
+    await client.query('BEGIN');
+
+    // Get current ticket details (owner_id, renter_id, property_id)
+    const ticketResult = await client.query(
+      `SELECT owner_id, renter_id, property_id, status as old_status 
+       FROM maintenance_requests WHERE request_id = $1`,
+      [id],
+    );
+    if (ticketResult.rows.length === 0) {
+      await client.query('ROLLBACK');
+      return res
+        .status(404)
+        .json({ success: false, error: 'Ticket not found' });
+    }
+    const ticket = ticketResult.rows[0];
+
+    // Update ticket
+    const updateQuery =
+      status === 'Resolved'
+        ? `UPDATE maintenance_requests SET status = $1, date_resolved = CURRENT_TIMESTAMP WHERE request_id = $2 RETURNING *`
+        : `UPDATE maintenance_requests SET status = $1 WHERE request_id = $2 RETURNING *`;
+    const updateResult = await client.query(updateQuery, [status, id]);
+    const updatedTicket = updateResult.rows[0];
+
+    // Log admin action (optional: add to admin_logs table)
+    await client.query(
+      `INSERT INTO admin_logs (admin_id, action, target_type, target_id, details)
+       VALUES ($1, $2, $3, $4, $5)`,
+      [
+        req.adminUser.id,
+        'UPDATE_MAINTENANCE_STATUS',
+        'maintenance_request',
+        id,
+        JSON.stringify({
+          old_status: ticket.old_status,
+          new_status: status,
+          admin_note,
+        }),
+      ],
+    );
+
+    // Send push notifications to owner and renter about status change
+    const propertyResult = await client.query(
+      'SELECT title FROM properties WHERE property_id = $1',
+      [ticket.property_id],
+    );
+    const propertyTitle = propertyResult.rows[0]?.title || 'your property';
+
+    const title = `Maintenance Request ${status}`;
+    const body = `Your request for "${propertyTitle}" is now ${status}.${admin_note ? ` Note: ${admin_note}` : ''}`;
+
+    // Send to owner and renter
+    await sendPushToUser(ticket.owner_id, title, body, {
+      screen: 'Maintenance',
+      ticket_id: id,
+    });
+    await sendPushToUser(ticket.renter_id, title, body, {
+      screen: 'Maintenance',
+      ticket_id: id,
+    });
+
+    await client.query('COMMIT');
+    res.json({ success: true, ticket: updatedTicket });
+  } catch (err) {
+    await client.query('ROLLBACK');
+    console.error('Admin maintenance update error:', err);
+    res.status(500).json({ success: false, error: err.message });
+  } finally {
+    client.release();
+  }
+});
+
 // GET /api/admin/stats – platform statistics
 app.get('/api/admin/stats', requireAdmin, async (req, res) => {
   try {
