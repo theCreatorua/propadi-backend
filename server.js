@@ -2010,38 +2010,6 @@ app.get('/api/admin/properties', requireAdmin, async (req, res) => {
   }
 });
 
-// // PUT /api/admin/properties/:id/status – approve, reject, or change listing status
-// app.put('/api/admin/properties/:id/status', requireAdmin, async (req, res) => {
-//   try {
-//     const { id } = req.params;
-//     const { status, admin_note } = req.body; // status: 'Available', 'Rejected', 'Under Review', etc.
-//     if (!status)
-//       return res.status(400).json({ success: false, error: 'Status required' });
-//     const result = await pool.query(
-//       'UPDATE properties SET status = $1 WHERE property_id = $2 RETURNING *',
-//       [status, id],
-//     );
-//     if (result.rows.length === 0)
-//       return res
-//         .status(404)
-//         .json({ success: false, error: 'Property not found' });
-//     await pool.query(
-//       'INSERT INTO admin_logs (admin_id, action, target_type, target_id, details) VALUES ($1, $2, $3, $4, $5)',
-//       [
-//         req.adminUser.id,
-//         'UPDATE_PROPERTY_STATUS',
-//         'property',
-//         id,
-//         JSON.stringify({ status, admin_note }),
-//       ],
-//     );
-
-//     res.json({ success: true, property: result.rows[0] });
-//   } catch (err) {
-//     res.status(500).json({ success: false, error: err.message });
-//   }
-// });
-
 // GET /api/admin/transactions – all platform transactions
 app.get('/api/admin/transactions', requireAdmin, async (req, res) => {
   try {
@@ -3205,11 +3173,11 @@ app.get('/api/admin/properties', requireAdmin, async (req, res) => {
   }
 });
 
-// PUT /api/admin/properties/:id/status – update property status or featured flag
+// PUT /api/admin/properties/:id/status – update property status OR featured flag (with audit log)
 app.put('/api/admin/properties/:id/status', requireAdmin, async (req, res) => {
   try {
     const { id } = req.params;
-    const { status, is_featured } = req.body;
+    const { status, is_featured, admin_note } = req.body;
 
     let updates = [];
     const values = [];
@@ -3241,7 +3209,21 @@ app.put('/api/admin/properties/:id/status', requireAdmin, async (req, res) => {
 
     const property = result.rows[0];
 
-    // Send push notification only for status changes (not for featured toggles)
+    // Log admin action (only for status changes, but log anyway for featured toggles if desired)
+    // Here we log for any update, but you can condition on status !== undefined if preferred.
+    await pool.query(
+      `INSERT INTO admin_logs (admin_id, action, target_type, target_id, details)
+       VALUES ($1, $2, $3, $4, $5)`,
+      [
+        req.adminUser.id,
+        'UPDATE_PROPERTY',
+        'property',
+        id,
+        JSON.stringify({ status, is_featured, admin_note }),
+      ],
+    );
+
+    // Send push notification only for status changes (approve/reject)
     if (status !== undefined) {
       try {
         let title = '',
@@ -3263,7 +3245,6 @@ app.put('/api/admin/properties/:id/status', requireAdmin, async (req, res) => {
       }
     }
 
-    // Always return the full updated property
     res.json({ success: true, property });
   } catch (err) {
     console.error('Update property error:', err);
