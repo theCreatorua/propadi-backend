@@ -24,6 +24,44 @@ const pool = new Pool({
 });
 
 // ==========================================
+// ADMIN MIDDLEWARE (must be defined before any admin routes)
+// ==========================================
+const requireAdmin = async (req, res, next) => {
+  try {
+    const authHeader = req.headers.authorization;
+    if (!authHeader) {
+      return res
+        .status(401)
+        .json({ success: false, error: 'No token provided' });
+    }
+    const token = authHeader.split(' ')[1];
+    const {
+      data: { user },
+      error,
+    } = await supabase.auth.getUser(token);
+    if (error || !user) {
+      return res.status(401).json({ success: false, error: 'Invalid token' });
+    }
+    const { rows } = await pool.query(
+      'SELECT is_admin FROM users WHERE user_id = $1',
+      [user.id],
+    );
+    if (rows.length === 0 || !rows[0].is_admin) {
+      return res
+        .status(403)
+        .json({ success: false, error: 'Admin access required' });
+    }
+    req.adminUser = user;
+    next();
+  } catch (err) {
+    console.error('Admin middleware error:', err);
+    res
+      .status(500)
+      .json({ success: false, error: 'Admin verification failed' });
+  }
+};
+
+// ==========================================
 // AUTHENTICATION & USER ROUTES
 // ==========================================
 
@@ -63,36 +101,29 @@ app.post('/api/auth/register', async (req, res) => {
 
 app.post('/api/user/deposit', async (req, res) => {
   const { userId, amount } = req.body;
-
   if (!amount || isNaN(amount) || amount <= 0) {
     return res
       .status(400)
       .json({ success: false, error: 'Please enter a valid amount' });
   }
-
   try {
     const updateResult = await pool.query(
       'UPDATE wallets SET balance = balance + $1, updated_at = CURRENT_TIMESTAMP WHERE user_id = $2 RETURNING balance',
       [amount, userId],
     );
-
     if (updateResult.rows.length === 0) {
       return res
         .status(404)
         .json({ success: false, error: 'User wallet not found' });
     }
-
-    const insertResult = await pool.query(
-      `INSERT INTO transactions (user_id, type, title, amount, status) 
-       VALUES ($1, 'credit', 'Vault Deposit', $2, 'Completed') RETURNING *`,
+    await pool.query(
+      `INSERT INTO transactions (user_id, type, title, amount, status) VALUES ($1, 'credit', 'Vault Deposit', $2, 'Completed')`,
       [userId, amount],
     );
-
     res.json({
       success: true,
       message: 'Vault funded successfully!',
       newBalance: updateResult.rows[0].balance,
-      transaction: insertResult.rows[0],
     });
   } catch (err) {
     console.error('Deposit Error:', err);
@@ -104,49 +135,38 @@ app.post('/api/user/deposit', async (req, res) => {
 
 app.post('/api/user/withdraw', async (req, res) => {
   const { userId, amount, email, bankName, accountNumber } = req.body;
-
   if (!amount || isNaN(amount) || amount <= 0) {
     return res
       .status(400)
       .json({ success: false, error: 'Please enter a valid amount' });
   }
-
   if (!bankName || !accountNumber) {
     return res
       .status(400)
       .json({ success: false, error: 'Bank details are required' });
   }
-
   try {
     const userResult = await pool.query(
       'SELECT balance FROM wallets WHERE user_id = $1',
       [userId],
     );
-
     if (userResult.rows.length === 0) {
       return res
         .status(404)
         .json({ success: false, error: 'User wallet not found' });
     }
-
     const currentBalance = parseFloat(userResult.rows[0].balance);
     if (currentBalance < amount) {
       return res
         .status(400)
         .json({ success: false, error: 'Insufficient funds in vault' });
     }
-
-    const insertResult = await pool.query(
+    await pool.query(
       `INSERT INTO withdrawals (user_id, email, amount, bank_name, account_number, status, type) 
-       VALUES ($1, $2, $3, $4, $5, 'Pending', 'Withdrawal') RETURNING *`,
+       VALUES ($1, $2, $3, $4, $5, 'Pending', 'Withdrawal')`,
       [userId, email, amount, bankName, accountNumber],
     );
-
-    res.json({
-      success: true,
-      message: 'Withdrawal requested successfully!',
-      withdrawal: insertResult.rows[0],
-    });
+    res.json({ success: true, message: 'Withdrawal requested successfully!' });
   } catch (err) {
     console.error('Withdraw Error:', err);
     res
@@ -166,7 +186,6 @@ app.get('/api/user/dashboard/:id', async (req, res) => {
       'SELECT * FROM withdrawals WHERE user_id = $1 ORDER BY created_at DESC',
       [id],
     );
-
     res.json({
       balance:
         balanceResult.rows.length > 0 ? balanceResult.rows[0].balance : 0,
@@ -180,20 +199,14 @@ app.get('/api/user/dashboard/:id', async (req, res) => {
 
 app.get('/api/user/profile/:userId', async (req, res) => {
   const { userId } = req.params;
-
   try {
     const result = await pool.query(
-      `SELECT u.email, COALESCE(w.balance, 0) as balance 
-       FROM users u 
-       LEFT JOIN wallets w ON u.user_id = w.user_id 
-       WHERE u.user_id = $1`,
+      `SELECT u.email, COALESCE(w.balance, 0) as balance FROM users u LEFT JOIN wallets w ON u.user_id = w.user_id WHERE u.user_id = $1`,
       [userId],
     );
-
     if (result.rows.length === 0) {
       return res.status(404).json({ success: false, error: 'User not found' });
     }
-
     res.json({ success: true, user: result.rows[0] });
   } catch (err) {
     console.error('Profile Fetch Error:', err);
@@ -209,11 +222,9 @@ app.get('/api/users/:id/trust', async (req, res) => {
   try {
     const { id } = req.params;
     const result = await pool.query(
-      `SELECT kyc_tier, phone_verified, nin_verified, address_verified, renter_score 
-       FROM users WHERE user_id = $1`,
+      `SELECT kyc_tier, phone_verified, nin_verified, address_verified, renter_score FROM users WHERE user_id = $1`,
       [id],
     );
-
     if (result.rows.length > 0) {
       res.json({ success: true, trust_data: result.rows[0] });
     } else {
@@ -230,20 +241,15 @@ app.post('/api/users/:id/verify-nin', async (req, res) => {
   try {
     const { id } = req.params;
     const { nin } = req.body;
-
     if (!nin || nin.length < 11) {
       return res
         .status(400)
         .json({ success: false, error: 'Invalid NIN provided.' });
     }
-
     await pool.query(
-      `UPDATE users 
-       SET nin_verified = TRUE, kyc_tier = 2, renter_score = renter_score + 15 
-       WHERE user_id = $1`,
+      `UPDATE users SET nin_verified = TRUE, kyc_tier = 2, renter_score = renter_score + 15 WHERE user_id = $1`,
       [id],
     );
-
     res.json({
       success: true,
       message: 'Identity verified successfully! You are now Tier 2.',
@@ -267,7 +273,6 @@ app.get('/api/properties', async (req, res) => {
       ORDER BY p.date_listed DESC
     `;
     const result = await pool.query(query);
-    // Add a boolean flag for convenience
     const properties = result.rows.map((row) => ({
       ...row,
       has_verified_amenities: row.verified_amenities_count > 0,
@@ -279,22 +284,18 @@ app.get('/api/properties', async (req, res) => {
   }
 });
 
-// NEW SEARCH ENDPOINT
 app.get('/api/properties/search', async (req, res) => {
   try {
     const { state, lga, city, minPrice, maxPrice, bedrooms, amenities, query } =
       req.query;
-
     let sql = `
-      SELECT p.*, 
-             array_agg(DISTINCT pa.amenity_name) as amenities_list
+      SELECT p.*, array_agg(DISTINCT pa.amenity_name) as amenities_list
       FROM properties p
       LEFT JOIN properties_amenities pa ON p.property_id = pa.property_id
       WHERE p.status = 'Available'
     `;
     const values = [];
     let paramIndex = 1;
-
     if (state) {
       sql += ` AND p.address_state = $${paramIndex}`;
       values.push(state);
@@ -333,9 +334,7 @@ app.get('/api/properties/search', async (req, res) => {
       values.push(`%${query}%`);
       paramIndex++;
     }
-
     sql += ` GROUP BY p.property_id ORDER BY p.rent_price ASC`;
-
     const result = await pool.query(sql, values);
     res.json({ success: true, properties: result.rows });
   } catch (err) {
@@ -349,18 +348,15 @@ app.get('/api/properties/:id', async (req, res) => {
     const { id } = req.params;
     const propQuery = `SELECT * FROM properties WHERE property_id = $1;`;
     const propResult = await pool.query(propQuery, [id]);
-
     if (propResult.rows.length === 0) {
       return res
         .status(404)
         .json({ success: false, error: 'Property not found in database' });
     }
-
     const property = propResult.rows[0];
     const amenitiesQuery = `SELECT * FROM properties_amenities WHERE property_id = $1;`;
     const amenitiesResult = await pool.query(amenitiesQuery, [id]);
     property.visually_verified_amenities = amenitiesResult.rows;
-
     res.json({ success: true, property });
   } catch (err) {
     console.error('Error fetching single property:', err);
@@ -405,12 +401,11 @@ app.post('/api/properties', async (req, res) => {
     const propQuery = `
       INSERT INTO properties (
         owner_id, status, category, furnishing_status, title, description,
-  rent_price, rent_period, total_beds, total_baths, address_street,
-  address_city, address_lga, address_state, map_coordinates, main_image_url,
-  gallery_urls, total_kitchens, total_stores, landmark_name, landmark_type,
-  size_sqm, parking_spaces, year_built, floor_number
-      )
-      VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, NULL, $15, $16, $17, $18, $19, $20, $21, $22, $23, $24)
+        rent_price, rent_period, total_beds, total_baths, address_street,
+        address_city, address_lga, address_state, map_coordinates, main_image_url,
+        gallery_urls, total_kitchens, total_stores, landmark_name, landmark_type,
+        size_sqm, parking_spaces, year_built, floor_number
+      ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, NULL, $15, $16, $17, $18, $19, $20, $21, $22, $23, $24)
       RETURNING *;
     `;
     const propValues = [
@@ -434,10 +429,10 @@ app.post('/api/properties', async (req, res) => {
       total_stores || 0,
       landmark_name || null,
       landmark_type || null,
-      req.body.size_sqm || null,
-      req.body.parking_spaces || null,
-      req.body.year_built || null,
-      req.body.floor_number || null,
+      size_sqm || null,
+      parking_spaces || null,
+      year_built || null,
+      floor_number || null,
     ];
     const propResult = await client.query(propQuery, propValues);
     const savedProperty = propResult.rows[0];
@@ -456,7 +451,6 @@ app.post('/api/properties', async (req, res) => {
         );
       }
     }
-
     await client.query('COMMIT');
     res.json({ success: true, property: savedProperty });
   } catch (err) {
@@ -471,218 +465,16 @@ app.post('/api/properties', async (req, res) => {
 });
 
 // ==========================================
-// ADMIN ROUTES
-// ==========================================
-
-app.get('/api/admin/withdrawals', async (req, res) => {
-  try {
-    const result = await pool.query(
-      "SELECT * FROM withdrawals WHERE type = 'Withdrawal' ORDER BY created_at DESC",
-    );
-    res.json(result.rows);
-  } catch (err) {
-    console.error('Error fetching withdrawals:', err);
-    res.status(500).json({ error: 'Failed to fetch withdrawals' });
-  }
-});
-
-app.put('/api/admin/withdrawals/:id', async (req, res) => {
-  const { id } = req.params;
-  const { status } = req.body;
-
-  try {
-    const checkResult = await pool.query(
-      'SELECT * FROM withdrawals WHERE id = $1',
-      [id],
-    );
-    if (checkResult.rows.length === 0) {
-      return res
-        .status(404)
-        .json({ success: false, error: 'Withdrawal not found' });
-    }
-    const withdrawal = checkResult.rows[0];
-    const updateResult = await pool.query(
-      'UPDATE withdrawals SET status = $1 WHERE id = $2 RETURNING *',
-      [status, id],
-    );
-
-    if (status === 'Paid') {
-      await pool.query(
-        'UPDATE wallets SET balance = balance - $1 WHERE user_id = $2',
-        [withdrawal.amount, withdrawal.user_id],
-      );
-      await resend.emails.send({
-        from: 'Propadi <onboarding@resend.dev>',
-        to: withdrawal.email || 'test@example.com',
-        subject: 'Propadi Withdrawal Successful',
-        html: `<h3>Great news!</h3><p>Your withdrawal of ₦${Number(withdrawal.amount).toLocaleString('en-US')} has been processed and sent to your account.</p>`,
-      });
-    }
-
-    res.json({
-      success: true,
-      message: 'Status updated, balance adjusted, and email sent!',
-      data: updateResult.rows[0],
-    });
-  } catch (err) {
-    console.error('Update Status Error:', err);
-    res.status(500).json({ success: false, error: err.message });
-  }
-});
-
-// GET /api/admin/disputes – list all disputes with filters
-app.get('/api/admin/disputes', requireAdmin, async (req, res) => {
-  try {
-    const { status, reference_type, limit = 50, offset = 0 } = req.query;
-    let query = `
-      SELECT d.*, 
-             u_raiser.name as raiser_name, u_raiser.email as raiser_email,
-             u_target.name as target_name, u_target.email as target_email,
-             u_resolver.name as resolver_name
-      FROM disputes d
-      LEFT JOIN users u_raiser ON d.raised_by = u_raiser.user_id
-      LEFT JOIN users u_target ON d.raised_against = u_target.user_id
-      LEFT JOIN users u_resolver ON d.resolved_by = u_resolver.user_id
-      WHERE 1=1
-    `;
-    const values = [];
-    let paramIndex = 1;
-
-    if (status && status !== 'all') {
-      query += ` AND d.status = $${paramIndex}`;
-      values.push(status);
-      paramIndex++;
-    }
-    if (reference_type && reference_type !== 'all') {
-      query += ` AND d.reference_type = $${paramIndex}`;
-      values.push(reference_type);
-      paramIndex++;
-    }
-
-    query += ` ORDER BY d.created_at DESC LIMIT $${paramIndex} OFFSET $${paramIndex + 1}`;
-    values.push(parseInt(limit), parseInt(offset));
-
-    const result = await pool.query(query, values);
-    res.json({ success: true, disputes: result.rows });
-  } catch (err) {
-    console.error('Admin disputes fetch error:', err);
-    res.status(500).json({ success: false, error: err.message });
-  }
-});
-
-// PUT /api/admin/disputes/:id – update status and admin notes
-app.put('/api/admin/disputes/:id', requireAdmin, async (req, res) => {
-  const client = await pool.connect();
-  try {
-    const { id } = req.params;
-    const { status, admin_notes } = req.body;
-
-    if (!status) {
-      return res
-        .status(400)
-        .json({ success: false, error: 'Status is required' });
-    }
-
-    await client.query('BEGIN');
-
-    const updateFields = [];
-    const values = [];
-    let paramIndex = 1;
-
-    updateFields.push(`status = $${paramIndex}`);
-    values.push(status);
-    paramIndex++;
-
-    if (admin_notes !== undefined) {
-      updateFields.push(`admin_notes = $${paramIndex}`);
-      values.push(admin_notes);
-      paramIndex++;
-    }
-
-    if (status === 'resolved' || status === 'dismissed') {
-      updateFields.push(`resolved_at = NOW(), resolved_by = $${paramIndex}`);
-      values.push(req.adminUser.id);
-      paramIndex++;
-    }
-
-    const query = `UPDATE disputes SET ${updateFields.join(', ')} WHERE dispute_id = $${paramIndex} RETURNING *`;
-    values.push(id);
-
-    const result = await client.query(query, values);
-    if (result.rows.length === 0) {
-      await client.query('ROLLBACK');
-      return res
-        .status(404)
-        .json({ success: false, error: 'Dispute not found' });
-    }
-
-    // Log admin action
-    await client.query(
-      `INSERT INTO admin_logs (admin_id, action, target_type, target_id, details)
-       VALUES ($1, $2, $3, $4, $5)`,
-      [
-        req.adminUser.id,
-        'UPDATE_DISPUTE',
-        'dispute',
-        id,
-        JSON.stringify({ status, admin_notes }),
-      ],
-    );
-
-    await client.query('COMMIT');
-    res.json({ success: true, dispute: result.rows[0] });
-  } catch (err) {
-    await client.query('ROLLBACK');
-    console.error('Admin dispute update error:', err);
-    res.status(500).json({ success: false, error: err.message });
-  } finally {
-    client.release();
-  }
-});
-
-// POST /api/admin/disputes – create a new dispute (optional, could be user-initiated)
-app.post('/api/admin/disputes', requireAdmin, async (req, res) => {
-  try {
-    const { reference_type, reference_id, raised_by, raised_against, reason } =
-      req.body;
-    if (!reference_type || !reference_id || !reason) {
-      return res
-        .status(400)
-        .json({ success: false, error: 'Missing required fields' });
-    }
-    const result = await pool.query(
-      `INSERT INTO disputes (reference_type, reference_id, raised_by, raised_against, reason, status)
-       VALUES ($1, $2, $3, $4, $5, 'open') RETURNING *`,
-      [
-        reference_type,
-        reference_id,
-        raised_by || null,
-        raised_against || null,
-        reason,
-      ],
-    );
-    res.json({ success: true, dispute: result.rows[0] });
-  } catch (err) {
-    console.error('Create dispute error:', err);
-    res.status(500).json({ success: false, error: err.message });
-  }
-});
-
-// ==========================================
 // MESSAGING ROUTES
 // ==========================================
 
 app.post('/api/messages', async (req, res) => {
   try {
     const { property_id, sender_id, receiver_id, content } = req.body;
-
     const result = await pool.query(
-      `INSERT INTO messages (property_id, sender_id, receiver_id, content) 
-       VALUES ($1, $2, $3, $4) RETURNING *`,
+      `INSERT INTO messages (property_id, sender_id, receiver_id, content) VALUES ($1, $2, $3, $4) RETURNING *`,
       [property_id, sender_id, receiver_id, content],
     );
-
-    // Push notification for chat
     const senderNameQuery = await pool.query(
       'SELECT name FROM users WHERE user_id = $1',
       [sender_id],
@@ -696,7 +488,6 @@ app.post('/api/messages', async (req, res) => {
       messagePreview,
       { screen: 'Chat', property_id, other_user_id: sender_id },
     );
-
     res.json({ success: true, message: result.rows[0] });
   } catch (err) {
     console.error('Error sending message:', err);
@@ -707,15 +498,10 @@ app.post('/api/messages', async (req, res) => {
 app.get('/api/messages/:property_id/:user1_id/:user2_id', async (req, res) => {
   try {
     const { property_id, user1_id, user2_id } = req.params;
-
     const result = await pool.query(
-      `SELECT * FROM messages 
-       WHERE property_id = $1 
-       AND ((sender_id = $2 AND receiver_id = $3) OR (sender_id = $3 AND receiver_id = $2))
-       ORDER BY created_at ASC`,
+      `SELECT * FROM messages WHERE property_id = $1 AND ((sender_id = $2 AND receiver_id = $3) OR (sender_id = $3 AND receiver_id = $2)) ORDER BY created_at ASC`,
       [property_id, user1_id, user2_id],
     );
-
     res.json({ success: true, messages: result.rows });
   } catch (err) {
     console.error('Error fetching messages:', err);
@@ -728,29 +514,15 @@ app.get('/api/messages/:property_id/:user1_id/:user2_id', async (req, res) => {
 app.get('/api/inbox/:userId', async (req, res) => {
   try {
     const { userId } = req.params;
-
     const query = `
-      SELECT DISTINCT ON (
-        m.property_id, 
-        CASE WHEN m.sender_id = $1 THEN m.receiver_id ELSE m.sender_id END
-      )
-        m.id,
-        m.property_id,
-        m.content as last_message,
-        m.created_at,
-        m.sender_id,
-        m.receiver_id,
-        p.title as property_title,
-        p.main_image_url
+      SELECT DISTINCT ON (m.property_id, CASE WHEN m.sender_id = $1 THEN m.receiver_id ELSE m.sender_id END)
+        m.id, m.property_id, m.content as last_message, m.created_at, m.sender_id, m.receiver_id,
+        p.title as property_title, p.main_image_url
       FROM messages m
       JOIN properties p ON m.property_id = p.property_id
       WHERE m.sender_id = $1 OR m.receiver_id = $1
-      ORDER BY 
-        m.property_id, 
-        CASE WHEN m.sender_id = $1 THEN m.receiver_id ELSE m.sender_id END,
-        m.created_at DESC;
+      ORDER BY m.property_id, CASE WHEN m.sender_id = $1 THEN m.receiver_id ELSE m.sender_id END, m.created_at DESC;
     `;
-
     const result = await pool.query(query, [userId]);
     const sortedConversations = result.rows.sort(
       (a, b) => new Date(b.created_at) - new Date(a.created_at),
@@ -769,10 +541,8 @@ app.get('/api/inbox/:userId', async (req, res) => {
 app.post('/api/viewings', async (req, res) => {
   try {
     const { property_id, renter_id, landlord_id, viewing_date } = req.body;
-
     const startTime = new Date(viewing_date);
     const endTime = new Date(startTime.getTime() + 60 * 60 * 1000);
-
     const result = await pool.query(
       `INSERT INTO viewings (property_id, renter_id, owner_id, scheduled_start_time, scheduled_end_time, status) 
        VALUES ($1, $2, $3, $4, $5, 'Pending') RETURNING *`,
@@ -784,15 +554,11 @@ app.post('/api/viewings', async (req, res) => {
         endTime.toISOString(),
       ],
     );
-
     const messageContent = `🗓️ I have requested a viewing for ${startTime.toLocaleString()}. Please accept or decline.||${result.rows[0].viewing_id}`;
     await pool.query(
-      `INSERT INTO messages (property_id, sender_id, receiver_id, content) 
-       VALUES ($1, $2, $3, $4)`,
+      `INSERT INTO messages (property_id, sender_id, receiver_id, content) VALUES ($1, $2, $3, $4)`,
       [property_id, renter_id, landlord_id, messageContent],
     );
-
-    // Push notification to owner
     const ownerNameQuery = await pool.query(
       'SELECT name FROM users WHERE user_id = $1',
       [landlord_id],
@@ -804,7 +570,6 @@ app.post('/api/viewings', async (req, res) => {
       `${ownerName}, a renter has requested a viewing. Please check your chat.`,
       { screen: 'Chat', property_id, other_user_id: renter_id },
     );
-
     res.json({ success: true, viewing: result.rows[0] });
   } catch (err) {
     console.error('Error creating viewing:', err);
@@ -818,13 +583,11 @@ app.put('/api/viewings/:id', async (req, res) => {
   try {
     const { id } = req.params;
     const { status } = req.body;
-
     const viewData = await pool.query(
       'SELECT property_id, owner_id, renter_id FROM viewings WHERE viewing_id = $1',
       [id],
     );
     const v = viewData.rows[0];
-
     let query, values;
     if (status === 'Accepted') {
       const securePin = crypto.randomInt(100000, 999999).toString();
@@ -847,7 +610,6 @@ app.put('/api/viewings/:id', async (req, res) => {
       query = `UPDATE viewings SET status = $1 WHERE viewing_id = $2 RETURNING *`;
       values = [status, id];
     }
-
     const result = await pool.query(query, values);
     res.json({ success: true, viewing: result.rows[0] });
   } catch (err) {
@@ -863,18 +625,13 @@ app.post('/api/viewings/:id/validate', async (req, res) => {
   try {
     const { id } = req.params;
     const { pin, owner_lat, owner_lng } = req.body;
-
-    if (!pin) {
+    if (!pin)
       return res
         .status(400)
         .json({ success: false, error: 'Handshake PIN is required.' });
-    }
-
     await client.query('BEGIN');
-
     const viewingResult = await client.query(
-      `SELECT secure_handshake_pin, pin_expiry, status, property_id, owner_id, renter_id 
-       FROM viewings WHERE viewing_id = $1 FOR UPDATE`,
+      `SELECT secure_handshake_pin, pin_expiry, status, property_id, owner_id, renter_id FROM viewings WHERE viewing_id = $1 FOR UPDATE`,
       [id],
     );
     if (viewingResult.rows.length === 0) {
@@ -884,7 +641,6 @@ app.post('/api/viewings/:id/validate', async (req, res) => {
         .json({ success: false, error: 'Viewing session not found.' });
     }
     const viewing = viewingResult.rows[0];
-
     if (viewing.status !== 'Accepted') {
       await client.query('ROLLBACK');
       return res.status(400).json({
@@ -892,7 +648,6 @@ app.post('/api/viewings/:id/validate', async (req, res) => {
         error: 'This viewing is not currently active or accepted.',
       });
     }
-
     const now = new Date();
     const expiry = new Date(viewing.pin_expiry);
     if (now > expiry) {
@@ -913,7 +668,6 @@ app.post('/api/viewings/:id/validate', async (req, res) => {
           'This handshake PIN has expired. The renter must refresh their app.',
       });
     }
-
     if (viewing.secure_handshake_pin !== pin.toString()) {
       await client.query('ROLLBACK');
       return res.status(400).json({
@@ -921,14 +675,10 @@ app.post('/api/viewings/:id/validate', async (req, res) => {
         error: 'Invalid handshake PIN. Verification failed.',
       });
     }
-
     const updateResult = await client.query(
-      `UPDATE viewings 
-       SET status = 'Completed', owner_checkin_location = $2, updated_at = CURRENT_TIMESTAMP 
-       WHERE viewing_id = $1 RETURNING *`,
+      `UPDATE viewings SET status = 'Completed', owner_checkin_location = $2, updated_at = CURRENT_TIMESTAMP WHERE viewing_id = $1 RETURNING *`,
       [id, `${owner_lat},${owner_lng}`],
     );
-
     await client.query(
       `INSERT INTO messages (property_id, sender_id, receiver_id, content) VALUES ($1, $2, $3, $4)`,
       [
@@ -938,7 +688,6 @@ app.post('/api/viewings/:id/validate', async (req, res) => {
         `✅ **Secure Handshake Completed.** Renter is currently conducting the physical audit.`,
       ],
     );
-
     await client.query('COMMIT');
     res.json({
       success: true,
@@ -961,9 +710,7 @@ app.post('/api/viewings/:id/audit', async (req, res) => {
   try {
     const { id } = req.params;
     const { audit_data, renter_notes, final_decision } = req.body;
-
     await client.query('BEGIN');
-
     const viewResult = await client.query(
       'SELECT property_id, renter_id, owner_id FROM viewings WHERE viewing_id = $1 FOR UPDATE',
       [id],
@@ -975,19 +722,15 @@ app.post('/api/viewings/:id/audit', async (req, res) => {
         .json({ success: false, error: 'Viewing not found' });
     }
     const v = viewResult.rows[0];
-
     let missingCount = 0;
     const totalCount = audit_data.length;
-
     for (const item of audit_data) {
       await client.query(
-        `INSERT INTO inspection_audits (viewing_id, amenity_id, is_physically_present, renter_notes)
-         VALUES ($1, $2, $3, $4)`,
+        `INSERT INTO inspection_audits (viewing_id, amenity_id, is_physically_present, renter_notes) VALUES ($1, $2, $3, $4)`,
         [id, item.amenity_id, item.is_present, renter_notes],
       );
       if (item.is_present === false) missingCount++;
     }
-
     if (missingCount > 0) {
       const penalty = missingCount * 5;
       await client.query(
@@ -1000,26 +743,21 @@ app.post('/api/viewings/:id/audit', async (req, res) => {
         [v.owner_id],
       );
     }
-
     let conclusionText =
       missingCount > 0
         ? `⚠️ *Propadi Trust Engine has deducted trust points from the Owner due to missing advertised amenities.*`
         : `✅ *Property perfectly matches the online listing. Owner trust score increased.*`;
     if (totalCount === 0)
       conclusionText = `*No specific amenities were verified.*`;
-
     const reportContent = `📋 **Immutable Inspection Report**\nAmenities Verified: ${totalCount - missingCount}/${totalCount}\nDiscrepancies Found: ${missingCount}\nRenter's Decision: **${final_decision}**\n\n${conclusionText}`;
-
     await client.query(
       `INSERT INTO messages (property_id, sender_id, receiver_id, content) VALUES ($1, $2, $3, $4)`,
       [v.property_id, v.renter_id, v.owner_id, reportContent],
     );
-
     await client.query(
       `UPDATE viewings SET status = 'Audited', updated_at = CURRENT_TIMESTAMP WHERE viewing_id = $1`,
       [id],
     );
-
     await client.query('COMMIT');
     res.json({ success: true, message: 'Audit logged successfully' });
   } catch (err) {
@@ -1048,7 +786,6 @@ app.post('/api/applications', async (req, res) => {
       move_in_date,
       is_sight_unseen,
     } = req.body;
-
     const result = await pool.query(
       `INSERT INTO applications (property_id, renter_id, owner_id, proposed_rent, cover_letter, move_in_date, is_sight_unseen) 
        VALUES ($1, $2, $3, $4, $5, $6, $7) RETURNING *`,
@@ -1062,7 +799,6 @@ app.post('/api/applications', async (req, res) => {
         is_sight_unseen || false,
       ],
     );
-
     res.json({ success: true, application: result.rows[0] });
   } catch (err) {
     console.error('Error submitting application:', err);
@@ -1076,10 +812,9 @@ app.get('/api/applications/owner/:owner_id', async (req, res) => {
   try {
     const { owner_id } = req.params;
     const result = await pool.query(
-      `SELECT 
-         a.application_id, a.property_id, a.proposed_rent, a.cover_letter, a.status, a.date_applied, a.is_sight_unseen,
-         u.user_id as renter_id, u.name, u.profile_picture_url, u.role, u.renter_score, u.kyc_status, u.occupation, u.email,
-         p.title as property_title
+      `SELECT a.application_id, a.property_id, a.proposed_rent, a.cover_letter, a.status, a.date_applied, a.is_sight_unseen,
+              u.user_id as renter_id, u.name, u.profile_picture_url, u.role, u.renter_score, u.kyc_status, u.occupation, u.email,
+              p.title as property_title
        FROM applications a
        JOIN users u ON a.renter_id = u.user_id
        JOIN properties p ON a.property_id = p.property_id
@@ -1100,13 +835,11 @@ app.put('/api/applications/:id', async (req, res) => {
   try {
     const { id } = req.params;
     const { status } = req.body;
-
     const appResult = await pool.query(
       `UPDATE applications SET status = $1, date_status_updated = CURRENT_TIMESTAMP WHERE application_id = $2 RETURNING *`,
       [status, id],
     );
     const application = appResult.rows[0];
-
     if (status === 'Approved' && application) {
       const start = new Date();
       const moveIn = (application.move_in_date || '').toLowerCase();
@@ -1119,7 +852,6 @@ app.put('/api/applications/:id', async (req, res) => {
       end.setFullYear(end.getFullYear() + 1);
       const sqlStartDate = start.toISOString().split('T')[0];
       const sqlEndDate = end.toISOString().split('T')[0];
-
       await pool.query(
         `INSERT INTO tenancies (application_id, property_id, renter_id, owner_id, rent_amount, rent_period, lease_start_date, lease_end_date, status, is_sight_unseen) 
          VALUES ($1, $2, $3, $4, $5, 'Per Annum', $6, $7, 'Draft', $8)`,
@@ -1135,7 +867,6 @@ app.put('/api/applications/:id', async (req, res) => {
         ],
       );
     }
-
     res.json({ success: true, application });
   } catch (err) {
     console.error('Error updating application:', err);
@@ -1149,10 +880,8 @@ app.get('/api/applications/renter/:renter_id', async (req, res) => {
   try {
     const { renter_id } = req.params;
     const result = await pool.query(
-      `SELECT 
-         a.application_id, a.property_id, a.proposed_rent, a.status, a.date_applied,
-         p.title as property_title, p.address_street, p.address_city,
-         t.tenancy_id
+      `SELECT a.application_id, a.property_id, a.proposed_rent, a.status, a.date_applied,
+              p.title as property_title, p.address_street, p.address_city, t.tenancy_id
        FROM applications a
        JOIN properties p ON a.property_id = p.property_id
        LEFT JOIN tenancies t ON a.application_id = t.application_id
@@ -1173,9 +902,7 @@ app.get('/api/applications/check/:property_id/:renter_id', async (req, res) => {
   try {
     const { property_id, renter_id } = req.params;
     const result = await pool.query(
-      `SELECT status FROM applications 
-       WHERE property_id = $1 AND renter_id = $2 AND status IN ('Pending', 'Approved') 
-       LIMIT 1`,
+      `SELECT status FROM applications WHERE property_id = $1 AND renter_id = $2 AND status IN ('Pending', 'Approved') LIMIT 1`,
       [property_id, renter_id],
     );
     if (result.rows.length > 0) {
@@ -1201,11 +928,9 @@ app.get('/api/tenancies/:id', async (req, res) => {
   try {
     const { id } = req.params;
     const result = await pool.query(
-      `SELECT 
-         t.*, 
-         p.title as property_title, p.address_street, p.address_city, p.address_state,
-         o.name as owner_name, o.email as owner_email,
-         r.name as renter_name, r.email as renter_email, r.occupation, r.nok_full_name
+      `SELECT t.*, p.title as property_title, p.address_street, p.address_city, p.address_state,
+              o.name as owner_name, o.email as owner_email,
+              r.name as renter_name, r.email as renter_email, r.occupation, r.nok_full_name
        FROM tenancies t
        JOIN properties p ON t.property_id = p.property_id
        JOIN users o ON t.owner_id = o.user_id
@@ -1278,7 +1003,6 @@ app.post('/api/tenancies/:id/pay', async (req, res) => {
     let gatewayFee = rentAmount * 0.015 + 100;
     if (gatewayFee > 2000) gatewayFee = 2000;
     const totalAmountKobo = Math.round((rentAmount + gatewayFee) * 100);
-
     const paystackResponse = await fetch(
       'https://api.paystack.co/transaction/initialize',
       {
@@ -1296,7 +1020,6 @@ app.post('/api/tenancies/:id/pay', async (req, res) => {
       },
     );
     const paystackData = await paystackResponse.json();
-
     if (paystackData.status) {
       await pool.query(
         `UPDATE tenancies SET payment_reference = $1 WHERE tenancy_id = $2`,
@@ -1329,7 +1052,6 @@ app.post('/api/tenancies/:id/verify', async (req, res) => {
       return res
         .status(400)
         .json({ success: false, error: 'No active payment found.' });
-
     const verifyResponse = await fetch(
       `https://api.paystack.co/transaction/verify/${tenancy.payment_reference}`,
       {
@@ -1338,7 +1060,6 @@ app.post('/api/tenancies/:id/verify', async (req, res) => {
       },
     );
     const verifyData = await verifyResponse.json();
-
     if (verifyData.data.status === 'success') {
       await client.query('BEGIN');
       await client.query(
@@ -1348,7 +1069,6 @@ app.post('/api/tenancies/:id/verify', async (req, res) => {
       const rentAmount = parseFloat(tenancy.rent_amount);
       let gatewayFee = rentAmount * 0.015 + 100;
       if (gatewayFee > 2000) gatewayFee = 2000;
-
       await client.query(
         `INSERT INTO transactions (user_id, type, title, property_ref, amount, status) VALUES ($1, 'payment', 'Annual Rent Payment', $2, $3, 'Completed')`,
         [tenancy.renter_id, tenancy.property_title, -rentAmount],
@@ -1365,7 +1085,6 @@ app.post('/api/tenancies/:id/verify', async (req, res) => {
         `UPDATE wallets SET balance = balance + $1, total_earned = total_earned + $1, updated_at = CURRENT_TIMESTAMP WHERE user_id = $2`,
         [rentAmount, tenancy.owner_id],
       );
-
       await client.query('COMMIT');
       res.json({
         success: true,
@@ -1399,12 +1118,10 @@ app.post('/api/webhook/paystack', async (req, res) => {
     .digest('hex');
   if (hash !== req.headers['x-paystack-signature'])
     return res.status(400).send('Invalid signature');
-
   const event = req.body;
   if (event.event === 'charge.success') {
     const tenancyId = event.data.metadata?.tenancy_id;
     if (!tenancyId) return res.status(200).send('No tenancy ID, ignored.');
-
     const client = await pool.connect();
     try {
       await client.query('BEGIN');
@@ -1429,7 +1146,6 @@ app.post('/api/webhook/paystack', async (req, res) => {
         [tenancyId],
       );
       const propertyTitle = propQuery.rows[0]?.title || 'Propadi Property';
-
       await client.query(
         `INSERT INTO transactions (user_id, type, title, property_ref, amount, status) VALUES ($1, 'payment', 'Annual Rent Payment', $2, $3, 'Completed')`,
         [tenancy.renter_id, propertyTitle, -rentAmount],
@@ -1446,7 +1162,6 @@ app.post('/api/webhook/paystack', async (req, res) => {
         `UPDATE wallets SET balance = balance + $1, total_earned = total_earned + $1, updated_at = CURRENT_TIMESTAMP WHERE user_id = $2`,
         [rentAmount, tenancy.owner_id],
       );
-
       await client.query('COMMIT');
       console.log(
         `[WEBHOOK SUCCESS] Tenancy ${tenancyId} automatically funded and verified.`,
@@ -1534,7 +1249,6 @@ app.post('/api/tenancies/:id/renew', async (req, res) => {
   try {
     const { id } = req.params;
     const { new_rent_amount } = req.body;
-
     await client.query('BEGIN');
     const origResult = await client.query(
       `SELECT renter_id, owner_id, property_id, rent_amount, lease_end_date, payment_status FROM tenancies WHERE tenancy_id = $1 FOR UPDATE`,
@@ -1560,7 +1274,6 @@ app.post('/api/tenancies/:id/renew', async (req, res) => {
     newStart.setDate(newStart.getDate() + 1);
     const newEnd = new Date(newStart);
     newEnd.setFullYear(newEnd.getFullYear() + 1);
-
     const insertResult = await client.query(
       `INSERT INTO tenancies (property_id, renter_id, owner_id, rent_amount, rent_period, lease_start_date, lease_end_date, status, payment_status, renewal_of_tenancy_id, renewal_status)
        VALUES ($1, $2, $3, $4, $5, $6, $7, 'Draft', 'Pending', $8, 'Pending') RETURNING *`,
@@ -1577,7 +1290,6 @@ app.post('/api/tenancies/:id/renew', async (req, res) => {
     );
     const newTenancy = insertResult.rows[0];
     await client.query('COMMIT');
-
     const propertyTitleQuery = await pool.query(
       'SELECT title FROM properties WHERE property_id = $1',
       [orig.property_id],
@@ -1589,7 +1301,6 @@ app.post('/api/tenancies/:id/renew', async (req, res) => {
       `You have a renewal offer for ${propTitle}. Accept to sign and pay.`,
       { screen: 'Tenancy', tenancy_id: newTenancy.tenancy_id },
     );
-
     res.json({
       success: true,
       message: 'Renewal offer created. The tenant will see it in their wallet.',
@@ -1632,11 +1343,10 @@ app.post('/api/tenancies/:id/accept-renewal', async (req, res) => {
       `UPDATE tenancies SET renewal_status = 'Accepted' WHERE tenancy_id = $1 RETURNING *`,
       [id],
     );
-    if (result.rows.length === 0) {
+    if (result.rows.length === 0)
       return res
         .status(404)
         .json({ success: false, error: 'Renewal not found' });
-    }
     res.json({ success: true, tenancy: result.rows[0] });
   } catch (err) {
     console.error('Accept renewal error:', err);
@@ -1700,7 +1410,6 @@ app.post('/api/wallet/withdraw', async (req, res) => {
       return res
         .status(400)
         .json({ success: false, error: 'Invalid withdrawal amount' });
-
     const userResult = await client.query(
       'SELECT email FROM users WHERE user_id = $1',
       [userId],
@@ -1708,7 +1417,6 @@ app.post('/api/wallet/withdraw', async (req, res) => {
     if (userResult.rows.length === 0)
       return res.status(404).json({ success: false, error: 'User not found' });
     const userEmail = userResult.rows[0].email;
-
     await client.query('BEGIN');
     const walletResult = await client.query(
       'SELECT balance FROM wallets WHERE user_id = $1 FOR UPDATE',
@@ -1727,7 +1435,6 @@ app.post('/api/wallet/withdraw', async (req, res) => {
       'UPDATE wallets SET balance = balance - $1, updated_at = CURRENT_TIMESTAMP WHERE user_id = $2',
       [withdrawAmount, userId],
     );
-
     const withdrawalResult = await client.query(
       `INSERT INTO withdrawals (user_id, email, amount, bank_name, account_number, status, type, transfer_status)
        VALUES ($1, $2, $3, $4, $5, 'Processing', 'Withdrawal', 'Processing') RETURNING *`,
@@ -1735,12 +1442,10 @@ app.post('/api/wallet/withdraw', async (req, res) => {
     );
     const withdrawal = withdrawalResult.rows[0];
     await client.query(
-      `INSERT INTO transactions (user_id, type, title, property_ref, amount, status)
-       VALUES ($1, 'withdrawal', 'Bank Withdrawal', $2, $3, 'Pending')`,
+      `INSERT INTO transactions (user_id, type, title, property_ref, amount, status) VALUES ($1, 'withdrawal', 'Bank Withdrawal', $2, $3, 'Pending')`,
       [userId, `To ${bankName} (${accountNumber.slice(-4)})`, -withdrawAmount],
     );
     await client.query('COMMIT');
-
     try {
       const recipientCode = await getOrCreateRecipient(
         userId,
@@ -1994,205 +1699,8 @@ app.put('/api/maintenance/:id', async (req, res) => {
 });
 
 // ==========================================
-// ADMIN DASHBOARD ENDPOINTS
+// ADMIN DASHBOARD ENDPOINTS (with new features)
 // ==========================================
-
-// Middleware to verify admin role
-const requireAdmin = async (req, res, next) => {
-  try {
-    const authHeader = req.headers.authorization;
-    if (!authHeader)
-      return res
-        .status(401)
-        .json({ success: false, error: 'No token provided' });
-    const token = authHeader.split(' ')[1];
-    const {
-      data: { user },
-      error,
-    } = await supabase.auth.getUser(token);
-    if (error || !user)
-      return res.status(401).json({ success: false, error: 'Invalid token' });
-    const { rows } = await pool.query(
-      'SELECT is_admin FROM users WHERE user_id = $1',
-      [user.id],
-    );
-    if (rows.length === 0 || !rows[0].is_admin) {
-      return res
-        .status(403)
-        .json({ success: false, error: 'Admin access required' });
-    }
-    req.adminUser = user;
-    next();
-  } catch (err) {
-    res
-      .status(500)
-      .json({ success: false, error: 'Admin verification failed' });
-  }
-};
-
-// GET /api/admin/maintenance – list all maintenance tickets with filters
-app.get('/api/admin/maintenance', requireAdmin, async (req, res) => {
-  try {
-    const {
-      status,
-      property_id,
-      owner_id,
-      renter_id,
-      limit = 50,
-      offset = 0,
-    } = req.query;
-
-    let query = `
-      SELECT 
-        m.request_id as id,
-        m.category,
-        m.title,
-        m.description,
-        m.status,
-        m.date_submitted as created_at,
-        m.date_resolved as resolved_at,
-        m.media_url,
-        p.title as property_title,
-        p.property_id,
-        u_owner.name as owner_name,
-        u_owner.user_id as owner_id,
-        u_renter.name as renter_name,
-        u_renter.user_id as renter_id
-      FROM maintenance_requests m
-      JOIN properties p ON m.property_id = p.property_id
-      JOIN users u_owner ON m.owner_id = u_owner.user_id
-      JOIN users u_renter ON m.renter_id = u_renter.user_id
-      WHERE 1=1
-    `;
-    const values = [];
-    let paramIndex = 1;
-
-    if (status && status !== 'all') {
-      query += ` AND m.status = $${paramIndex}`;
-      values.push(status);
-      paramIndex++;
-    }
-    if (property_id) {
-      query += ` AND m.property_id = $${paramIndex}`;
-      values.push(property_id);
-      paramIndex++;
-    }
-    if (owner_id) {
-      query += ` AND m.owner_id = $${paramIndex}`;
-      values.push(owner_id);
-      paramIndex++;
-    }
-    if (renter_id) {
-      query += ` AND m.renter_id = $${paramIndex}`;
-      values.push(renter_id);
-      paramIndex++;
-    }
-
-    query += ` ORDER BY m.date_submitted DESC LIMIT $${paramIndex} OFFSET $${paramIndex + 1}`;
-    values.push(parseInt(limit), parseInt(offset));
-
-    const result = await pool.query(query, values);
-
-    // Also get total count for pagination (simplified – optional)
-    const countResult = await pool.query(
-      `SELECT COUNT(*) as total FROM maintenance_requests`,
-    );
-
-    res.json({
-      success: true,
-      tickets: result.rows,
-      total: parseInt(countResult.rows[0].total),
-    });
-  } catch (err) {
-    console.error('Admin maintenance fetch error:', err);
-    res.status(500).json({ success: false, error: err.message });
-  }
-});
-
-// PUT /api/admin/maintenance/:id – update status, add admin note, notify parties
-app.put('/api/admin/maintenance/:id', requireAdmin, async (req, res) => {
-  const client = await pool.connect();
-  try {
-    const { id } = req.params;
-    const { status, admin_note } = req.body;
-
-    if (!status) {
-      return res
-        .status(400)
-        .json({ success: false, error: 'Status is required' });
-    }
-
-    await client.query('BEGIN');
-
-    // Get current ticket details (owner_id, renter_id, property_id)
-    const ticketResult = await client.query(
-      `SELECT owner_id, renter_id, property_id, status as old_status 
-       FROM maintenance_requests WHERE request_id = $1`,
-      [id],
-    );
-    if (ticketResult.rows.length === 0) {
-      await client.query('ROLLBACK');
-      return res
-        .status(404)
-        .json({ success: false, error: 'Ticket not found' });
-    }
-    const ticket = ticketResult.rows[0];
-
-    // Update ticket
-    const updateQuery =
-      status === 'Resolved'
-        ? `UPDATE maintenance_requests SET status = $1, date_resolved = CURRENT_TIMESTAMP WHERE request_id = $2 RETURNING *`
-        : `UPDATE maintenance_requests SET status = $1 WHERE request_id = $2 RETURNING *`;
-    const updateResult = await client.query(updateQuery, [status, id]);
-    const updatedTicket = updateResult.rows[0];
-
-    // Log admin action (optional: add to admin_logs table)
-    await client.query(
-      `INSERT INTO admin_logs (admin_id, action, target_type, target_id, details)
-       VALUES ($1, $2, $3, $4, $5)`,
-      [
-        req.adminUser.id,
-        'UPDATE_MAINTENANCE_STATUS',
-        'maintenance_request',
-        id,
-        JSON.stringify({
-          old_status: ticket.old_status,
-          new_status: status,
-          admin_note,
-        }),
-      ],
-    );
-
-    // Send push notifications to owner and renter about status change
-    const propertyResult = await client.query(
-      'SELECT title FROM properties WHERE property_id = $1',
-      [ticket.property_id],
-    );
-    const propertyTitle = propertyResult.rows[0]?.title || 'your property';
-
-    const title = `Maintenance Request ${status}`;
-    const body = `Your request for "${propertyTitle}" is now ${status}.${admin_note ? ` Note: ${admin_note}` : ''}`;
-
-    // Send to owner and renter
-    await sendPushToUser(ticket.owner_id, title, body, {
-      screen: 'Maintenance',
-      ticket_id: id,
-    });
-    await sendPushToUser(ticket.renter_id, title, body, {
-      screen: 'Maintenance',
-      ticket_id: id,
-    });
-
-    await client.query('COMMIT');
-    res.json({ success: true, ticket: updatedTicket });
-  } catch (err) {
-    await client.query('ROLLBACK');
-    console.error('Admin maintenance update error:', err);
-    res.status(500).json({ success: false, error: err.message });
-  } finally {
-    client.release();
-  }
-});
 
 // GET /api/admin/stats – platform statistics
 app.get('/api/admin/stats', requireAdmin, async (req, res) => {
@@ -2208,7 +1716,6 @@ app.get('/api/admin/stats', requireAdmin, async (req, res) => {
     const totalFees = await pool.query(
       "SELECT SUM(ABS(amount)) FROM transactions WHERE type = 'fee' AND status = 'Completed'",
     );
-
     res.json({
       success: true,
       stats: {
@@ -2224,34 +1731,23 @@ app.get('/api/admin/stats', requireAdmin, async (req, res) => {
   }
 });
 
-// GET /api/admin/users – list all users with optional role filter and sorting
+// GET /api/admin/users – list users with sorting by trust score
 app.get('/api/admin/users', requireAdmin, async (req, res) => {
   try {
     const { role, sort_by } = req.query;
-    let query = `
-      SELECT user_id, name, email, role, is_admin, renter_score, kyc_status, date_joined 
-      FROM users
-    `;
+    let query = `SELECT user_id, name, email, role, is_admin, renter_score, kyc_status, date_joined FROM users`;
     const params = [];
     const conditions = [];
-
     if (role) {
       conditions.push(`role = $${params.length + 1}`);
       params.push(role);
     }
-    if (conditions.length) {
-      query += ' WHERE ' + conditions.join(' AND ');
-    }
-
-    // Sorting
-    if (sort_by === 'renter_score_asc') {
+    if (conditions.length) query += ' WHERE ' + conditions.join(' AND ');
+    if (sort_by === 'renter_score_asc')
       query += ' ORDER BY renter_score ASC NULLS LAST';
-    } else if (sort_by === 'renter_score_desc') {
+    else if (sort_by === 'renter_score_desc')
       query += ' ORDER BY renter_score DESC NULLS LAST';
-    } else {
-      query += ' ORDER BY date_joined DESC';
-    }
-
+    else query += ' ORDER BY date_joined DESC';
     const result = await pool.query(query, params);
     res.json({ success: true, users: result.rows });
   } catch (err) {
@@ -2259,7 +1755,7 @@ app.get('/api/admin/users', requireAdmin, async (req, res) => {
   }
 });
 
-// PUT /api/admin/users/:userId/role – update user role (owner/renter) or admin flag
+// PUT /api/admin/users/:userId – update role/admin flag
 app.put('/api/admin/users/:userId', requireAdmin, async (req, res) => {
   try {
     const { userId } = req.params;
@@ -2288,7 +1784,6 @@ app.put('/api/admin/users/:userId', requireAdmin, async (req, res) => {
     const result = await pool.query(query, values);
     if (result.rows.length === 0)
       return res.status(404).json({ success: false, error: 'User not found' });
-    // Log action
     await pool.query(
       'INSERT INTO admin_logs (admin_id, action, target_type, target_id, details) VALUES ($1, $2, $3, $4, $5)',
       [
@@ -2305,41 +1800,75 @@ app.put('/api/admin/users/:userId', requireAdmin, async (req, res) => {
   }
 });
 
-// GET /api/admin/properties – list all properties with optional status filter
-app.get('/api/admin/properties', requireAdmin, async (req, res) => {
+// PUT /api/admin/properties/:id/status – support status and is_featured (with logging)
+app.put('/api/admin/properties/:id/status', requireAdmin, async (req, res) => {
   try {
-    const { status } = req.query;
-    let query = `
-      SELECT p.*, u.name as owner_name, u.email as owner_email,
-             (SELECT COUNT(*) FROM applications WHERE property_id = p.property_id) as application_count
-      FROM properties p
-      JOIN users u ON p.owner_id = u.user_id
-    `;
-    const params = [];
-    if (status) {
-      query += ' WHERE p.status = $1';
-      params.push(status);
+    const { id } = req.params;
+    const { status, is_featured, admin_note } = req.body;
+    let updates = [];
+    const values = [];
+    if (status !== undefined) {
+      updates.push(`status = $${values.length + 1}`);
+      values.push(status);
     }
-    query += ' ORDER BY p.date_listed DESC';
-    const result = await pool.query(query, params);
-    res.json({ success: true, properties: result.rows });
+    if (is_featured !== undefined) {
+      updates.push(`is_featured = $${values.length + 1}`);
+      values.push(is_featured);
+    }
+    if (updates.length === 0)
+      return res
+        .status(400)
+        .json({ success: false, error: 'No fields to update' });
+    const query = `UPDATE properties SET ${updates.join(', ')} WHERE property_id = $${values.length + 1} RETURNING *`;
+    values.push(id);
+    const result = await pool.query(query, values);
+    if (result.rows.length === 0)
+      return res
+        .status(404)
+        .json({ success: false, error: 'Property not found' });
+    const property = result.rows[0];
+    await pool.query(
+      'INSERT INTO admin_logs (admin_id, action, target_type, target_id, details) VALUES ($1, $2, $3, $4, $5)',
+      [
+        req.adminUser.id,
+        'UPDATE_PROPERTY',
+        'property',
+        id,
+        JSON.stringify({ status, is_featured, admin_note }),
+      ],
+    );
+    if (status !== undefined) {
+      try {
+        let title = '',
+          body = '';
+        if (status === 'Available') {
+          title = 'Property Approved';
+          body = `Your property "${property.title}" has been approved and is now live.`;
+        } else if (status === 'Rejected') {
+          title = 'Property Rejected';
+          body = `Your property "${property.title}" was not approved. Please check the listing details.`;
+        }
+        if (title)
+          await sendPushToUser(property.owner_id, title, body, {
+            screen: 'MyProperties',
+          });
+      } catch (pushErr) {
+        console.error('Push notification failed', pushErr);
+      }
+    }
+    res.json({ success: true, property });
   } catch (err) {
+    console.error('Update property error:', err);
     res.status(500).json({ success: false, error: err.message });
   }
 });
 
-// GET /api/admin/transactions – all platform transactions
+// GET /api/admin/transactions
 app.get('/api/admin/transactions', requireAdmin, async (req, res) => {
   try {
     const { limit = 100, offset = 0 } = req.query;
     const result = await pool.query(
-      `
-      SELECT t.*, u.name, u.email
-      FROM transactions t
-      JOIN users u ON t.user_id = u.user_id
-      ORDER BY t.created_at DESC
-      LIMIT $1 OFFSET $2
-    `,
+      `SELECT t.*, u.name, u.email FROM transactions t JOIN users u ON t.user_id = u.user_id ORDER BY t.created_at DESC LIMIT $1 OFFSET $2`,
       [parseInt(limit), parseInt(offset)],
     );
     const count = await pool.query('SELECT COUNT(*) FROM transactions');
@@ -2353,11 +1882,10 @@ app.get('/api/admin/transactions', requireAdmin, async (req, res) => {
   }
 });
 
-// DELETE /api/admin/users/:userId – delete user (admin only)
+// DELETE /api/admin/users/:userId
 app.delete('/api/admin/users/:userId', requireAdmin, async (req, res) => {
   try {
     const { userId } = req.params;
-    // Prevent admin from deleting themselves
     if (userId === req.adminUser.id)
       return res.status(400).json({
         success: false,
@@ -2374,11 +1902,309 @@ app.delete('/api/admin/users/:userId', requireAdmin, async (req, res) => {
   }
 });
 
+// GET /api/admin/maintenance – list all maintenance tickets
+app.get('/api/admin/maintenance', requireAdmin, async (req, res) => {
+  try {
+    const {
+      status,
+      property_id,
+      owner_id,
+      renter_id,
+      limit = 50,
+      offset = 0,
+    } = req.query;
+    let query = `
+      SELECT m.request_id as id, m.category, m.title, m.description, m.status, m.date_submitted as created_at,
+             m.date_resolved as resolved_at, m.media_url,
+             p.title as property_title, p.property_id,
+             u_owner.name as owner_name, u_owner.user_id as owner_id,
+             u_renter.name as renter_name, u_renter.user_id as renter_id
+      FROM maintenance_requests m
+      JOIN properties p ON m.property_id = p.property_id
+      JOIN users u_owner ON m.owner_id = u_owner.user_id
+      JOIN users u_renter ON m.renter_id = u_renter.user_id
+      WHERE 1=1
+    `;
+    const values = [];
+    let paramIndex = 1;
+    if (status && status !== 'all') {
+      query += ` AND m.status = $${paramIndex}`;
+      values.push(status);
+      paramIndex++;
+    }
+    if (property_id) {
+      query += ` AND m.property_id = $${paramIndex}`;
+      values.push(property_id);
+      paramIndex++;
+    }
+    if (owner_id) {
+      query += ` AND m.owner_id = $${paramIndex}`;
+      values.push(owner_id);
+      paramIndex++;
+    }
+    if (renter_id) {
+      query += ` AND m.renter_id = $${paramIndex}`;
+      values.push(renter_id);
+      paramIndex++;
+    }
+    query += ` ORDER BY m.date_submitted DESC LIMIT $${paramIndex} OFFSET $${paramIndex + 1}`;
+    values.push(parseInt(limit), parseInt(offset));
+    const result = await pool.query(query, values);
+    const countResult = await pool.query(
+      'SELECT COUNT(*) as total FROM maintenance_requests',
+    );
+    res.json({
+      success: true,
+      tickets: result.rows,
+      total: parseInt(countResult.rows[0].total),
+    });
+  } catch (err) {
+    console.error('Admin maintenance fetch error:', err);
+    res.status(500).json({ success: false, error: err.message });
+  }
+});
+
+// PUT /api/admin/maintenance/:id – update status and admin note
+app.put('/api/admin/maintenance/:id', requireAdmin, async (req, res) => {
+  const client = await pool.connect();
+  try {
+    const { id } = req.params;
+    const { status, admin_note } = req.body;
+    if (!status)
+      return res
+        .status(400)
+        .json({ success: false, error: 'Status is required' });
+    await client.query('BEGIN');
+    const ticketResult = await client.query(
+      `SELECT owner_id, renter_id, property_id, status as old_status FROM maintenance_requests WHERE request_id = $1`,
+      [id],
+    );
+    if (ticketResult.rows.length === 0) {
+      await client.query('ROLLBACK');
+      return res
+        .status(404)
+        .json({ success: false, error: 'Ticket not found' });
+    }
+    const ticket = ticketResult.rows[0];
+    const updateQuery =
+      status === 'Resolved'
+        ? `UPDATE maintenance_requests SET status = $1, date_resolved = CURRENT_TIMESTAMP WHERE request_id = $2 RETURNING *`
+        : `UPDATE maintenance_requests SET status = $1 WHERE request_id = $2 RETURNING *`;
+    const updateResult = await client.query(updateQuery, [status, id]);
+    await client.query(
+      'INSERT INTO admin_logs (admin_id, action, target_type, target_id, details) VALUES ($1, $2, $3, $4, $5)',
+      [
+        req.adminUser.id,
+        'UPDATE_MAINTENANCE_STATUS',
+        'maintenance_request',
+        id,
+        JSON.stringify({
+          old_status: ticket.old_status,
+          new_status: status,
+          admin_note,
+        }),
+      ],
+    );
+    const propertyResult = await client.query(
+      'SELECT title FROM properties WHERE property_id = $1',
+      [ticket.property_id],
+    );
+    const propertyTitle = propertyResult.rows[0]?.title || 'your property';
+    const title = `Maintenance Request ${status}`;
+    const body = `Your request for "${propertyTitle}" is now ${status}.${admin_note ? ` Note: ${admin_note}` : ''}`;
+    await sendPushToUser(ticket.owner_id, title, body, {
+      screen: 'Maintenance',
+      ticket_id: id,
+    });
+    await sendPushToUser(ticket.renter_id, title, body, {
+      screen: 'Maintenance',
+      ticket_id: id,
+    });
+    await client.query('COMMIT');
+    res.json({ success: true, ticket: updateResult.rows[0] });
+  } catch (err) {
+    await client.query('ROLLBACK');
+    console.error('Admin maintenance update error:', err);
+    res.status(500).json({ success: false, error: err.message });
+  } finally {
+    client.release();
+  }
+});
+
+// POST /api/admin/broadcast – send push to all users (or by role)
+app.post('/api/admin/broadcast', requireAdmin, async (req, res) => {
+  try {
+    const { title, body, role } = req.body;
+    if (!title || !body)
+      return res
+        .status(400)
+        .json({ success: false, error: 'Title and body are required' });
+    let userQuery = 'SELECT user_id FROM users';
+    const params = [];
+    if (role && role !== 'all') {
+      userQuery += ' WHERE role = $1';
+      params.push(role);
+    }
+    const { rows: users } = await pool.query(userQuery, params);
+    let successCount = 0,
+      failCount = 0;
+    for (const user of users) {
+      try {
+        await sendPushToUser(user.user_id, title, body, {
+          screen: 'AdminBroadcast',
+        });
+        successCount++;
+      } catch (err) {
+        failCount++;
+      }
+    }
+    await pool.query(
+      'INSERT INTO admin_logs (admin_id, action, target_type, details) VALUES ($1, $2, $3, $4)',
+      [
+        req.adminUser.id,
+        'BROADCAST',
+        'system',
+        JSON.stringify({ title, body, role, successCount, failCount }),
+      ],
+    );
+    res.json({
+      success: true,
+      message: `Broadcast sent to ${successCount} users. Failed: ${failCount}`,
+      successCount,
+      failCount,
+    });
+  } catch (err) {
+    console.error('Broadcast error:', err);
+    res.status(500).json({ success: false, error: err.message });
+  }
+});
+
+// Dispute Resolution Endpoints
+
+// GET /api/admin/disputes
+app.get('/api/admin/disputes', requireAdmin, async (req, res) => {
+  try {
+    const { status, reference_type, limit = 50, offset = 0 } = req.query;
+    let query = `
+      SELECT d.*, 
+             u_raiser.name as raiser_name, u_raiser.email as raiser_email,
+             u_target.name as target_name, u_target.email as target_email,
+             u_resolver.name as resolver_name
+      FROM disputes d
+      LEFT JOIN users u_raiser ON d.raised_by = u_raiser.user_id
+      LEFT JOIN users u_target ON d.raised_against = u_target.user_id
+      LEFT JOIN users u_resolver ON d.resolved_by = u_resolver.user_id
+      WHERE 1=1
+    `;
+    const values = [];
+    let paramIndex = 1;
+    if (status && status !== 'all') {
+      query += ` AND d.status = $${paramIndex}`;
+      values.push(status);
+      paramIndex++;
+    }
+    if (reference_type && reference_type !== 'all') {
+      query += ` AND d.reference_type = $${paramIndex}`;
+      values.push(reference_type);
+      paramIndex++;
+    }
+    query += ` ORDER BY d.created_at DESC LIMIT $${paramIndex} OFFSET $${paramIndex + 1}`;
+    values.push(parseInt(limit), parseInt(offset));
+    const result = await pool.query(query, values);
+    res.json({ success: true, disputes: result.rows });
+  } catch (err) {
+    console.error('Admin disputes fetch error:', err);
+    res.status(500).json({ success: false, error: err.message });
+  }
+});
+
+// PUT /api/admin/disputes/:id – update status and admin notes
+app.put('/api/admin/disputes/:id', requireAdmin, async (req, res) => {
+  const client = await pool.connect();
+  try {
+    const { id } = req.params;
+    const { status, admin_notes } = req.body;
+    if (!status)
+      return res
+        .status(400)
+        .json({ success: false, error: 'Status is required' });
+    await client.query('BEGIN');
+    const updateFields = [];
+    const values = [];
+    let paramIndex = 1;
+    updateFields.push(`status = $${paramIndex}`);
+    values.push(status);
+    paramIndex++;
+    if (admin_notes !== undefined) {
+      updateFields.push(`admin_notes = $${paramIndex}`);
+      values.push(admin_notes);
+      paramIndex++;
+    }
+    if (status === 'resolved' || status === 'dismissed') {
+      updateFields.push(`resolved_at = NOW(), resolved_by = $${paramIndex}`);
+      values.push(req.adminUser.id);
+      paramIndex++;
+    }
+    const query = `UPDATE disputes SET ${updateFields.join(', ')} WHERE dispute_id = $${paramIndex} RETURNING *`;
+    values.push(id);
+    const result = await client.query(query, values);
+    if (result.rows.length === 0) {
+      await client.query('ROLLBACK');
+      return res
+        .status(404)
+        .json({ success: false, error: 'Dispute not found' });
+    }
+    await client.query(
+      'INSERT INTO admin_logs (admin_id, action, target_type, target_id, details) VALUES ($1, $2, $3, $4, $5)',
+      [
+        req.adminUser.id,
+        'UPDATE_DISPUTE',
+        'dispute',
+        id,
+        JSON.stringify({ status, admin_notes }),
+      ],
+    );
+    await client.query('COMMIT');
+    res.json({ success: true, dispute: result.rows[0] });
+  } catch (err) {
+    await client.query('ROLLBACK');
+    console.error('Admin dispute update error:', err);
+    res.status(500).json({ success: false, error: err.message });
+  } finally {
+    client.release();
+  }
+});
+
+// POST /api/admin/disputes – create a new dispute (admin initiated)
+app.post('/api/admin/disputes', requireAdmin, async (req, res) => {
+  try {
+    const { reference_type, reference_id, raised_by, raised_against, reason } =
+      req.body;
+    if (!reference_type || !reference_id || !reason)
+      return res
+        .status(400)
+        .json({ success: false, error: 'Missing required fields' });
+    const result = await pool.query(
+      `INSERT INTO disputes (reference_type, reference_id, raised_by, raised_against, reason, status) VALUES ($1, $2, $3, $4, $5, 'open') RETURNING *`,
+      [
+        reference_type,
+        reference_id,
+        raised_by || null,
+        raised_against || null,
+        reason,
+      ],
+    );
+    res.json({ success: true, dispute: result.rows[0] });
+  } catch (err) {
+    console.error('Create dispute error:', err);
+    res.status(500).json({ success: false, error: err.message });
+  }
+});
+
 // ==========================================
 // RATING & REVIEW SYSTEM
 // ==========================================
 
-// POST /api/reviews – submit a review
 app.post('/api/reviews', async (req, res) => {
   const client = await pool.connect();
   try {
@@ -2390,30 +2216,22 @@ app.post('/api/reviews', async (req, res) => {
       comment,
       is_landlord_review,
     } = req.body;
-
-    if (!reviewer_id || !reviewee_id || !rating || rating < 1 || rating > 5) {
+    if (!reviewer_id || !reviewee_id || !rating || rating < 1 || rating > 5)
       return res
         .status(400)
         .json({ success: false, error: 'Invalid review data' });
-    }
-
-    // Check if user already reviewed this tenancy (one review per tenancy per user)
     const existing = await client.query(
       'SELECT id FROM reviews WHERE reviewer_id = $1 AND tenancy_id = $2',
       [reviewer_id, tenancy_id],
     );
-    if (existing.rows.length > 0) {
+    if (existing.rows.length > 0)
       return res.status(400).json({
         success: false,
         error: 'You have already reviewed this tenancy',
       });
-    }
-
     await client.query('BEGIN');
-
     const result = await client.query(
-      `INSERT INTO reviews (reviewer_id, reviewee_id, tenancy_id, rating, comment, is_landlord_review)
-       VALUES ($1, $2, $3, $4, $5, $6) RETURNING *`,
+      `INSERT INTO reviews (reviewer_id, reviewee_id, tenancy_id, rating, comment, is_landlord_review) VALUES ($1, $2, $3, $4, $5, $6) RETURNING *`,
       [
         reviewer_id,
         reviewee_id,
@@ -2423,8 +2241,6 @@ app.post('/api/reviews', async (req, res) => {
         is_landlord_review || false,
       ],
     );
-
-    // Update average rating for reviewee
     const avgResult = await client.query(
       'SELECT AVG(rating)::DECIMAL(10,2) as avg FROM reviews WHERE reviewee_id = $1',
       [reviewee_id],
@@ -2434,36 +2250,27 @@ app.post('/api/reviews', async (req, res) => {
       avgRating,
       reviewee_id,
     ]);
-
-    // Optional: adjust trust score based on rating
-    // (e.g., +2 for 5-star, -1 for 1-star)
-    if (rating === 5) {
+    if (rating === 5)
       await client.query(
         'UPDATE users SET renter_score = renter_score + 2 WHERE user_id = $1',
         [reviewee_id],
       );
-    } else if (rating === 1) {
+    else if (rating === 1)
       await client.query(
         'UPDATE users SET renter_score = renter_score - 1 WHERE user_id = $1',
         [reviewee_id],
       );
-    }
-    // --- PUSH NOTIFICATION FOR NEW REVIEW ---
-    // Get reviewer's name
-    const reviewerNameQuery = await pool.query(
+    const reviewerNameQuery = await client.query(
       'SELECT name FROM users WHERE user_id = $1',
       [reviewer_id],
     );
     const reviewerName = reviewerNameQuery.rows[0]?.name || 'Someone';
-
-    // Send push to the reviewee
     await sendPushToUser(
       reviewee_id,
       '⭐ New Review Received',
       `${reviewerName} gave you a ${rating}-star review.`,
       { screen: 'Profile' },
     );
-    // --- END PUSH ---
     await client.query('COMMIT');
     res.json({ success: true, review: result.rows[0] });
   } catch (err) {
@@ -2475,20 +2282,17 @@ app.post('/api/reviews', async (req, res) => {
   }
 });
 
-// GET /api/users/:userId/reviews – get all reviews for a user
 app.get('/api/users/:userId/reviews', async (req, res) => {
   try {
     const { userId } = req.params;
     const result = await pool.query(
-      `SELECT r.*, 
-          u.name as reviewer_name, u.profile_picture_url as avatar_url,
-          p.title as property_title
-   FROM reviews r
-   JOIN users u ON r.reviewer_id = u.user_id
-   LEFT JOIN tenancies t ON r.tenancy_id = t.tenancy_id
-   LEFT JOIN properties p ON t.property_id = p.property_id
-   WHERE r.reviewee_id = $1
-   ORDER BY r.created_at DESC`,
+      `SELECT r.*, u.name as reviewer_name, u.profile_picture_url as avatar_url, p.title as property_title
+       FROM reviews r
+       JOIN users u ON r.reviewer_id = u.user_id
+       LEFT JOIN tenancies t ON r.tenancy_id = t.tenancy_id
+       LEFT JOIN properties p ON t.property_id = p.property_id
+       WHERE r.reviewee_id = $1
+       ORDER BY r.created_at DESC`,
       [userId],
     );
     res.json({ success: true, reviews: result.rows });
@@ -2498,7 +2302,6 @@ app.get('/api/users/:userId/reviews', async (req, res) => {
   }
 });
 
-// GET /api/tenancies/:tenancyId/review-status – check if current user can review
 app.get('/api/tenancies/:tenancyId/review-status', async (req, res) => {
   try {
     const { tenancyId } = req.params;
@@ -2512,56 +2315,44 @@ app.get('/api/tenancies/:tenancyId/review-status', async (req, res) => {
     } = await supabase.auth.getUser(token);
     if (error || !user)
       return res.status(401).json({ success: false, error: 'Invalid token' });
-
-    // Check if tenancy belongs to user (as renter or owner) and is paid/ended
     const tenancyResult = await pool.query(
-      `SELECT renter_id, owner_id, lease_end_date, payment_status 
-       FROM tenancies WHERE tenancy_id = $1`,
+      `SELECT renter_id, owner_id, lease_end_date, payment_status FROM tenancies WHERE tenancy_id = $1`,
       [tenancyId],
     );
-    if (tenancyResult.rows.length === 0) {
+    if (tenancyResult.rows.length === 0)
       return res.json({
         success: true,
         canReview: false,
         reason: 'Tenancy not found',
       });
-    }
     const tenancy = tenancyResult.rows[0];
     const isParticipant =
       tenancy.renter_id === user.id || tenancy.owner_id === user.id;
-    if (!isParticipant) {
+    if (!isParticipant)
       return res.json({
         success: true,
         canReview: false,
         reason: 'You are not a party to this tenancy',
       });
-    }
-
-    // Check if tenancy is completed (lease_end_date passed) or payment_status = 'Paid' and ended
     const now = new Date();
     const leaseEnd = new Date(tenancy.lease_end_date);
     const isCompleted = leaseEnd < now;
-    if (!isCompleted && tenancy.payment_status !== 'Paid') {
+    if (!isCompleted && tenancy.payment_status !== 'Paid')
       return res.json({
         success: true,
         canReview: false,
         reason: 'Tenancy not yet completed or paid',
       });
-    }
-
-    // Check if user already reviewed
     const existing = await pool.query(
       'SELECT id FROM reviews WHERE reviewer_id = $1 AND tenancy_id = $2',
       [user.id, tenancyId],
     );
-    if (existing.rows.length > 0) {
+    if (existing.rows.length > 0)
       return res.json({
         success: true,
         canReview: false,
         reason: 'You have already reviewed this tenancy',
       });
-    }
-
     res.json({
       success: true,
       canReview: true,
@@ -2576,15 +2367,11 @@ app.get('/api/tenancies/:tenancyId/review-status', async (req, res) => {
   }
 });
 
-// GET /api/notifications/:userId – get all notifications for a user
 app.get('/api/notifications/:userId', async (req, res) => {
   try {
     const { userId } = req.params;
     const result = await pool.query(
-      `SELECT id, title, body, data, read, created_at 
-       FROM notifications 
-       WHERE user_id = $1 
-       ORDER BY created_at DESC`,
+      `SELECT id, title, body, data, read, created_at FROM notifications WHERE user_id = $1 ORDER BY created_at DESC`,
       [userId],
     );
     res.json({ success: true, notifications: result.rows });
@@ -2596,7 +2383,6 @@ app.get('/api/notifications/:userId', async (req, res) => {
   }
 });
 
-// PUT /api/notifications/:id/read – mark a single notification as read
 app.put('/api/notifications/:id/read', async (req, res) => {
   try {
     const { id } = req.params;
@@ -2610,7 +2396,6 @@ app.put('/api/notifications/:id/read', async (req, res) => {
   }
 });
 
-// PUT /api/notifications/mark-all-read – mark all notifications for a user as read
 app.put('/api/notifications/mark-all-read', async (req, res) => {
   try {
     const authHeader = req.headers.authorization;
@@ -2623,7 +2408,6 @@ app.put('/api/notifications/mark-all-read', async (req, res) => {
     } = await supabase.auth.getUser(token);
     if (error || !user)
       return res.status(401).json({ success: false, error: 'Invalid token' });
-
     await pool.query(
       'UPDATE notifications SET read = TRUE WHERE user_id = $1',
       [user.id],
@@ -2636,23 +2420,18 @@ app.put('/api/notifications/mark-all-read', async (req, res) => {
 });
 
 // ==========================================
-// RECURRING RENT REMINDERS (Cron job endpoint)
+// RECURRING RENT REMINDERS
 // ==========================================
 
 app.post('/api/cron/check-rent-reminders', async (req, res) => {
-  // Optional: verify a secret key to prevent public access
   const secretKey = req.headers['x-cron-secret'];
-  if (secretKey !== process.env.CRON_SECRET) {
+  if (secretKey !== process.env.CRON_SECRET)
     return res.status(401).json({ success: false, error: 'Unauthorized' });
-  }
-
   try {
     const today = new Date();
     today.setHours(0, 0, 0, 0);
     const sevenDaysLater = new Date(today);
     sevenDaysLater.setDate(today.getDate() + 7);
-
-    // Find tenancies ending within the next 7 days, that are paid and not yet fully reminded
     const query = `
       SELECT t.tenancy_id, t.rent_amount, t.lease_end_date, t.last_rent_reminder_sent,
              u.user_id as tenant_id, u.email as tenant_email, u.name as tenant_name,
@@ -2666,58 +2445,40 @@ app.post('/api/cron/check-rent-reminders', async (req, res) => {
         AND (t.last_rent_reminder_sent IS NULL OR t.last_rent_reminder_sent < $1)
     `;
     const { rows } = await pool.query(query, [today, sevenDaysLater]);
-
     let remindersSent = 0;
     for (const tenancy of rows) {
       const endDate = new Date(tenancy.lease_end_date);
       const daysUntilDue = Math.ceil(
         (endDate.getTime() - today.getTime()) / (1000 * 3600 * 24),
       );
-
       let reminderDays = null;
       if (daysUntilDue === 7) reminderDays = 7;
       else if (daysUntilDue === 3) reminderDays = 3;
       else if (daysUntilDue === 1) reminderDays = 1;
-
-      if (reminderDays === null) continue; // only send at exact 7, 3, 1 days before
-
+      if (!reminderDays) continue;
       const title = `Rent Due in ${reminderDays} Day${reminderDays > 1 ? 's' : ''}`;
       const body = `Your rent of ₦${tenancy.rent_amount.toLocaleString()} for ${tenancy.property_title} is due on ${endDate.toLocaleDateString()}. Please pay via Propadi to avoid late fees.`;
-
-      // Send push notification
       await sendPushToUser(tenancy.tenant_id, title, body, {
         screen: 'TenantWallet',
       });
-
-      // Send email (optional – using Resend)
       try {
         await resend.emails.send({
           from: 'Propadi <onboarding@resend.dev>',
           to: tenancy.tenant_email,
           subject: title,
-          html: `<p>Hello ${tenancy.tenant_name},</p>
-                 <p>${body}</p>
-                 <p>You can make payment securely through the Propadi app.</p>`,
+          html: `<p>Hello ${tenancy.tenant_name},</p><p>${body}</p><p>You can make payment securely through the Propadi app.</p>`,
         });
-      } catch (emailErr) {
-        console.error('Email failed for', tenancy.tenant_email, emailErr);
-      }
-
-      // Update last reminder sent date
+      } catch (e) {}
       await pool.query(
         'UPDATE tenancies SET last_rent_reminder_sent = $1 WHERE tenancy_id = $2',
         [today, tenancy.tenancy_id],
       );
-
-      // Optional: log to audit table
       await pool.query(
         'INSERT INTO rent_reminder_logs (tenancy_id, days_before) VALUES ($1, $2)',
         [tenancy.tenancy_id, reminderDays],
       );
-
       remindersSent++;
     }
-
     res.json({ success: true, remindersSent });
   } catch (err) {
     console.error('Cron job error:', err);
@@ -2726,86 +2487,56 @@ app.post('/api/cron/check-rent-reminders', async (req, res) => {
 });
 
 // ==========================================
-// VIEWING REMINDERS (Cron job endpoint – run hourly)
+// VIEWING REMINDERS
 // ==========================================
 
 app.post('/api/cron/check-viewing-reminders', async (req, res) => {
   const secretKey = req.headers['x-cron-secret'];
-  if (secretKey !== process.env.CRON_SECRET) {
+  if (secretKey !== process.env.CRON_SECRET)
     return res.status(401).json({ success: false, error: 'Unauthorized' });
-  }
-
   try {
     const now = new Date();
-    const oneHourLater = new Date(now.getTime() + 60 * 60 * 1000);
-    const threeHoursLater = new Date(now.getTime() + 3 * 60 * 60 * 1000);
-    const twentyFourHoursLater = new Date(now.getTime() + 24 * 60 * 60 * 1000);
-
-    // Find accepted viewings with scheduled start time in the future
     const query = `
       SELECT v.viewing_id, v.scheduled_start_time, v.reminder_24h_sent, v.reminder_3h_sent, v.reminder_1h_sent,
-             v.renter_id, v.owner_id, v.property_id,
-             p.title as property_title
-      FROM viewings v
-      JOIN properties p ON v.property_id = p.property_id
-      WHERE v.status = 'Accepted'
-        AND v.scheduled_start_time > NOW()
+             v.renter_id, v.owner_id, v.property_id, p.title as property_title
+      FROM viewings v JOIN properties p ON v.property_id = p.property_id WHERE v.status = 'Accepted' AND v.scheduled_start_time > NOW()
     `;
     const { rows } = await pool.query(query);
-
     let remindersSent = 0;
-
     for (const viewing of rows) {
       const startTime = new Date(viewing.scheduled_start_time);
-      const diffMs = startTime.getTime() - now.getTime();
-      const diffHours = diffMs / (1000 * 3600);
-
-      // Determine which reminders to send (only send each once)
+      const diffHours = (startTime.getTime() - now.getTime()) / (1000 * 3600);
       let reminderType = null;
-      if (diffHours <= 24 && diffHours > 23 && !viewing.reminder_24h_sent) {
+      if (diffHours <= 24 && diffHours > 23 && !viewing.reminder_24h_sent)
         reminderType = '24h';
-      } else if (diffHours <= 3 && diffHours > 2 && !viewing.reminder_3h_sent) {
+      else if (diffHours <= 3 && diffHours > 2 && !viewing.reminder_3h_sent)
         reminderType = '3h';
-      } else if (
-        diffHours <= 1 &&
-        diffHours > 0.5 &&
-        !viewing.reminder_1h_sent
-      ) {
+      else if (diffHours <= 1 && diffHours > 0.5 && !viewing.reminder_1h_sent)
         reminderType = '1h';
-      }
-
       if (!reminderType) continue;
-
       const timeString = startTime.toLocaleString();
       const title = `Viewing Reminder (${reminderType})`;
       const body = `Your property viewing for "${viewing.property_title}" is scheduled at ${timeString}. Please be prepared.`;
-
-      // Send push to renter
       await sendPushToUser(viewing.renter_id, title, body, {
         screen: 'Chat',
         property_id: viewing.property_id,
         other_user_id: viewing.owner_id,
       });
-      // Send push to owner
       await sendPushToUser(viewing.owner_id, title, body, {
         screen: 'Chat',
         property_id: viewing.property_id,
         other_user_id: viewing.renter_id,
       });
-
-      // Update the appropriate reminder flag
       let updateColumn = '';
       if (reminderType === '24h') updateColumn = 'reminder_24h_sent = TRUE';
       else if (reminderType === '3h') updateColumn = 'reminder_3h_sent = TRUE';
       else if (reminderType === '1h') updateColumn = 'reminder_1h_sent = TRUE';
-
       await pool.query(
         `UPDATE viewings SET ${updateColumn} WHERE viewing_id = $1`,
         [viewing.viewing_id],
       );
       remindersSent++;
     }
-
     res.json({ success: true, remindersSent });
   } catch (err) {
     console.error('Viewing reminder cron error:', err);
@@ -2813,7 +2544,6 @@ app.post('/api/cron/check-viewing-reminders', async (req, res) => {
   }
 });
 
-// POST /api/properties/:id/view – record a view
 app.post('/api/properties/:id/view', async (req, res) => {
   try {
     const { id } = req.params;
@@ -2829,7 +2559,6 @@ app.post('/api/properties/:id/view', async (req, res) => {
   }
 });
 
-// GET /api/owner/analytics – get aggregated stats for the authenticated owner
 app.get('/api/owner/analytics', async (req, res) => {
   try {
     const authHeader = req.headers.authorization;
@@ -2842,17 +2571,13 @@ app.get('/api/owner/analytics', async (req, res) => {
     } = await supabase.auth.getUser(token);
     if (error || !user)
       return res.status(401).json({ success: false, error: 'Invalid token' });
-
     const ownerId = user.id;
-
-    // Get all properties for this owner
     const propertiesResult = await pool.query(
       'SELECT property_id, title, rent_price, date_listed, status FROM properties WHERE owner_id = $1',
       [ownerId],
     );
     const properties = propertiesResult.rows;
-
-    if (properties.length === 0) {
+    if (properties.length === 0)
       return res.json({
         success: true,
         analytics: {
@@ -2863,43 +2588,27 @@ app.get('/api/owner/analytics', async (req, res) => {
           properties: [],
         },
       });
-    }
-
     const propertyIds = properties.map((p) => p.property_id);
-
-    // Count total views for owner's properties
     const viewsResult = await pool.query(
       'SELECT COUNT(*) as total FROM property_views WHERE property_id = ANY($1::uuid[])',
       [propertyIds],
     );
     const totalViews = parseInt(viewsResult.rows[0].total);
-
-    // Count total applications for owner's properties
     const appsResult = await pool.query(
       'SELECT COUNT(*) as total FROM applications WHERE property_id = ANY($1::uuid[])',
       [propertyIds],
     );
     const totalApplications = parseInt(appsResult.rows[0].total);
-
-    // Count active tenancies (payment_status = 'Paid' and lease_end_date > NOW())
     const activeTenanciesResult = await pool.query(
-      `SELECT COUNT(*) as total FROM tenancies 
-       WHERE property_id = ANY($1::uuid[]) 
-       AND payment_status = 'Paid' 
-       AND lease_end_date > NOW()`,
+      `SELECT COUNT(*) as total FROM tenancies WHERE property_id = ANY($1::uuid[]) AND payment_status = 'Paid' AND lease_end_date > NOW()`,
       [propertyIds],
     );
     const activeTenancies = parseInt(activeTenanciesResult.rows[0].total);
-
-    // Calculate average days to rent (from date_listed to first approved application)
-    // For simplicity, we compute per property and average
-    let totalDays = 0;
-    let countWithTenancy = 0;
+    let totalDays = 0,
+      countWithTenancy = 0;
     for (const prop of properties) {
       const tenancyResult = await pool.query(
-        `SELECT MIN(t.lease_start_date) as first_tenancy
-         FROM tenancies t
-         WHERE t.property_id = $1 AND t.payment_status = 'Paid'`,
+        `SELECT MIN(t.lease_start_date) as first_tenancy FROM tenancies t WHERE t.property_id = $1 AND t.payment_status = 'Paid'`,
         [prop.property_id],
       );
       if (tenancyResult.rows[0].first_tenancy) {
@@ -2914,8 +2623,6 @@ app.get('/api/owner/analytics', async (req, res) => {
     }
     const avgDaysToRent =
       countWithTenancy > 0 ? Math.round(totalDays / countWithTenancy) : 0;
-
-    // Prepare per‑property stats
     const propertyStats = [];
     for (const prop of properties) {
       const viewsCount = await pool.query(
@@ -2937,7 +2644,6 @@ app.get('/api/owner/analytics', async (req, res) => {
         tenancies: parseInt(tenancyCount.rows[0].count),
       });
     }
-
     res.json({
       success: true,
       analytics: {
@@ -2954,12 +2660,8 @@ app.get('/api/owner/analytics', async (req, res) => {
   }
 });
 
-// POST /api/users/onboarding – save profile data after registration
 app.post('/api/users/onboarding', async (req, res) => {
   console.log('📥 Onboarding endpoint hit');
-  console.log('📥 Headers:', req.headers);
-  console.log('📥 Body:', req.body);
-  // ... rest of the endpoint
   try {
     const authHeader = req.headers.authorization;
     if (!authHeader)
@@ -2971,7 +2673,6 @@ app.post('/api/users/onboarding', async (req, res) => {
     } = await supabase.auth.getUser(token);
     if (error || !user)
       return res.status(401).json({ success: false, error: 'Invalid token' });
-
     const {
       phone_number,
       residential_address,
@@ -2989,25 +2690,20 @@ app.post('/api/users/onboarding', async (req, res) => {
       lga,
       marital_status,
     } = req.body;
-
-    // Check if phone number is already used by another user
     if (phone_number) {
       const existing = await pool.query(
         'SELECT user_id FROM users WHERE phone_number = $1 AND user_id != $2',
         [phone_number, user.id],
       );
-      if (existing.rows.length > 0) {
+      if (existing.rows.length > 0)
         return res.status(400).json({
           success: false,
           error: 'Phone number already registered by another user.',
         });
-      }
     }
-
     const updateFields = [];
     const values = [];
     let paramIndex = 1;
-
     if (phone_number) {
       updateFields.push(`phone_number = $${paramIndex}`);
       values.push(phone_number);
@@ -3083,33 +2779,26 @@ app.post('/api/users/onboarding', async (req, res) => {
       values.push(marital_status);
       paramIndex++;
     }
-
-    if (updateFields.length === 0) {
+    if (updateFields.length === 0)
       return res
         .status(400)
         .json({ success: false, error: 'No fields to update' });
-    }
-
-    // Set KYC tier to at least 1 (basic profile completed)
     updateFields.push(`kyc_tier = GREATEST(kyc_tier, 1)`);
     const query = `UPDATE users SET ${updateFields.join(', ')} WHERE user_id = $${paramIndex} RETURNING user_id, name, email, role, kyc_tier`;
     values.push(user.id);
-
     const result = await pool.query(query, values);
     res.json({ success: true, user: result.rows[0] });
   } catch (err) {
     console.error('Onboarding error:', err);
-    if (err.code === '23505' && err.constraint === 'users_phone_number_key') {
+    if (err.code === '23505' && err.constraint === 'users_phone_number_key')
       return res.status(400).json({
         success: false,
         error: 'Phone number already in use by another account.',
       });
-    }
     res.status(500).json({ success: false, error: err.message });
   }
 });
 
-// POST /api/users/upload-kyc – upload KYC document (image) to Supabase Storage
 app.post('/api/users/upload-kyc', async (req, res) => {
   try {
     const authHeader = req.headers.authorization;
@@ -3122,29 +2811,24 @@ app.post('/api/users/upload-kyc', async (req, res) => {
     } = await supabase.auth.getUser(token);
     if (error || !user)
       return res.status(401).json({ success: false, error: 'Invalid token' });
-
     const { base64, fileType } = req.body;
     if (!base64)
       return res
         .status(400)
         .json({ success: false, error: 'No image provided' });
-
     const fileName = `${user.id}/${Date.now()}_kyc.${fileType || 'jpg'}`;
     const buffer = Buffer.from(base64, 'base64');
     const { error: uploadError } = await supabase.storage
       .from('kyc-documents')
       .upload(fileName, buffer, { contentType: `image/${fileType || 'jpeg'}` });
     if (uploadError) throw uploadError;
-
     const {
       data: { publicUrl },
     } = supabase.storage.from('kyc-documents').getPublicUrl(fileName);
-
     await pool.query(
       'UPDATE users SET kyc_document_url = $1, kyc_document_status = $2 WHERE user_id = $3',
       [publicUrl, 'pending', user.id],
     );
-
     res.json({ success: true, url: publicUrl });
   } catch (err) {
     console.error('KYC upload error:', err);
@@ -3152,7 +2836,6 @@ app.post('/api/users/upload-kyc', async (req, res) => {
   }
 });
 
-// POST /api/users/send-otp – send OTP to phone number
 app.post('/api/users/send-otp', async (req, res) => {
   const { phone_number } = req.body;
   if (!phone_number)
@@ -3160,32 +2843,25 @@ app.post('/api/users/send-otp', async (req, res) => {
       .status(400)
       .json({ success: false, error: 'Phone number required' });
   const otp = Math.floor(100000 + Math.random() * 900000).toString();
-  // Store OTP in memory or Redis (in production, use database with expiry)
-  // For now, we'll store in a simple map (not persistent across server restarts)
   if (!global.otpStore) global.otpStore = {};
   global.otpStore[phone_number] = { otp, expiry: Date.now() + 10 * 60 * 1000 };
-  // TODO: Send SMS using Africa's Talking / Twilio
   console.log(`[SIMULATED OTP] for ${phone_number}: ${otp}`);
   res.json({ success: true, message: 'OTP sent (simulated)' });
 });
 
-// POST /api/users/verify-otp
 app.post('/api/users/verify-otp', async (req, res) => {
   const { phone_number, otp } = req.body;
-  if (!global.otpStore || !global.otpStore[phone_number]) {
+  if (!global.otpStore || !global.otpStore[phone_number])
     return res
       .status(400)
       .json({ success: false, error: 'No OTP request found' });
-  }
   const record = global.otpStore[phone_number];
   if (Date.now() > record.expiry) {
     delete global.otpStore[phone_number];
     return res.status(400).json({ success: false, error: 'OTP expired' });
   }
-  if (record.otp !== otp) {
+  if (record.otp !== otp)
     return res.status(400).json({ success: false, error: 'Invalid OTP' });
-  }
-  // Update user
   const authHeader = req.headers.authorization;
   if (!authHeader)
     return res.status(401).json({ success: false, error: 'Unauthorized' });
@@ -3196,7 +2872,6 @@ app.post('/api/users/verify-otp', async (req, res) => {
   } = await supabase.auth.getUser(token);
   if (error || !user)
     return res.status(401).json({ success: false, error: 'Invalid token' });
-
   await pool.query(
     'UPDATE users SET phone_verified = TRUE, kyc_tier = GREATEST(kyc_tier, 2) WHERE user_id = $1',
     [user.id],
@@ -3205,7 +2880,6 @@ app.post('/api/users/verify-otp', async (req, res) => {
   res.json({ success: true, message: 'Phone verified' });
 });
 
-// GET /api/users/verification-status
 app.get('/api/users/verification-status', async (req, res) => {
   try {
     const authHeader = req.headers.authorization;
@@ -3218,11 +2892,8 @@ app.get('/api/users/verification-status', async (req, res) => {
     } = await supabase.auth.getUser(token);
     if (error || !user)
       return res.status(401).json({ success: false, error: 'Invalid token' });
-
     const result = await pool.query(
-      `SELECT kyc_tier, phone_verified, nin_verified, address_verified, kyc_document_status,
-              email, phone_number, name, residential_address, date_of_birth
-       FROM users WHERE user_id = $1`,
+      `SELECT kyc_tier, phone_verified, nin_verified, address_verified, kyc_document_status, email, phone_number, name, residential_address, date_of_birth FROM users WHERE user_id = $1`,
       [user.id],
     );
     res.json({ success: true, verification: result.rows[0] });
@@ -3231,14 +2902,10 @@ app.get('/api/users/verification-status', async (req, res) => {
   }
 });
 
-// GET /api/admin/kyc/pending – list users with pending KYC documents
 app.get('/api/admin/kyc/pending', requireAdmin, async (req, res) => {
   try {
     const result = await pool.query(
-      `SELECT user_id, name, email, kyc_document_url, kyc_document_status, date_joined as created_at
-       FROM users
-       WHERE kyc_document_status = 'pending'
-       ORDER BY date_joined ASC`,
+      `SELECT user_id, name, email, kyc_document_url, kyc_document_status, date_joined as created_at FROM users WHERE kyc_document_status = 'pending' ORDER BY date_joined ASC`,
     );
     res.json({ success: true, users: result.rows });
   } catch (err) {
@@ -3247,21 +2914,13 @@ app.get('/api/admin/kyc/pending', requireAdmin, async (req, res) => {
   }
 });
 
-// PUT /api/admin/kyc/:userId/approve
 app.put('/api/admin/kyc/:userId/approve', requireAdmin, async (req, res) => {
   try {
     const { userId } = req.params;
-    // Update user: address_verified = TRUE, kyc_document_status = 'approved', increase kyc_tier
     await pool.query(
-      `UPDATE users
-   SET address_verified = TRUE,
-       kyc_document_status = 'approved',
-       kyc_tier = GREATEST(kyc_tier, 4),
-       kyc_updated_at = NOW()
-   WHERE user_id = $1`,
+      `UPDATE users SET address_verified = TRUE, kyc_document_status = 'approved', kyc_tier = GREATEST(kyc_tier, 4), kyc_updated_at = NOW() WHERE user_id = $1`,
       [userId],
     );
-    // Log admin action
     await pool.query(
       'INSERT INTO admin_logs (admin_id, action, target_type, target_id, details) VALUES ($1, $2, $3, $4, $5)',
       [
@@ -3272,14 +2931,12 @@ app.put('/api/admin/kyc/:userId/approve', requireAdmin, async (req, res) => {
         JSON.stringify({ kyc: 'approved' }),
       ],
     );
-    // Send push notification (if function exists)
-    if (typeof sendPushToUser === 'function') {
+    if (typeof sendPushToUser === 'function')
       await sendPushToUser(
         userId,
         'KYC Approved',
         'Your address verification has been approved. You now have full access to list properties.',
       );
-    }
     res.json({ success: true, message: 'KYC approved' });
   } catch (err) {
     console.error('KYC approve error:', err);
@@ -3287,17 +2944,12 @@ app.put('/api/admin/kyc/:userId/approve', requireAdmin, async (req, res) => {
   }
 });
 
-// PUT /api/admin/kyc/:userId/reject
 app.put('/api/admin/kyc/:userId/reject', requireAdmin, async (req, res) => {
   try {
     const { userId } = req.params;
     const { reason } = req.body;
     await pool.query(
-      `UPDATE users
-   SET kyc_document_status = 'rejected',
-       kyc_document_url = NULL,
-       kyc_updated_at = NOW()
-   WHERE user_id = $1`,
+      `UPDATE users SET kyc_document_status = 'rejected', kyc_document_url = NULL, kyc_updated_at = NOW() WHERE user_id = $1`,
       [userId],
     );
     await pool.query(
@@ -3313,9 +2965,8 @@ app.put('/api/admin/kyc/:userId/reject', requireAdmin, async (req, res) => {
     const notificationBody = reason
       ? `Your document was rejected: ${reason}`
       : 'Your document was rejected. Please resubmit.';
-    if (typeof sendPushToUser === 'function') {
+    if (typeof sendPushToUser === 'function')
       await sendPushToUser(userId, 'KYC Update', notificationBody);
-    }
     res.json({ success: true, message: 'KYC rejected' });
   } catch (err) {
     console.error('KYC reject error:', err);
@@ -3323,7 +2974,6 @@ app.put('/api/admin/kyc/:userId/reject', requireAdmin, async (req, res) => {
   }
 });
 
-// GET /api/users/kyc-status
 app.get('/api/users/kyc-status', async (req, res) => {
   try {
     const authHeader = req.headers.authorization;
@@ -3336,7 +2986,6 @@ app.get('/api/users/kyc-status', async (req, res) => {
     } = await supabase.auth.getUser(token);
     if (error || !user)
       return res.status(401).json({ success: false, error: 'Invalid token' });
-
     const result = await pool.query(
       'SELECT kyc_document_url, kyc_document_status FROM users WHERE user_id = $1',
       [user.id],
@@ -3354,12 +3003,10 @@ app.get('/api/users/kyc-status', async (req, res) => {
   }
 });
 
-// GET /api/admin/kyc/pending-count
 app.get('/api/admin/kyc/pending-count', requireAdmin, async (req, res) => {
   try {
     const result = await pool.query(
-      'SELECT COUNT(*) as count FROM users WHERE kyc_document_status = $1',
-      ['pending'],
+      "SELECT COUNT(*) as count FROM users WHERE kyc_document_status = 'pending'",
     );
     res.json({ success: true, count: parseInt(result.rows[0].count) });
   } catch (err) {
@@ -3368,24 +3015,15 @@ app.get('/api/admin/kyc/pending-count', requireAdmin, async (req, res) => {
   }
 });
 
-// POST /api/admin/kyc/batch-approve
 app.post('/api/admin/kyc/batch-approve', requireAdmin, async (req, res) => {
   try {
     const { userIds } = req.body;
-    if (!userIds || !userIds.length) {
+    if (!userIds || !userIds.length)
       return res
         .status(400)
         .json({ success: false, error: 'No user IDs provided' });
-    }
     const placeholders = userIds.map((_, i) => `$${i + 1}`).join(',');
-    const query = `
-      UPDATE users
-      SET address_verified = TRUE,
-          kyc_document_status = 'approved',
-          kyc_tier = GREATEST(kyc_tier, 4)
-      WHERE user_id IN (${placeholders})
-      RETURNING user_id
-    `;
+    const query = `UPDATE users SET address_verified = TRUE, kyc_document_status = 'approved', kyc_tier = GREATEST(kyc_tier, 4) WHERE user_id IN (${placeholders}) RETURNING user_id`;
     const result = await pool.query(query, userIds);
     for (const row of result.rows) {
       await pool.query(
@@ -3398,13 +3036,12 @@ app.post('/api/admin/kyc/batch-approve', requireAdmin, async (req, res) => {
           JSON.stringify({ batch: true }),
         ],
       );
-      if (typeof sendPushToUser === 'function') {
+      if (typeof sendPushToUser === 'function')
         await sendPushToUser(
           row.user_id,
           'KYC Approved',
           'Your address verification has been approved.',
         );
-      }
     }
     res.json({ success: true, approvedCount: result.rowCount });
   } catch (err) {
@@ -3413,18 +3050,14 @@ app.post('/api/admin/kyc/batch-approve', requireAdmin, async (req, res) => {
   }
 });
 
-// GET /api/admin/kyc/stats – KYC dashboard statistics
 app.get('/api/admin/kyc/stats', requireAdmin, async (req, res) => {
   try {
-    // Total pending
     const pendingResult = await pool.query(
       "SELECT COUNT(*) FROM users WHERE kyc_document_status = 'pending'",
     );
-    // Total approved (address_verified = TRUE)
     const approvedResult = await pool.query(
       'SELECT COUNT(*) FROM users WHERE address_verified = TRUE',
     );
-    // Total rejected (kyc_document_status = 'rejected')
     const rejectedResult = await pool.query(
       "SELECT COUNT(*) FROM users WHERE kyc_document_status = 'rejected'",
     );
@@ -3435,15 +3068,9 @@ app.get('/api/admin/kyc/stats', requireAdmin, async (req, res) => {
       totalApproved + totalPending > 0
         ? ((totalApproved / (totalApproved + totalPending)) * 100).toFixed(1)
         : '0';
-
     res.json({
       success: true,
-      stats: {
-        totalPending,
-        totalApproved,
-        totalRejected,
-        approvalRate,
-      },
+      stats: { totalPending, totalApproved, totalRejected, approvalRate },
     });
   } catch (err) {
     console.error('KYC stats error:', err);
@@ -3451,15 +3078,10 @@ app.get('/api/admin/kyc/stats', requireAdmin, async (req, res) => {
   }
 });
 
-// GET /api/admin/kyc/all – all KYC submissions (for admin filtering)
 app.get('/api/admin/kyc/all', requireAdmin, async (req, res) => {
   try {
     const result = await pool.query(
-      `SELECT user_id, name, email, kyc_document_url, kyc_document_status, 
-              date_joined as created_at, kyc_updated_at
-       FROM users
-       WHERE kyc_document_status IS NOT NULL
-       ORDER BY date_joined DESC`,
+      `SELECT user_id, name, email, kyc_document_url, kyc_document_status, date_joined as created_at, kyc_updated_at FROM users WHERE kyc_document_status IS NOT NULL ORDER BY date_joined DESC`,
     );
     res.json({ success: true, users: result.rows });
   } catch (err) {
@@ -3467,171 +3089,7 @@ app.get('/api/admin/kyc/all', requireAdmin, async (req, res) => {
     res.status(500).json({ success: false, error: err.message });
   }
 });
-// GET /api/admin/properties – list all properties (admin)
-app.get('/api/admin/properties', requireAdmin, async (req, res) => {
-  try {
-    const { status } = req.query;
-    let query = `
-      SELECT p.*, u.name as owner_name, u.email as owner_email,
-             (SELECT COUNT(*) FROM applications WHERE property_id = p.property_id) as application_count
-      FROM properties p
-      JOIN users u ON p.owner_id = u.user_id
-    `;
-    const params = [];
-    if (status && status !== 'all') {
-      query += ' WHERE p.status = $1';
-      params.push(status);
-    }
-    query += ' ORDER BY p.date_listed DESC';
-    const result = await pool.query(query, params);
-    res.json({ success: true, properties: result.rows });
-  } catch (err) {
-    console.error('Admin properties error:', err);
-    res.status(500).json({ success: false, error: err.message });
-  }
-});
 
-// PUT /api/admin/properties/:id/status – update property status OR featured flag (with audit log)
-app.put('/api/admin/properties/:id/status', requireAdmin, async (req, res) => {
-  try {
-    const { id } = req.params;
-    const { status, is_featured, admin_note } = req.body;
-
-    let updates = [];
-    const values = [];
-
-    if (status !== undefined) {
-      updates.push(`status = $${values.length + 1}`);
-      values.push(status);
-    }
-    if (is_featured !== undefined) {
-      updates.push(`is_featured = $${values.length + 1}`);
-      values.push(is_featured);
-    }
-
-    if (updates.length === 0) {
-      return res
-        .status(400)
-        .json({ success: false, error: 'No fields to update' });
-    }
-
-    const query = `UPDATE properties SET ${updates.join(', ')} WHERE property_id = $${values.length + 1} RETURNING *`;
-    values.push(id);
-
-    const result = await pool.query(query, values);
-    if (result.rows.length === 0) {
-      return res
-        .status(404)
-        .json({ success: false, error: 'Property not found' });
-    }
-
-    const property = result.rows[0];
-
-    // Log admin action (only for status changes, but log anyway for featured toggles if desired)
-    // Here we log for any update, but you can condition on status !== undefined if preferred.
-    await pool.query(
-      `INSERT INTO admin_logs (admin_id, action, target_type, target_id, details)
-       VALUES ($1, $2, $3, $4, $5)`,
-      [
-        req.adminUser.id,
-        'UPDATE_PROPERTY',
-        'property',
-        id,
-        JSON.stringify({ status, is_featured, admin_note }),
-      ],
-    );
-
-    // Send push notification only for status changes (approve/reject)
-    if (status !== undefined) {
-      try {
-        let title = '',
-          body = '';
-        if (status === 'Available') {
-          title = 'Property Approved';
-          body = `Your property "${property.title}" has been approved and is now live.`;
-        } else if (status === 'Rejected') {
-          title = 'Property Rejected';
-          body = `Your property "${property.title}" was not approved. Please check the listing details.`;
-        }
-        if (title) {
-          await sendPushToUser(property.owner_id, title, body, {
-            screen: 'MyProperties',
-          });
-        }
-      } catch (pushErr) {
-        console.error('Push notification failed', pushErr);
-      }
-    }
-
-    res.json({ success: true, property });
-  } catch (err) {
-    console.error('Update property error:', err);
-    res.status(500).json({ success: false, error: err.message });
-  }
-});
-
-// POST /api/admin/broadcast – send push notification to all users (or filtered by role)
-app.post('/api/admin/broadcast', requireAdmin, async (req, res) => {
-  try {
-    const { title, body, role } = req.body; // role: 'all', 'owner', 'renter'
-
-    if (!title || !body) {
-      return res
-        .status(400)
-        .json({ success: false, error: 'Title and body are required' });
-    }
-
-    let userQuery = 'SELECT user_id FROM users';
-    const params = [];
-    if (role && role !== 'all') {
-      userQuery += ' WHERE role = $1';
-      params.push(role);
-    }
-
-    const { rows: users } = await pool.query(userQuery, params);
-
-    let successCount = 0;
-    let failCount = 0;
-
-    for (const user of users) {
-      try {
-        await sendPushToUser(user.user_id, title, body, {
-          screen: 'AdminBroadcast',
-        });
-        successCount++;
-      } catch (err) {
-        console.error(`Failed to send to ${user.user_id}:`, err);
-        failCount++;
-      }
-    }
-
-    // Log the broadcast action
-    await pool.query(
-      `INSERT INTO admin_logs (admin_id, action, target_type, details) 
-       VALUES ($1, $2, $3, $4)`,
-      [
-        req.adminUser.id,
-        'BROADCAST',
-        'system',
-        JSON.stringify({ title, body, role, successCount, failCount }),
-      ],
-    );
-
-    res.json({
-      success: true,
-      message: `Broadcast sent to ${successCount} users. Failed: ${failCount}`,
-      successCount,
-      failCount,
-    });
-  } catch (err) {
-    console.error('Broadcast error:', err);
-    res.status(500).json({ success: false, error: err.message });
-  }
-});
-
-// ==========================================
-// SERVER SETUP
-// ==========================================
 const PORT = process.env.PORT || 5000;
 app.listen(PORT, () => {
   console.log(`Server running on port ${PORT}`);
