@@ -3243,6 +3243,38 @@ app.get('/api/tenancies/user/:userId', async (req, res) => {
   }
 });
 
+// POST /api/feedback – submit user feedback
+app.post('/api/feedback', async (req, res) => {
+  try {
+    const { user_id, email, message } = req.body;
+    if (!message) {
+      return res
+        .status(400)
+        .json({ success: false, error: 'Message is required' });
+    }
+    // Store in a new table `feedback` (create if not exists)
+    // For simplicity, we'll store in a new table. Run this SQL once:
+    // CREATE TABLE IF NOT EXISTS feedback (
+    //   id SERIAL PRIMARY KEY,
+    //   user_id UUID REFERENCES users(user_id) ON DELETE SET NULL,
+    //   email TEXT,
+    //   message TEXT NOT NULL,
+    //   created_at TIMESTAMPTZ DEFAULT NOW()
+    // );
+    await pool.query(
+      `INSERT INTO feedback (user_id, email, message) VALUES ($1, $2, $3)`,
+      [user_id || null, email || null, message],
+    );
+    // Optional: send email to admin or log
+    res.json({ success: true, message: 'Thank you for your feedback!' });
+  } catch (err) {
+    console.error('Feedback error:', err);
+    res
+      .status(500)
+      .json({ success: false, error: 'Failed to submit feedback' });
+  }
+});
+
 // ==========================================
 // START SERVER
 // ==========================================
