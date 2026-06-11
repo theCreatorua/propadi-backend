@@ -2275,6 +2275,56 @@ app.post('/api/admin/disputes', requireAdmin, async (req, res) => {
   }
 });
 
+// GET /api/admin/feedback – list all feedback submissions (admin only)
+app.get('/api/admin/feedback', requireAdmin, async (req, res) => {
+  try {
+    const { status, limit = 50, offset = 0 } = req.query;
+    let query = `
+      SELECT f.id, f.user_id, u.name as user_name, u.email as user_email,
+             f.subject, f.message, f.created_at, f.reviewed
+      FROM feedback f
+      LEFT JOIN users u ON f.user_id = u.user_id
+      WHERE 1=1
+    `;
+    const values = [];
+    let paramIndex = 1;
+    if (status === 'reviewed') {
+      query += ` AND f.reviewed = TRUE`;
+    } else if (status === 'unreviewed') {
+      query += ` AND (f.reviewed IS NULL OR f.reviewed = FALSE)`;
+    }
+    query += ` ORDER BY f.created_at DESC LIMIT $${paramIndex} OFFSET $${paramIndex + 1}`;
+    values.push(parseInt(limit), parseInt(offset));
+    const result = await pool.query(query, values);
+    const countResult = await pool.query(
+      `SELECT COUNT(*) as total FROM feedback`,
+    );
+    res.json({
+      success: true,
+      feedback: result.rows,
+      total: parseInt(countResult.rows[0].total),
+    });
+  } catch (err) {
+    console.error('Admin feedback error:', err);
+    res.status(500).json({ success: false, error: err.message });
+  }
+});
+
+// PUT /api/admin/feedback/:id/review – mark as reviewed (admin only)
+app.put('/api/admin/feedback/:id/review', requireAdmin, async (req, res) => {
+  try {
+    const { id } = req.params;
+    await pool.query(
+      `UPDATE feedback SET reviewed = TRUE, reviewed_at = NOW(), reviewed_by = $1 WHERE id = $2`,
+      [req.adminUser.id, id],
+    );
+    res.json({ success: true, message: 'Feedback marked as reviewed' });
+  } catch (err) {
+    console.error('Mark reviewed error:', err);
+    res.status(500).json({ success: false, error: err.message });
+  }
+});
+
 // ==========================================
 // RATING & REVIEW SYSTEM
 // ==========================================
@@ -3271,6 +3321,23 @@ app.post('/api/feedback', async (req, res) => {
       .json({ success: false, error: 'Failed to submit feedback' });
   }
 });
+
+// Send email to admin(s)
+try {
+  const adminEmails = await pool.query(
+    'SELECT email FROM users WHERE is_admin = TRUE',
+  );
+  for (const admin of adminEmails.rows) {
+    await resend.emails.send({
+      from: 'Propadi <onboarding@resend.dev>',
+      to: admin.email,
+      subject: `New Feedback: ${subject}`,
+      html: `<p><strong>From:</strong> ${email || 'Anonymous'}</p><p><strong>Subject:</strong> ${subject}</p><p><strong>Message:</strong> ${message}</p>`,
+    });
+  }
+} catch (emailErr) {
+  console.error('Admin email failed', emailErr);
+}
 
 // ==========================================
 // START SERVER
