@@ -3181,6 +3181,68 @@ app.get('/api/admin/kyc/all', requireAdmin, async (req, res) => {
   }
 });
 
+// GET /api/tenancies/user/:userId – fetch all tenancies where user is renter or owner
+app.get('/api/tenancies/user/:userId', async (req, res) => {
+  const client = await pool.connect();
+  try {
+    const { userId } = req.params;
+    // Verify the requesting user matches the userId (or is admin? we'll keep it simple)
+    const authHeader = req.headers.authorization;
+    if (!authHeader) {
+      return res.status(401).json({ success: false, error: 'Unauthorized' });
+    }
+    const token = authHeader.split(' ')[1];
+    const {
+      data: { user },
+      error,
+    } = await supabase.auth.getUser(token);
+    if (error || !user || user.id !== userId) {
+      return res.status(403).json({ success: false, error: 'Forbidden' });
+    }
+
+    // Query tenancies where user is either renter or owner
+    const query = `
+      SELECT 
+        t.tenancy_id,
+        t.lease_start_date,
+        t.lease_end_date,
+        t.payment_status,
+        t.rent_amount,
+        t.renewal_of_tenancy_id,
+        p.property_id,
+        p.title as property_title,
+        p.address_street,
+        p.address_city,
+        p.address_state,
+        u_owner.user_id as owner_id,
+        u_owner.name as owner_name,
+        u_renter.user_id as renter_id,
+        u_renter.name as renter_name,
+        (SELECT COUNT(*) FROM reviews WHERE tenancy_id = t.tenancy_id AND reviewer_id = $1) > 0 as already_reviewed
+      FROM tenancies t
+      JOIN properties p ON t.property_id = p.property_id
+      JOIN users u_owner ON t.owner_id = u_owner.user_id
+      JOIN users u_renter ON t.renter_id = u_renter.user_id
+      WHERE (t.renter_id = $1 OR t.owner_id = $1)
+      ORDER BY t.lease_end_date DESC
+    `;
+    const result = await client.query(query, [userId]);
+    const tenancies = result.rows.map((t) => ({
+      ...t,
+      can_review:
+        !t.already_reviewed &&
+        t.payment_status === 'Paid' &&
+        new Date(t.lease_end_date) < new Date(),
+    }));
+    res.json({ success: true, tenancies });
+  } catch (err) {
+    console.error('Fetch user tenancies error:', err);
+    res.status(500).json({ success: false, error: err.message });
+  } finally {
+    client.release();
+  }
+});
+
 // ==========================================
 // START SERVER
 // ==========================================
