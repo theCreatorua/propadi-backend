@@ -3262,8 +3262,8 @@ app.post('/api/feedback', async (req, res) => {
     //   created_at TIMESTAMPTZ DEFAULT NOW()
     // );
     await pool.query(
-      `INSERT INTO feedback (user_id, email, message) VALUES ($1, $2, $3)`,
-      [user_id || null, email || null, message],
+      `INSERT INTO feedback (user_id, email, subject, message) VALUES ($1, $2, $3, $4)`,
+      [user_id || null, email || null, subject, message],
     );
     // Optional: send email to admin or log
     res.json({ success: true, message: 'Thank you for your feedback!' });
