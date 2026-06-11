@@ -66,7 +66,7 @@ const requireAdmin = async (req, res, next) => {
 // ==========================================
 
 app.post('/api/auth/register', async (req, res) => {
-  const { user_id, email, name, role } = req.body;
+  const { user_id, email, name, role, referral_code } = req.body;
 
   try {
     const userCheck = await pool.query('SELECT * FROM users WHERE email = $1', [
@@ -78,20 +78,66 @@ app.post('/api/auth/register', async (req, res) => {
         .json({ success: false, error: 'Email is already registered' });
     }
 
+    // Insert user (referral_code may be null initially; we'll generate if needed)
     const newUser = await pool.query(
-      'INSERT INTO users (user_id, email, name, role) VALUES ($1, $2, $3, $4) RETURNING user_id, email, name, role',
+      `INSERT INTO users (user_id, email, name, role) 
+       VALUES ($1, $2, $3, $4) 
+       RETURNING user_id, email, name, role, referral_code`,
       [user_id, email, name, role || 'renter'],
     );
 
+    // Create wallet for the new user
     await pool.query(
-      'INSERT INTO wallets (user_id, balance, total_earned, pending_clearance) VALUES ($1, 0, 0, 0)',
+      `INSERT INTO wallets (user_id, balance, total_earned, pending_clearance) 
+       VALUES ($1, 0, 0, 0)`,
       [user_id],
     );
+
+    // --- Ensure a unique referral code exists for this user ---
+    let finalCode = newUser.rows[0].referral_code;
+    if (!finalCode) {
+      // Generate a base code using first 4 letters of name + random suffix
+      const baseName = name.replace(/\s/g, '').substring(0, 4).toUpperCase();
+      let newCode = `${baseName}${Math.random().toString(36).substring(2, 8).toUpperCase()}`;
+      let exists = true;
+      while (exists) {
+        const check = await pool.query(
+          'SELECT 1 FROM users WHERE referral_code = $1',
+          [newCode],
+        );
+        if (check.rows.length === 0) exists = false;
+        else
+          newCode = `${baseName}${Math.random().toString(36).substring(2, 6).toUpperCase()}`;
+      }
+      finalCode = newCode;
+      await pool.query(
+        'UPDATE users SET referral_code = $1 WHERE user_id = $2',
+        [finalCode, user_id],
+      );
+    }
+
+    // --- Handle referral linking (if a valid referral_code was provided at signup) ---
+    if (referral_code) {
+      // Find referrer by that code
+      const referrerResult = await pool.query(
+        'SELECT user_id FROM users WHERE referral_code = $1 AND user_id != $2',
+        [referral_code, user_id],
+      );
+      if (referrerResult.rows.length > 0) {
+        const referrerId = referrerResult.rows[0].user_id;
+        // Insert referral record (status Pending)
+        await pool.query(
+          `INSERT INTO referrals (referrer_id, referee_id, status, reward_type) 
+           VALUES ($1, $2, 'Pending', 'wallet_credit')`,
+          [referrerId, user_id],
+        );
+      }
+    }
 
     res.json({
       success: true,
       message: 'Welcome to Propadi!',
-      user: newUser.rows[0],
+      user: { ...newUser.rows[0], referral_code: finalCode },
     });
   } catch (err) {
     console.error('Sign Up Error:', err);
@@ -1034,10 +1080,12 @@ app.post('/api/tenancies/:id/verify', async (req, res) => {
       [id],
     );
     const tenancy = refResult.rows[0];
-    if (!tenancy || !tenancy.payment_reference)
+    if (!tenancy || !tenancy.payment_reference) {
       return res
         .status(400)
         .json({ success: false, error: 'No active payment found.' });
+    }
+
     const verifyResponse = await fetch(
       `https://api.paystack.co/transaction/verify/${tenancy.payment_reference}`,
       {
@@ -1046,32 +1094,52 @@ app.post('/api/tenancies/:id/verify', async (req, res) => {
       },
     );
     const verifyData = await verifyResponse.json();
+
     if (verifyData.data.status === 'success') {
       await client.query('BEGIN');
+
+      // Update tenancy payment status
       await client.query(
         `UPDATE tenancies SET payment_status = 'Paid' WHERE tenancy_id = $1`,
         [id],
       );
+
       const rentAmount = parseFloat(tenancy.rent_amount);
       let gatewayFee = rentAmount * 0.015 + 100;
       if (gatewayFee > 2000) gatewayFee = 2000;
+
+      // Record transactions
       await client.query(
-        `INSERT INTO transactions (user_id, type, title, property_ref, amount, status) VALUES ($1, 'payment', 'Annual Rent Payment', $2, $3, 'Completed')`,
+        `INSERT INTO transactions (user_id, type, title, property_ref, amount, status) 
+         VALUES ($1, 'payment', 'Annual Rent Payment', $2, $3, 'Completed')`,
         [tenancy.renter_id, tenancy.property_title, -rentAmount],
       );
       await client.query(
-        `INSERT INTO transactions (user_id, type, title, property_ref, amount, status) VALUES ($1, 'fee', 'Propadi Secure Gateway Fee', 'Platform Service', $2, 'Completed')`,
+        `INSERT INTO transactions (user_id, type, title, property_ref, amount, status) 
+         VALUES ($1, 'fee', 'Propadi Secure Gateway Fee', 'Platform Service', $2, 'Completed')`,
         [tenancy.renter_id, -gatewayFee],
       );
       await client.query(
-        `INSERT INTO transactions (user_id, type, title, property_ref, amount, status) VALUES ($1, 'credit', 'Rent Payment Received', $2, $3, 'Completed')`,
+        `INSERT INTO transactions (user_id, type, title, property_ref, amount, status) 
+         VALUES ($1, 'credit', 'Rent Payment Received', $2, $3, 'Completed')`,
         [tenancy.owner_id, tenancy.property_title, rentAmount],
       );
       await client.query(
-        `UPDATE wallets SET balance = balance + $1, total_earned = total_earned + $1, updated_at = CURRENT_TIMESTAMP WHERE user_id = $2`,
+        `UPDATE wallets SET balance = balance + $1, total_earned = total_earned + $1, updated_at = CURRENT_TIMESTAMP 
+         WHERE user_id = $2`,
         [rentAmount, tenancy.owner_id],
       );
+
+      // ✅ Mark pending referral as completed (if any)
+      await client.query(
+        `UPDATE referrals 
+         SET status = 'Completed' 
+         WHERE referee_id = $1 AND status = 'Pending'`,
+        [tenancy.renter_id],
+      );
+
       await client.query('COMMIT');
+
       res.json({
         success: true,
         message: 'Payment verified, Ledgers updated, Contract Activated!',
@@ -1102,15 +1170,19 @@ app.post('/api/webhook/paystack', async (req, res) => {
     .createHmac('sha512', process.env.PAYSTACK_SECRET_KEY)
     .update(JSON.stringify(req.body))
     .digest('hex');
-  if (hash !== req.headers['x-paystack-signature'])
+  if (hash !== req.headers['x-paystack-signature']) {
     return res.status(400).send('Invalid signature');
+  }
+
   const event = req.body;
   if (event.event === 'charge.success') {
     const tenancyId = event.data.metadata?.tenancy_id;
     if (!tenancyId) return res.status(200).send('No tenancy ID, ignored.');
+
     const client = await pool.connect();
     try {
       await client.query('BEGIN');
+
       const checkResult = await client.query(
         `SELECT payment_status, rent_amount, renter_id, owner_id FROM tenancies WHERE tenancy_id = $1 FOR UPDATE`,
         [tenancyId],
@@ -1120,38 +1192,59 @@ app.post('/api/webhook/paystack', async (req, res) => {
         await client.query('ROLLBACK');
         return res.status(200).send('Ledger already updated');
       }
+
       await client.query(
         `UPDATE tenancies SET payment_status = 'Paid', payment_reference = $1 WHERE tenancy_id = $2`,
         [event.data.reference, tenancyId],
       );
+
       const rentAmount = parseFloat(tenancy.rent_amount);
       let gatewayFee = rentAmount * 0.015 + 100;
       if (gatewayFee > 2000) gatewayFee = 2000;
+
       const propQuery = await client.query(
         `SELECT title FROM properties WHERE property_id = (SELECT property_id FROM tenancies WHERE tenancy_id = $1)`,
         [tenancyId],
       );
       const propertyTitle = propQuery.rows[0]?.title || 'Propadi Property';
+
+      // Record transactions
       await client.query(
-        `INSERT INTO transactions (user_id, type, title, property_ref, amount, status) VALUES ($1, 'payment', 'Annual Rent Payment', $2, $3, 'Completed')`,
+        `INSERT INTO transactions (user_id, type, title, property_ref, amount, status) 
+         VALUES ($1, 'payment', 'Annual Rent Payment', $2, $3, 'Completed')`,
         [tenancy.renter_id, propertyTitle, -rentAmount],
       );
       await client.query(
-        `INSERT INTO transactions (user_id, type, title, property_ref, amount, status) VALUES ($1, 'fee', 'Propadi Secure Gateway Fee', 'Platform Service', $2, 'Completed')`,
+        `INSERT INTO transactions (user_id, type, title, property_ref, amount, status) 
+         VALUES ($1, 'fee', 'Propadi Secure Gateway Fee', 'Platform Service', $2, 'Completed')`,
         [tenancy.renter_id, -gatewayFee],
       );
       await client.query(
-        `INSERT INTO transactions (user_id, type, title, property_ref, amount, status) VALUES ($1, 'credit', 'Rent Payment Received', $2, $3, 'Completed')`,
+        `INSERT INTO transactions (user_id, type, title, property_ref, amount, status) 
+         VALUES ($1, 'credit', 'Rent Payment Received', $2, $3, 'Completed')`,
         [tenancy.owner_id, propertyTitle, rentAmount],
       );
       await client.query(
-        `UPDATE wallets SET balance = balance + $1, total_earned = total_earned + $1, updated_at = CURRENT_TIMESTAMP WHERE user_id = $2`,
+        `UPDATE wallets SET balance = balance + $1, total_earned = total_earned + $1, updated_at = CURRENT_TIMESTAMP 
+         WHERE user_id = $2`,
         [rentAmount, tenancy.owner_id],
       );
+
+      // ✅ Mark pending referral as completed (if any)
+      await client.query(
+        `UPDATE referrals 
+         SET status = 'Completed' 
+         WHERE referee_id = $1 AND status = 'Pending'`,
+        [tenancy.renter_id],
+      );
+
       await client.query('COMMIT');
+
       console.log(
         `[WEBHOOK SUCCESS] Tenancy ${tenancyId} automatically funded and verified.`,
       );
+
+      // Send push notification to owner
       await sendPushToUser(
         tenancy.owner_id,
         '💰 Rent Payment Received',
@@ -3349,8 +3442,258 @@ app.post('/api/feedback', async (req, res) => {
   }
 });
 
-// SQL to create feedback table (run once):
+// ==========================================
+// RFERRAL SYSTEM ENDPOINTS
+// ==========================================
+// GET /api/referrals/my-code – get authenticated user's referral code (generate if missing)
+app.get('/api/referrals/my-code', async (req, res) => {
+  try {
+    const authHeader = req.headers.authorization;
+    if (!authHeader)
+      return res.status(401).json({ success: false, error: 'Unauthorized' });
+    const token = authHeader.split(' ')[1];
+    const {
+      data: { user },
+      error,
+    } = await supabase.auth.getUser(token);
+    if (error || !user)
+      return res.status(401).json({ success: false, error: 'Invalid token' });
 
+    let result = await pool.query(
+      'SELECT referral_code FROM users WHERE user_id = $1',
+      [user.id],
+    );
+    let referralCode = result.rows[0]?.referral_code;
+    if (!referralCode) {
+      // Generate a unique code
+      let newCode = user.id.substring(0, 6).toUpperCase();
+      let exists = true;
+      while (exists) {
+        const check = await pool.query(
+          'SELECT 1 FROM users WHERE referral_code = $1',
+          [newCode],
+        );
+        if (check.rows.length === 0) exists = false;
+        else
+          newCode =
+            user.id.substring(0, 4) +
+            Math.random().toString(36).substring(2, 6).toUpperCase();
+      }
+      await pool.query(
+        'UPDATE users SET referral_code = $1 WHERE user_id = $2',
+        [newCode, user.id],
+      );
+      referralCode = newCode;
+    }
+    res.json({ success: true, referral_code: referralCode });
+  } catch (err) {
+    console.error('Get referral code error:', err);
+    res.status(500).json({ success: false, error: err.message });
+  }
+});
+
+// POST /api/referrals/link – link a referral code to the authenticated user (can only be done once)
+app.post('/api/referrals/link', async (req, res) => {
+  const client = await pool.connect();
+  try {
+    const { referral_code } = req.body;
+    if (!referral_code)
+      return res
+        .status(400)
+        .json({ success: false, error: 'Referral code required' });
+
+    const authHeader = req.headers.authorization;
+    if (!authHeader)
+      return res.status(401).json({ success: false, error: 'Unauthorized' });
+    const token = authHeader.split(' ')[1];
+    const {
+      data: { user },
+      error,
+    } = await supabase.auth.getUser(token);
+    if (error || !user)
+      return res.status(401).json({ success: false, error: 'Invalid token' });
+
+    await client.query('BEGIN');
+
+    // Check if user already has a referrer
+    const existing = await client.query(
+      'SELECT 1 FROM referrals WHERE referee_id = $1',
+      [user.id],
+    );
+    if (existing.rows.length > 0) {
+      await client.query('ROLLBACK');
+      return res
+        .status(400)
+        .json({
+          success: false,
+          error: 'You have already used a referral code',
+        });
+    }
+
+    // Find referrer by referral_code
+    const referrerResult = await client.query(
+      'SELECT user_id FROM users WHERE referral_code = $1',
+      [referral_code],
+    );
+    if (referrerResult.rows.length === 0) {
+      await client.query('ROLLBACK');
+      return res
+        .status(404)
+        .json({ success: false, error: 'Invalid referral code' });
+    }
+    const referrerId = referrerResult.rows[0].user_id;
+    if (referrerId === user.id) {
+      await client.query('ROLLBACK');
+      return res
+        .status(400)
+        .json({
+          success: false,
+          error: 'You cannot use your own referral code',
+        });
+    }
+
+    // Create referral record
+    await client.query(
+      `INSERT INTO referrals (referrer_id, referee_id, status, reward_type) VALUES ($1, $2, 'Pending', 'wallet_credit')`,
+      [referrerId, user.id],
+    );
+
+    await client.query('COMMIT');
+    res.json({
+      success: true,
+      message:
+        'Referral code applied! You will receive a reward when you complete your first tenancy.',
+    });
+  } catch (err) {
+    await client.query('ROLLBACK');
+    console.error('Link referral error:', err);
+    res.status(500).json({ success: false, error: err.message });
+  } finally {
+    client.release();
+  }
+});
+
+// GET /api/referrals/:userId – get referrals made by the user (with stats)
+app.get('/api/referrals/:userId', async (req, res) => {
+  try {
+    const { userId } = req.params;
+    // Authorization: only the user themselves or admin can view
+    const authHeader = req.headers.authorization;
+    if (!authHeader)
+      return res.status(401).json({ success: false, error: 'Unauthorized' });
+    const token = authHeader.split(' ')[1];
+    const {
+      data: { user },
+      error,
+    } = await supabase.auth.getUser(token);
+    if (error || !user)
+      return res.status(401).json({ success: false, error: 'Invalid token' });
+    if (user.id !== userId && !user.is_admin) {
+      return res.status(403).json({ success: false, error: 'Forbidden' });
+    }
+
+    // Get referrals sent by this user
+    const referralsQuery = `
+      SELECT r.referral_id, r.status, r.date_referred, r.date_rewarded,
+             u.name as referee_name, u.email as referee_email, u.date_joined as referee_joined
+      FROM referrals r
+      JOIN users u ON r.referee_id = u.user_id
+      WHERE r.referrer_id = $1
+      ORDER BY r.date_referred DESC
+    `;
+    const referralsResult = await pool.query(referralsQuery, [userId]);
+
+    // Compute stats
+    const totalReferrals = referralsResult.rows.length;
+    const successfulReferrals = referralsResult.rows.filter(
+      (r) => r.status === 'Completed',
+    ).length;
+    const pendingReferrals = referralsResult.rows.filter(
+      (r) => r.status === 'Pending',
+    ).length;
+    // Assume reward amount per successful referral (e.g., ₦2000)
+    const rewardPerSuccess = 2000;
+    const totalRewards = successfulReferrals * rewardPerSuccess;
+
+    res.json({
+      success: true,
+      referrals: referralsResult.rows,
+      stats: {
+        totalReferrals,
+        successfulReferrals,
+        pendingReferrals,
+        totalRewards,
+        rewardPerSuccess,
+      },
+    });
+  } catch (err) {
+    console.error('Get referrals error:', err);
+    res.status(500).json({ success: false, error: err.message });
+  }
+});
+
+// POST /api/referrals/claim – add total reward to user's wallet and mark referrals as rewarded
+app.post('/api/referrals/claim', async (req, res) => {
+  const client = await pool.connect();
+  try {
+    const authHeader = req.headers.authorization;
+    if (!authHeader)
+      return res.status(401).json({ success: false, error: 'Unauthorized' });
+    const token = authHeader.split(' ')[1];
+    const {
+      data: { user },
+      error,
+    } = await supabase.auth.getUser(token);
+    if (error || !user)
+      return res.status(401).json({ success: false, error: 'Invalid token' });
+
+    await client.query('BEGIN');
+
+    // Get total successful but not yet rewarded referrals
+    const referralsResult = await client.query(
+      `SELECT referral_id FROM referrals WHERE referrer_id = $1 AND status = 'Completed' AND date_rewarded IS NULL`,
+      [user.id],
+    );
+    if (referralsResult.rows.length === 0) {
+      await client.query('ROLLBACK');
+      return res
+        .status(400)
+        .json({ success: false, error: 'No pending rewards to claim' });
+    }
+
+    const rewardPerSuccess = 2000;
+    const totalReward = referralsResult.rows.length * rewardPerSuccess;
+
+    // Add to wallet
+    await client.query(
+      `UPDATE wallets SET balance = balance + $1, total_earned = total_earned + $1 WHERE user_id = $2`,
+      [totalReward, user.id],
+    );
+    // Record transaction
+    await client.query(
+      `INSERT INTO transactions (user_id, type, title, amount, status) VALUES ($1, 'credit', 'Referral Rewards', $2, 'Completed')`,
+      [user.id, totalReward],
+    );
+    // Mark referrals as rewarded
+    const ids = referralsResult.rows.map((r) => r.referral_id);
+    await client.query(
+      `UPDATE referrals SET status = 'Rewarded', date_rewarded = NOW() WHERE referral_id = ANY($1::uuid[])`,
+      [ids],
+    );
+
+    await client.query('COMMIT');
+    res.json({
+      success: true,
+      message: `₦${totalReward.toLocaleString()} added to your wallet!`,
+    });
+  } catch (err) {
+    await client.query('ROLLBACK');
+    console.error('Claim rewards error:', err);
+    res.status(500).json({ success: false, error: err.message });
+  } finally {
+    client.release();
+  }
+});
 // ==========================================
 // START SERVER
 // ==========================================
