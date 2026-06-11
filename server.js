@@ -3339,6 +3339,8 @@ try {
   console.error('Admin email failed', emailErr);
 }
 
+// SQL to create feedback table (run once):
+
 // ==========================================
 // START SERVER
 // ==========================================
