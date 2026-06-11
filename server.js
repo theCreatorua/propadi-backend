@@ -101,11 +101,13 @@ app.post('/api/auth/register', async (req, res) => {
 
 app.post('/api/user/deposit', async (req, res) => {
   const { userId, amount } = req.body;
+
   if (!amount || isNaN(amount) || amount <= 0) {
     return res
       .status(400)
       .json({ success: false, error: 'Please enter a valid amount' });
   }
+
   try {
     const updateResult = await pool.query(
       'UPDATE wallets SET balance = balance + $1, updated_at = CURRENT_TIMESTAMP WHERE user_id = $2 RETURNING balance',
@@ -204,9 +206,8 @@ app.get('/api/user/profile/:userId', async (req, res) => {
       `SELECT u.email, COALESCE(w.balance, 0) as balance FROM users u LEFT JOIN wallets w ON u.user_id = w.user_id WHERE u.user_id = $1`,
       [userId],
     );
-    if (result.rows.length === 0) {
+    if (result.rows.length === 0)
       return res.status(404).json({ success: false, error: 'User not found' });
-    }
     res.json({ success: true, user: result.rows[0] });
   } catch (err) {
     console.error('Profile Fetch Error:', err);
@@ -225,11 +226,9 @@ app.get('/api/users/:id/trust', async (req, res) => {
       `SELECT kyc_tier, phone_verified, nin_verified, address_verified, renter_score FROM users WHERE user_id = $1`,
       [id],
     );
-    if (result.rows.length > 0) {
+    if (result.rows.length > 0)
       res.json({ success: true, trust_data: result.rows[0] });
-    } else {
-      res.status(404).json({ success: false, error: 'User not found' });
-    }
+    else res.status(404).json({ success: false, error: 'User not found' });
   } catch (err) {
     res
       .status(500)
@@ -241,11 +240,10 @@ app.post('/api/users/:id/verify-nin', async (req, res) => {
   try {
     const { id } = req.params;
     const { nin } = req.body;
-    if (!nin || nin.length < 11) {
+    if (!nin || nin.length < 11)
       return res
         .status(400)
         .json({ success: false, error: 'Invalid NIN provided.' });
-    }
     await pool.query(
       `UPDATE users SET nin_verified = TRUE, kyc_tier = 2, renter_score = renter_score + 15 WHERE user_id = $1`,
       [id],
@@ -348,11 +346,10 @@ app.get('/api/properties/:id', async (req, res) => {
     const { id } = req.params;
     const propQuery = `SELECT * FROM properties WHERE property_id = $1;`;
     const propResult = await pool.query(propQuery, [id]);
-    if (propResult.rows.length === 0) {
+    if (propResult.rows.length === 0)
       return res
         .status(404)
-        .json({ success: false, error: 'Property not found in database' });
-    }
+        .json({ success: false, error: 'Property not found' });
     const property = propResult.rows[0];
     const amenitiesQuery = `SELECT * FROM properties_amenities WHERE property_id = $1;`;
     const amenitiesResult = await pool.query(amenitiesQuery, [id]);
@@ -440,8 +437,7 @@ app.post('/api/properties', async (req, res) => {
     if (visually_verified_amenities && visually_verified_amenities.length > 0) {
       for (const amenity of visually_verified_amenities) {
         await client.query(
-          `INSERT INTO properties_amenities (property_id, amenity_name, verification_url, media_type)
-           VALUES ($1, $2, $3, $4)`,
+          `INSERT INTO properties_amenities (property_id, amenity_name, verification_url, media_type) VALUES ($1, $2, $3, $4)`,
           [
             savedProperty.property_id,
             amenity.amenity_name,
@@ -524,10 +520,10 @@ app.get('/api/inbox/:userId', async (req, res) => {
       ORDER BY m.property_id, CASE WHEN m.sender_id = $1 THEN m.receiver_id ELSE m.sender_id END, m.created_at DESC;
     `;
     const result = await pool.query(query, [userId]);
-    const sortedConversations = result.rows.sort(
+    const sorted = result.rows.sort(
       (a, b) => new Date(b.created_at) - new Date(a.created_at),
     );
-    res.json({ success: true, conversations: sortedConversations });
+    res.json({ success: true, conversations: sorted });
   } catch (err) {
     console.error('Error fetching inbox:', err);
     res.status(500).json({ success: false, error: 'Failed to fetch inbox' });
@@ -544,8 +540,7 @@ app.post('/api/viewings', async (req, res) => {
     const startTime = new Date(viewing_date);
     const endTime = new Date(startTime.getTime() + 60 * 60 * 1000);
     const result = await pool.query(
-      `INSERT INTO viewings (property_id, renter_id, owner_id, scheduled_start_time, scheduled_end_time, status) 
-       VALUES ($1, $2, $3, $4, $5, 'Pending') RETURNING *`,
+      `INSERT INTO viewings (property_id, renter_id, owner_id, scheduled_start_time, scheduled_end_time, status) VALUES ($1,$2,$3,$4,$5,'Pending') RETURNING *`,
       [
         property_id,
         renter_id,
@@ -556,7 +551,7 @@ app.post('/api/viewings', async (req, res) => {
     );
     const messageContent = `🗓️ I have requested a viewing for ${startTime.toLocaleString()}. Please accept or decline.||${result.rows[0].viewing_id}`;
     await pool.query(
-      `INSERT INTO messages (property_id, sender_id, receiver_id, content) VALUES ($1, $2, $3, $4)`,
+      `INSERT INTO messages (property_id, sender_id, receiver_id, content) VALUES ($1,$2,$3,$4)`,
       [property_id, renter_id, landlord_id, messageContent],
     );
     const ownerNameQuery = await pool.query(
@@ -591,13 +586,13 @@ app.put('/api/viewings/:id', async (req, res) => {
     let query, values;
     if (status === 'Accepted') {
       const securePin = crypto.randomInt(100000, 999999).toString();
-      const expiryTime = new Date();
-      expiryTime.setMinutes(expiryTime.getMinutes() + 5);
-      query = `UPDATE viewings SET status = $1, secure_handshake_pin = $2, pin_expiry = $3 WHERE viewing_id = $4 RETURNING *`;
-      values = [status, securePin, expiryTime.toISOString(), id];
+      const expiry = new Date();
+      expiry.setMinutes(expiry.getMinutes() + 5);
+      query = `UPDATE viewings SET status=$1, secure_handshake_pin=$2, pin_expiry=$3 WHERE viewing_id=$4 RETURNING *`;
+      values = [status, securePin, expiry.toISOString(), id];
       if (v) {
         await pool.query(
-          `INSERT INTO messages (property_id, sender_id, receiver_id, content) VALUES ($1, $2, $3, $4)`,
+          `INSERT INTO messages (property_id, sender_id, receiver_id, content) VALUES ($1,$2,$3,$4)`,
           [
             v.property_id,
             v.owner_id,
@@ -607,7 +602,7 @@ app.put('/api/viewings/:id', async (req, res) => {
         );
       }
     } else {
-      query = `UPDATE viewings SET status = $1 WHERE viewing_id = $2 RETURNING *`;
+      query = `UPDATE viewings SET status=$1 WHERE viewing_id=$2 RETURNING *`;
       values = [status, id];
     }
     const result = await pool.query(query, values);
@@ -653,7 +648,7 @@ app.post('/api/viewings/:id/validate', async (req, res) => {
     if (now > expiry) {
       await client.query('ROLLBACK');
       await client.query(
-        `INSERT INTO messages (property_id, sender_id, receiver_id, content) VALUES ($1, $2, $3, $4)`,
+        `INSERT INTO messages (property_id, sender_id, receiver_id, content) VALUES ($1,$2,$3,$4)`,
         [
           viewing.property_id,
           viewing.owner_id,
@@ -676,11 +671,11 @@ app.post('/api/viewings/:id/validate', async (req, res) => {
       });
     }
     const updateResult = await client.query(
-      `UPDATE viewings SET status = 'Completed', owner_checkin_location = $2, updated_at = CURRENT_TIMESTAMP WHERE viewing_id = $1 RETURNING *`,
+      `UPDATE viewings SET status='Completed', owner_checkin_location=$2, updated_at=CURRENT_TIMESTAMP WHERE viewing_id=$1 RETURNING *`,
       [id, `${owner_lat},${owner_lng}`],
     );
     await client.query(
-      `INSERT INTO messages (property_id, sender_id, receiver_id, content) VALUES ($1, $2, $3, $4)`,
+      `INSERT INTO messages (property_id, sender_id, receiver_id, content) VALUES ($1,$2,$3,$4)`,
       [
         viewing.property_id,
         viewing.owner_id,
@@ -691,7 +686,7 @@ app.post('/api/viewings/:id/validate', async (req, res) => {
     await client.query('COMMIT');
     res.json({
       success: true,
-      message: 'Secure Handshake verified! Viewing officially completed.',
+      message: 'Secure Handshake verified!',
       viewing: updateResult.rows[0],
     });
   } catch (err) {
@@ -726,7 +721,7 @@ app.post('/api/viewings/:id/audit', async (req, res) => {
     const totalCount = audit_data.length;
     for (const item of audit_data) {
       await client.query(
-        `INSERT INTO inspection_audits (viewing_id, amenity_id, is_physically_present, renter_notes) VALUES ($1, $2, $3, $4)`,
+        `INSERT INTO inspection_audits (viewing_id, amenity_id, is_physically_present, renter_notes) VALUES ($1,$2,$3,$4)`,
         [id, item.amenity_id, item.is_present, renter_notes],
       );
       if (item.is_present === false) missingCount++;
@@ -751,11 +746,11 @@ app.post('/api/viewings/:id/audit', async (req, res) => {
       conclusionText = `*No specific amenities were verified.*`;
     const reportContent = `📋 **Immutable Inspection Report**\nAmenities Verified: ${totalCount - missingCount}/${totalCount}\nDiscrepancies Found: ${missingCount}\nRenter's Decision: **${final_decision}**\n\n${conclusionText}`;
     await client.query(
-      `INSERT INTO messages (property_id, sender_id, receiver_id, content) VALUES ($1, $2, $3, $4)`,
+      `INSERT INTO messages (property_id, sender_id, receiver_id, content) VALUES ($1,$2,$3,$4)`,
       [v.property_id, v.renter_id, v.owner_id, reportContent],
     );
     await client.query(
-      `UPDATE viewings SET status = 'Audited', updated_at = CURRENT_TIMESTAMP WHERE viewing_id = $1`,
+      `UPDATE viewings SET status='Audited', updated_at=CURRENT_TIMESTAMP WHERE viewing_id=$1`,
       [id],
     );
     await client.query('COMMIT');
@@ -787,8 +782,7 @@ app.post('/api/applications', async (req, res) => {
       is_sight_unseen,
     } = req.body;
     const result = await pool.query(
-      `INSERT INTO applications (property_id, renter_id, owner_id, proposed_rent, cover_letter, move_in_date, is_sight_unseen) 
-       VALUES ($1, $2, $3, $4, $5, $6, $7) RETURNING *`,
+      `INSERT INTO applications (property_id, renter_id, owner_id, proposed_rent, cover_letter, move_in_date, is_sight_unseen) VALUES ($1,$2,$3,$4,$5,$6,$7) RETURNING *`,
       [
         property_id,
         renter_id,
@@ -812,9 +806,7 @@ app.get('/api/applications/owner/:owner_id', async (req, res) => {
   try {
     const { owner_id } = req.params;
     const result = await pool.query(
-      `SELECT a.application_id, a.property_id, a.proposed_rent, a.cover_letter, a.status, a.date_applied, a.is_sight_unseen,
-              u.user_id as renter_id, u.name, u.profile_picture_url, u.role, u.renter_score, u.kyc_status, u.occupation, u.email,
-              p.title as property_title
+      `SELECT a.*, u.name as renter_name, u.email, u.profile_picture_url, u.renter_score, p.title as property_title
        FROM applications a
        JOIN users u ON a.renter_id = u.user_id
        JOIN properties p ON a.property_id = p.property_id
@@ -836,7 +828,7 @@ app.put('/api/applications/:id', async (req, res) => {
     const { id } = req.params;
     const { status } = req.body;
     const appResult = await pool.query(
-      `UPDATE applications SET status = $1, date_status_updated = CURRENT_TIMESTAMP WHERE application_id = $2 RETURNING *`,
+      `UPDATE applications SET status=$1, date_status_updated=CURRENT_TIMESTAMP WHERE application_id=$2 RETURNING *`,
       [status, id],
     );
     const application = appResult.rows[0];
@@ -850,10 +842,8 @@ app.put('/api/applications/:id', async (req, res) => {
         start.setDate(start.getDate() + 14);
       const end = new Date(start);
       end.setFullYear(end.getFullYear() + 1);
-      const sqlStartDate = start.toISOString().split('T')[0];
-      const sqlEndDate = end.toISOString().split('T')[0];
       await pool.query(
-        `INSERT INTO tenancies (application_id, property_id, renter_id, owner_id, rent_amount, rent_period, lease_start_date, lease_end_date, status, is_sight_unseen) 
+        `INSERT INTO tenancies (application_id, property_id, renter_id, owner_id, rent_amount, rent_period, lease_start_date, lease_end_date, status, is_sight_unseen)
          VALUES ($1, $2, $3, $4, $5, 'Per Annum', $6, $7, 'Draft', $8)`,
         [
           application.application_id,
@@ -861,8 +851,8 @@ app.put('/api/applications/:id', async (req, res) => {
           application.renter_id,
           application.owner_id,
           application.proposed_rent,
-          sqlStartDate,
-          sqlEndDate,
+          start.toISOString().split('T')[0],
+          end.toISOString().split('T')[0],
           application.is_sight_unseen,
         ],
       );
@@ -881,7 +871,7 @@ app.get('/api/applications/renter/:renter_id', async (req, res) => {
     const { renter_id } = req.params;
     const result = await pool.query(
       `SELECT a.application_id, a.property_id, a.proposed_rent, a.status, a.date_applied,
-              p.title as property_title, p.address_street, p.address_city, t.tenancy_id
+              p.title as property_title, t.tenancy_id
        FROM applications a
        JOIN properties p ON a.property_id = p.property_id
        LEFT JOIN tenancies t ON a.application_id = t.application_id
@@ -902,18 +892,16 @@ app.get('/api/applications/check/:property_id/:renter_id', async (req, res) => {
   try {
     const { property_id, renter_id } = req.params;
     const result = await pool.query(
-      `SELECT status FROM applications WHERE property_id = $1 AND renter_id = $2 AND status IN ('Pending', 'Approved') LIMIT 1`,
+      `SELECT status FROM applications WHERE property_id=$1 AND renter_id=$2 AND status IN ('Pending','Approved') LIMIT 1`,
       [property_id, renter_id],
     );
-    if (result.rows.length > 0) {
+    if (result.rows.length > 0)
       res.json({
         success: true,
         hasApplied: true,
         status: result.rows[0].status,
       });
-    } else {
-      res.json({ success: true, hasApplied: false });
-    }
+    else res.json({ success: true, hasApplied: false });
   } catch (err) {
     console.error('Error checking application status:', err);
     res.status(500).json({ success: false, error: 'Failed to check status' });
@@ -938,11 +926,10 @@ app.get('/api/tenancies/:id', async (req, res) => {
        WHERE t.tenancy_id = $1`,
       [id],
     );
-    if (result.rows.length === 0) {
+    if (result.rows.length === 0)
       return res
         .status(404)
         .json({ success: false, error: 'Agreement not found' });
-    }
     res.json({ success: true, tenancy: result.rows[0] });
   } catch (err) {
     console.error('Error fetching tenancy:', err);
@@ -959,9 +946,8 @@ app.get('/api/tenancies/:id/status', async (req, res) => {
       `SELECT payment_status, status FROM tenancies WHERE tenancy_id = $1`,
       [id],
     );
-    if (result.rows.length === 0) {
+    if (result.rows.length === 0)
       return res.status(404).json({ success: false, error: 'Not found' });
-    }
     res.json({
       success: true,
       payment_status: result.rows[0].payment_status,
@@ -977,7 +963,7 @@ app.put('/api/tenancies/:id/sign', async (req, res) => {
   try {
     const { id } = req.params;
     const result = await pool.query(
-      `UPDATE tenancies SET renter_signature_date = CURRENT_TIMESTAMP, status = 'Signed' WHERE tenancy_id = $1 RETURNING *`,
+      `UPDATE tenancies SET renter_signature_date=CURRENT_TIMESTAMP, status='Signed' WHERE tenancy_id=$1 RETURNING *`,
       [id],
     );
     res.json({ success: true, tenancy: result.rows[0] });
@@ -991,7 +977,7 @@ app.post('/api/tenancies/:id/pay', async (req, res) => {
   try {
     const { id } = req.params;
     const tenancyResult = await pool.query(
-      `SELECT t.rent_amount, u.email FROM tenancies t JOIN users u ON t.renter_id = u.user_id WHERE t.tenancy_id = $1`,
+      `SELECT t.rent_amount, u.email FROM tenancies t JOIN users u ON t.renter_id = u.user_id WHERE t.tenancy_id=$1`,
       [id],
     );
     if (tenancyResult.rows.length === 0)
@@ -1214,7 +1200,7 @@ app.get('/api/tenant-wallet/:userId', async (req, res) => {
   try {
     const { userId } = req.params;
     const paidResult = await pool.query(
-      `SELECT SUM(ABS(amount)) as total_paid FROM transactions WHERE user_id = $1 AND type IN ('payment', 'fee') AND status = 'Completed'`,
+      `SELECT SUM(ABS(amount)) as total_paid FROM transactions WHERE user_id = $1 AND type IN ('payment','fee') AND status = 'Completed'`,
       [userId],
     );
     const totalPaid = paidResult.rows[0].total_paid || 0;
@@ -1224,7 +1210,7 @@ app.get('/api/tenant-wallet/:userId', async (req, res) => {
     );
     const activeRentals = rentalsResult.rows[0].active_count || 0;
     const txnsResult = await pool.query(
-      `SELECT id, type, title, property_ref as property, amount, created_at as date, status, id as reference FROM transactions WHERE user_id = $1 AND type IN ('payment', 'fee') ORDER BY created_at DESC`,
+      `SELECT id, type, title, property_ref as property, amount, created_at as date, status, id as reference FROM transactions WHERE user_id = $1 AND type IN ('payment','fee') ORDER BY created_at DESC`,
       [userId],
     );
     res.json({
@@ -1276,7 +1262,7 @@ app.post('/api/tenancies/:id/renew', async (req, res) => {
     newEnd.setFullYear(newEnd.getFullYear() + 1);
     const insertResult = await client.query(
       `INSERT INTO tenancies (property_id, renter_id, owner_id, rent_amount, rent_period, lease_start_date, lease_end_date, status, payment_status, renewal_of_tenancy_id, renewal_status)
-       VALUES ($1, $2, $3, $4, $5, $6, $7, 'Draft', 'Pending', $8, 'Pending') RETURNING *`,
+       VALUES ($1,$2,$3,$4,$5,$6,$7,'Draft','Pending',$8,'Pending') RETURNING *`,
       [
         orig.property_id,
         orig.renter_id,
@@ -1303,7 +1289,7 @@ app.post('/api/tenancies/:id/renew', async (req, res) => {
     );
     res.json({
       success: true,
-      message: 'Renewal offer created. The tenant will see it in their wallet.',
+      message: 'Renewal offer created.',
       tenancy: newTenancy,
     });
   } catch (err) {
@@ -1437,12 +1423,12 @@ app.post('/api/wallet/withdraw', async (req, res) => {
     );
     const withdrawalResult = await client.query(
       `INSERT INTO withdrawals (user_id, email, amount, bank_name, account_number, status, type, transfer_status)
-       VALUES ($1, $2, $3, $4, $5, 'Processing', 'Withdrawal', 'Processing') RETURNING *`,
+       VALUES ($1,$2,$3,$4,$5,'Processing','Withdrawal','Processing') RETURNING *`,
       [userId, userEmail, withdrawAmount, bankName, accountNumber],
     );
     const withdrawal = withdrawalResult.rows[0];
     await client.query(
-      `INSERT INTO transactions (user_id, type, title, property_ref, amount, status) VALUES ($1, 'withdrawal', 'Bank Withdrawal', $2, $3, 'Pending')`,
+      `INSERT INTO transactions (user_id, type, title, property_ref, amount, status) VALUES ($1,'withdrawal','Bank Withdrawal',$2,$3,'Pending')`,
       [userId, `To ${bankName} (${accountNumber.slice(-4)})`, -withdrawAmount],
     );
     await client.query('COMMIT');
@@ -1481,7 +1467,7 @@ app.post('/api/wallet/withdraw', async (req, res) => {
         res.json({
           success: true,
           message:
-            'Withdrawal initiated successfully. Funds will be sent to your bank account shortly.',
+            'Withdrawal initiated successfully. Funds will be sent shortly.',
           transfer_code: transferData.data.transfer_code,
         });
       } else {
@@ -1590,7 +1576,7 @@ async function sendPushToUser(userId, title, body, data = {}) {
     if (result.errors) console.error('Expo push errors:', result.errors);
     for (const msg of messages) {
       await pool.query(
-        `INSERT INTO notifications (user_id, title, body, data) VALUES ($1, $2, $3, $4)`,
+        `INSERT INTO notifications (user_id, title, body, data) VALUES ($1,$2,$3,$4)`,
         [userId, title, body, JSON.stringify(data)],
       );
     }
@@ -1607,7 +1593,7 @@ app.post('/api/notifications/register-token', async (req, res) => {
       .json({ success: false, error: 'Missing userId or token' });
   try {
     await pool.query(
-      `INSERT INTO user_push_tokens (user_id, token, updated_at) VALUES ($1, $2, NOW()) ON CONFLICT (token) DO UPDATE SET updated_at = NOW()`,
+      `INSERT INTO user_push_tokens (user_id, token, updated_at) VALUES ($1,$2,NOW()) ON CONFLICT (token) DO UPDATE SET updated_at = NOW()`,
       [userId, token],
     );
     res.json({ success: true });
@@ -1618,7 +1604,7 @@ app.post('/api/notifications/register-token', async (req, res) => {
 });
 
 // ==========================================
-// MAINTENANCE REQUESTS ROUTES
+// MAINTENANCE REQUESTS ROUTES (User)
 // ==========================================
 
 app.get('/api/maintenance/:userId', async (req, res) => {
@@ -1651,7 +1637,7 @@ app.post('/api/maintenance', async (req, res) => {
     const { tenancy_id, property_id, owner_id } = tenancyResult.rows[0];
     const result = await pool.query(
       `INSERT INTO maintenance_requests (tenancy_id, property_id, renter_id, owner_id, category, title, description, media_url, status, date_submitted) 
-       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, 'Pending', CURRENT_TIMESTAMP) RETURNING *`,
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,'Pending',CURRENT_TIMESTAMP) RETURNING *`,
       [
         tenancy_id,
         property_id,
@@ -1699,7 +1685,7 @@ app.put('/api/maintenance/:id', async (req, res) => {
 });
 
 // ==========================================
-// ADMIN DASHBOARD ENDPOINTS (with new features)
+// ADMIN DASHBOARD ENDPOINTS (with all features)
 // ==========================================
 
 // GET /api/admin/stats – platform statistics
@@ -1761,8 +1747,8 @@ app.put('/api/admin/users/:userId', requireAdmin, async (req, res) => {
     const { userId } = req.params;
     const { role, is_admin } = req.body;
     let query = 'UPDATE users SET ';
-    const updates = [];
-    const values = [];
+    const updates = [],
+      values = [];
     if (role) {
       updates.push(`role = $${updates.length + 1}`);
       values.push(role);
@@ -1785,7 +1771,7 @@ app.put('/api/admin/users/:userId', requireAdmin, async (req, res) => {
     if (result.rows.length === 0)
       return res.status(404).json({ success: false, error: 'User not found' });
     await pool.query(
-      'INSERT INTO admin_logs (admin_id, action, target_type, target_id, details) VALUES ($1, $2, $3, $4, $5)',
+      'INSERT INTO admin_logs (admin_id, action, target_type, target_id, details) VALUES ($1,$2,$3,$4,$5)',
       [
         req.adminUser.id,
         'UPDATE_USER_ROLE',
@@ -1800,13 +1786,91 @@ app.put('/api/admin/users/:userId', requireAdmin, async (req, res) => {
   }
 });
 
-// PUT /api/admin/properties/:id/status – support status and is_featured (with logging)
+// GET /api/admin/withdrawals – list all withdrawal requests
+app.get('/api/admin/withdrawals', requireAdmin, async (req, res) => {
+  try {
+    const result = await pool.query(
+      "SELECT * FROM withdrawals WHERE type = 'Withdrawal' ORDER BY created_at DESC",
+    );
+    res.json(result.rows);
+  } catch (err) {
+    console.error('Error fetching withdrawals:', err);
+    res.status(500).json({ error: 'Failed to fetch withdrawals' });
+  }
+});
+
+// PUT /api/admin/withdrawals/:id – approve/reject withdrawal
+app.put('/api/admin/withdrawals/:id', requireAdmin, async (req, res) => {
+  const { id } = req.params;
+  const { status } = req.body;
+  try {
+    const checkResult = await pool.query(
+      'SELECT * FROM withdrawals WHERE id = $1',
+      [id],
+    );
+    if (checkResult.rows.length === 0)
+      return res
+        .status(404)
+        .json({ success: false, error: 'Withdrawal not found' });
+    const withdrawal = checkResult.rows[0];
+    const updateResult = await pool.query(
+      'UPDATE withdrawals SET status = $1 WHERE id = $2 RETURNING *',
+      [status, id],
+    );
+    if (status === 'Paid') {
+      await pool.query(
+        'UPDATE wallets SET balance = balance - $1 WHERE user_id = $2',
+        [withdrawal.amount, withdrawal.user_id],
+      );
+      await resend.emails.send({
+        from: 'Propadi <onboarding@resend.dev>',
+        to: withdrawal.email || 'test@example.com',
+        subject: 'Propadi Withdrawal Successful',
+        html: `<h3>Great news!</h3><p>Your withdrawal of ₦${Number(withdrawal.amount).toLocaleString('en-US')} has been processed and sent to your account.</p>`,
+      });
+    }
+    res.json({
+      success: true,
+      message: 'Status updated, balance adjusted, and email sent!',
+      data: updateResult.rows[0],
+    });
+  } catch (err) {
+    console.error('Update Status Error:', err);
+    res.status(500).json({ success: false, error: err.message });
+  }
+});
+
+// GET /api/admin/properties – list all properties for admin moderation
+app.get('/api/admin/properties', requireAdmin, async (req, res) => {
+  try {
+    const { status } = req.query;
+    let query = `
+      SELECT p.*, u.name as owner_name, u.email as owner_email,
+             (SELECT COUNT(*) FROM applications WHERE property_id = p.property_id) as application_count
+      FROM properties p
+      JOIN users u ON p.owner_id = u.user_id
+    `;
+    const params = [];
+    if (status && status !== 'all') {
+      query += ' WHERE p.status = $1';
+      params.push(status);
+    }
+    query += ' ORDER BY p.date_listed DESC';
+    const result = await pool.query(query, params);
+    res.json({ success: true, properties: result.rows });
+  } catch (err) {
+    console.error('Admin properties fetch error:', err);
+    res.status(500).json({ success: false, error: err.message });
+  }
+});
+
+// PUT /api/admin/properties/:id/status – update status and/or is_featured (with logging)
 app.put('/api/admin/properties/:id/status', requireAdmin, async (req, res) => {
   try {
     const { id } = req.params;
     const { status, is_featured, admin_note } = req.body;
-    let updates = [];
-    const values = [];
+    let updates = [],
+      values = [];
     if (status !== undefined) {
       updates.push(`status = $${values.length + 1}`);
       values.push(status);
@@ -1828,7 +1892,7 @@ app.put('/api/admin/properties/:id/status', requireAdmin, async (req, res) => {
         .json({ success: false, error: 'Property not found' });
     const property = result.rows[0];
     await pool.query(
-      'INSERT INTO admin_logs (admin_id, action, target_type, target_id, details) VALUES ($1, $2, $3, $4, $5)',
+      'INSERT INTO admin_logs (admin_id, action, target_type, target_id, details) VALUES ($1,$2,$3,$4,$5)',
       [
         req.adminUser.id,
         'UPDATE_PROPERTY',
@@ -1863,7 +1927,7 @@ app.put('/api/admin/properties/:id/status', requireAdmin, async (req, res) => {
   }
 });
 
-// GET /api/admin/transactions
+// GET /api/admin/transactions – list all platform transactions
 app.get('/api/admin/transactions', requireAdmin, async (req, res) => {
   try {
     const { limit = 100, offset = 0 } = req.query;
@@ -1882,7 +1946,7 @@ app.get('/api/admin/transactions', requireAdmin, async (req, res) => {
   }
 });
 
-// DELETE /api/admin/users/:userId
+// DELETE /api/admin/users/:userId – delete user
 app.delete('/api/admin/users/:userId', requireAdmin, async (req, res) => {
   try {
     const { userId } = req.params;
@@ -1893,7 +1957,7 @@ app.delete('/api/admin/users/:userId', requireAdmin, async (req, res) => {
       });
     await pool.query('DELETE FROM users WHERE user_id = $1', [userId]);
     await pool.query(
-      'INSERT INTO admin_logs (admin_id, action, target_type, target_id) VALUES ($1, $2, $3, $4)',
+      'INSERT INTO admin_logs (admin_id, action, target_type, target_id) VALUES ($1,$2,$3,$4)',
       [req.adminUser.id, 'DELETE_USER', 'user', userId],
     );
     res.json({ success: true, message: 'User deleted' });
@@ -1901,6 +1965,10 @@ app.delete('/api/admin/users/:userId', requireAdmin, async (req, res) => {
     res.status(500).json({ success: false, error: err.message });
   }
 });
+
+// ==========================================
+// ADMIN MAINTENANCE OVERSIGHT (new)
+// ==========================================
 
 // GET /api/admin/maintenance – list all maintenance tickets
 app.get('/api/admin/maintenance', requireAdmin, async (req, res) => {
@@ -1992,7 +2060,7 @@ app.put('/api/admin/maintenance/:id', requireAdmin, async (req, res) => {
         : `UPDATE maintenance_requests SET status = $1 WHERE request_id = $2 RETURNING *`;
     const updateResult = await client.query(updateQuery, [status, id]);
     await client.query(
-      'INSERT INTO admin_logs (admin_id, action, target_type, target_id, details) VALUES ($1, $2, $3, $4, $5)',
+      'INSERT INTO admin_logs (admin_id, action, target_type, target_id, details) VALUES ($1,$2,$3,$4,$5)',
       [
         req.adminUser.id,
         'UPDATE_MAINTENANCE_STATUS',
@@ -2031,7 +2099,11 @@ app.put('/api/admin/maintenance/:id', requireAdmin, async (req, res) => {
   }
 });
 
-// POST /api/admin/broadcast – send push to all users (or by role)
+// ==========================================
+// ADMIN BROADCAST (Push Notifications)
+// ==========================================
+
+// POST /api/admin/broadcast – send push to all users (or filtered by role)
 app.post('/api/admin/broadcast', requireAdmin, async (req, res) => {
   try {
     const { title, body, role } = req.body;
@@ -2059,7 +2131,7 @@ app.post('/api/admin/broadcast', requireAdmin, async (req, res) => {
       }
     }
     await pool.query(
-      'INSERT INTO admin_logs (admin_id, action, target_type, details) VALUES ($1, $2, $3, $4)',
+      'INSERT INTO admin_logs (admin_id, action, target_type, details) VALUES ($1,$2,$3,$4)',
       [
         req.adminUser.id,
         'BROADCAST',
@@ -2079,9 +2151,11 @@ app.post('/api/admin/broadcast', requireAdmin, async (req, res) => {
   }
 });
 
-// Dispute Resolution Endpoints
+// ==========================================
+// DISPUTE RESOLUTION (Requires 'disputes' table)
+// ==========================================
 
-// GET /api/admin/disputes
+// GET /api/admin/disputes – list all disputes
 app.get('/api/admin/disputes', requireAdmin, async (req, res) => {
   try {
     const { status, reference_type, limit = 50, offset = 0 } = req.query;
@@ -2129,8 +2203,8 @@ app.put('/api/admin/disputes/:id', requireAdmin, async (req, res) => {
         .status(400)
         .json({ success: false, error: 'Status is required' });
     await client.query('BEGIN');
-    const updateFields = [];
-    const values = [];
+    const updateFields = [],
+      values = [];
     let paramIndex = 1;
     updateFields.push(`status = $${paramIndex}`);
     values.push(status);
@@ -2155,7 +2229,7 @@ app.put('/api/admin/disputes/:id', requireAdmin, async (req, res) => {
         .json({ success: false, error: 'Dispute not found' });
     }
     await client.query(
-      'INSERT INTO admin_logs (admin_id, action, target_type, target_id, details) VALUES ($1, $2, $3, $4, $5)',
+      'INSERT INTO admin_logs (admin_id, action, target_type, target_id, details) VALUES ($1,$2,$3,$4,$5)',
       [
         req.adminUser.id,
         'UPDATE_DISPUTE',
@@ -2185,7 +2259,7 @@ app.post('/api/admin/disputes', requireAdmin, async (req, res) => {
         .status(400)
         .json({ success: false, error: 'Missing required fields' });
     const result = await pool.query(
-      `INSERT INTO disputes (reference_type, reference_id, raised_by, raised_against, reason, status) VALUES ($1, $2, $3, $4, $5, 'open') RETURNING *`,
+      `INSERT INTO disputes (reference_type, reference_id, raised_by, raised_against, reason, status) VALUES ($1,$2,$3,$4,$5,'open') RETURNING *`,
       [
         reference_type,
         reference_id,
@@ -2221,7 +2295,7 @@ app.post('/api/reviews', async (req, res) => {
         .status(400)
         .json({ success: false, error: 'Invalid review data' });
     const existing = await client.query(
-      'SELECT id FROM reviews WHERE reviewer_id = $1 AND tenancy_id = $2',
+      'SELECT id FROM reviews WHERE reviewer_id=$1 AND tenancy_id=$2',
       [reviewer_id, tenancy_id],
     );
     if (existing.rows.length > 0)
@@ -2231,7 +2305,7 @@ app.post('/api/reviews', async (req, res) => {
       });
     await client.query('BEGIN');
     const result = await client.query(
-      `INSERT INTO reviews (reviewer_id, reviewee_id, tenancy_id, rating, comment, is_landlord_review) VALUES ($1, $2, $3, $4, $5, $6) RETURNING *`,
+      `INSERT INTO reviews (reviewer_id, reviewee_id, tenancy_id, rating, comment, is_landlord_review) VALUES ($1,$2,$3,$4,$5,$6) RETURNING *`,
       [
         reviewer_id,
         reviewee_id,
@@ -2242,7 +2316,7 @@ app.post('/api/reviews', async (req, res) => {
       ],
     );
     const avgResult = await client.query(
-      'SELECT AVG(rating)::DECIMAL(10,2) as avg FROM reviews WHERE reviewee_id = $1',
+      'SELECT AVG(rating)::DECIMAL(10,2) as avg FROM reviews WHERE reviewee_id=$1',
       [reviewee_id],
     );
     const avgRating = parseFloat(avgResult.rows[0].avg) || 0;
@@ -2344,7 +2418,7 @@ app.get('/api/tenancies/:tenancyId/review-status', async (req, res) => {
         reason: 'Tenancy not yet completed or paid',
       });
     const existing = await pool.query(
-      'SELECT id FROM reviews WHERE reviewer_id = $1 AND tenancy_id = $2',
+      'SELECT id FROM reviews WHERE reviewer_id=$1 AND tenancy_id=$2',
       [user.id, tenancyId],
     );
     if (existing.rows.length > 0)
@@ -2366,6 +2440,10 @@ app.get('/api/tenancies/:tenancyId/review-status', async (req, res) => {
       .json({ success: false, error: 'Failed to check review status' });
   }
 });
+
+// ==========================================
+// NOTIFICATIONS (User)
+// ==========================================
 
 app.get('/api/notifications/:userId', async (req, res) => {
   try {
@@ -2420,7 +2498,7 @@ app.put('/api/notifications/mark-all-read', async (req, res) => {
 });
 
 // ==========================================
-// RECURRING RENT REMINDERS
+// RECURRING RENT REMINDERS (Cron)
 // ==========================================
 
 app.post('/api/cron/check-rent-reminders', async (req, res) => {
@@ -2474,7 +2552,7 @@ app.post('/api/cron/check-rent-reminders', async (req, res) => {
         [today, tenancy.tenancy_id],
       );
       await pool.query(
-        'INSERT INTO rent_reminder_logs (tenancy_id, days_before) VALUES ($1, $2)',
+        'INSERT INTO rent_reminder_logs (tenancy_id, days_before) VALUES ($1,$2)',
         [tenancy.tenancy_id, reminderDays],
       );
       remindersSent++;
@@ -2487,7 +2565,7 @@ app.post('/api/cron/check-rent-reminders', async (req, res) => {
 });
 
 // ==========================================
-// VIEWING REMINDERS
+// VIEWING REMINDERS (Cron)
 // ==========================================
 
 app.post('/api/cron/check-viewing-reminders', async (req, res) => {
@@ -2499,7 +2577,8 @@ app.post('/api/cron/check-viewing-reminders', async (req, res) => {
     const query = `
       SELECT v.viewing_id, v.scheduled_start_time, v.reminder_24h_sent, v.reminder_3h_sent, v.reminder_1h_sent,
              v.renter_id, v.owner_id, v.property_id, p.title as property_title
-      FROM viewings v JOIN properties p ON v.property_id = p.property_id WHERE v.status = 'Accepted' AND v.scheduled_start_time > NOW()
+      FROM viewings v JOIN properties p ON v.property_id = p.property_id
+      WHERE v.status = 'Accepted' AND v.scheduled_start_time > NOW()
     `;
     const { rows } = await pool.query(query);
     let remindersSent = 0;
@@ -2544,12 +2623,16 @@ app.post('/api/cron/check-viewing-reminders', async (req, res) => {
   }
 });
 
+// ==========================================
+// PROPERTY VIEWS & ANALYTICS
+// ==========================================
+
 app.post('/api/properties/:id/view', async (req, res) => {
   try {
     const { id } = req.params;
     const { viewer_id } = req.body;
     await pool.query(
-      'INSERT INTO property_views (property_id, viewer_id) VALUES ($1, $2)',
+      'INSERT INTO property_views (property_id, viewer_id) VALUES ($1,$2)',
       [id, viewer_id || null],
     );
     res.json({ success: true });
@@ -2660,6 +2743,10 @@ app.get('/api/owner/analytics', async (req, res) => {
   }
 });
 
+// ==========================================
+// USER ONBOARDING & KYC (User endpoints)
+// ==========================================
+
 app.post('/api/users/onboarding', async (req, res) => {
   console.log('📥 Onboarding endpoint hit');
   try {
@@ -2701,8 +2788,8 @@ app.post('/api/users/onboarding', async (req, res) => {
           error: 'Phone number already registered by another user.',
         });
     }
-    const updateFields = [];
-    const values = [];
+    const updateFields = [],
+      values = [];
     let paramIndex = 1;
     if (phone_number) {
       updateFields.push(`phone_number = $${paramIndex}`);
@@ -2902,6 +2989,10 @@ app.get('/api/users/verification-status', async (req, res) => {
   }
 });
 
+// ==========================================
+// ADMIN KYC ENDPOINTS
+// ==========================================
+
 app.get('/api/admin/kyc/pending', requireAdmin, async (req, res) => {
   try {
     const result = await pool.query(
@@ -2922,7 +3013,7 @@ app.put('/api/admin/kyc/:userId/approve', requireAdmin, async (req, res) => {
       [userId],
     );
     await pool.query(
-      'INSERT INTO admin_logs (admin_id, action, target_type, target_id, details) VALUES ($1, $2, $3, $4, $5)',
+      'INSERT INTO admin_logs (admin_id, action, target_type, target_id, details) VALUES ($1,$2,$3,$4,$5)',
       [
         req.adminUser.id,
         'APPROVE_KYC',
@@ -2953,7 +3044,7 @@ app.put('/api/admin/kyc/:userId/reject', requireAdmin, async (req, res) => {
       [userId],
     );
     await pool.query(
-      'INSERT INTO admin_logs (admin_id, action, target_type, target_id, details) VALUES ($1, $2, $3, $4, $5)',
+      'INSERT INTO admin_logs (admin_id, action, target_type, target_id, details) VALUES ($1,$2,$3,$4,$5)',
       [
         req.adminUser.id,
         'REJECT_KYC',
@@ -3027,7 +3118,7 @@ app.post('/api/admin/kyc/batch-approve', requireAdmin, async (req, res) => {
     const result = await pool.query(query, userIds);
     for (const row of result.rows) {
       await pool.query(
-        'INSERT INTO admin_logs (admin_id, action, target_type, target_id, details) VALUES ($1, $2, $3, $4, $5)',
+        'INSERT INTO admin_logs (admin_id, action, target_type, target_id, details) VALUES ($1,$2,$3,$4,$5)',
         [
           req.adminUser.id,
           'BATCH_APPROVE_KYC',
@@ -3090,6 +3181,9 @@ app.get('/api/admin/kyc/all', requireAdmin, async (req, res) => {
   }
 });
 
+// ==========================================
+// START SERVER
+// ==========================================
 const PORT = process.env.PORT || 5000;
 app.listen(PORT, () => {
   console.log(`Server running on port ${PORT}`);
