@@ -3750,6 +3750,510 @@ app.post('/api/referrals/claim', async (req, res) => {
     client.release();
   }
 });
+
+// ==========================================
+// SERVICE PROVIDER ROUTES (Phase 1)
+// ==========================================
+
+// POST /api/provider/register – register as a service provider
+app.post('/api/provider/register', async (req, res) => {
+  const client = await pool.connect();
+  try {
+    const authHeader = req.headers.authorization;
+    if (!authHeader)
+      return res.status(401).json({ success: false, error: 'Unauthorized' });
+    const token = authHeader.split(' ')[1];
+    const {
+      data: { user },
+      error,
+    } = await supabase.auth.getUser(token);
+    if (error || !user)
+      return res.status(401).json({ success: false, error: 'Invalid token' });
+
+    const {
+      trade_type,
+      license_number,
+      license_document_url,
+      years_experience,
+      hourly_rate,
+      service_radius_km,
+    } = req.body;
+    if (!trade_type || !hourly_rate) {
+      return res
+        .status(400)
+        .json({
+          success: false,
+          error: 'Trade type and hourly rate are required',
+        });
+    }
+
+    await client.query('BEGIN');
+
+    // Check if already a provider
+    const existing = await client.query(
+      'SELECT provider_id FROM service_providers WHERE provider_id = $1',
+      [user.id],
+    );
+    if (existing.rows.length > 0) {
+      await client.query('ROLLBACK');
+      return res
+        .status(400)
+        .json({
+          success: false,
+          error: 'You are already registered as a service provider',
+        });
+    }
+
+    // Insert into service_providers
+    const result = await client.query(
+      `INSERT INTO service_providers 
+       (provider_id, trade_type, license_number, license_document_url, years_experience, hourly_rate, service_radius_km, is_verified, availability_status)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, false, 'available')
+       RETURNING *`,
+      [
+        user.id,
+        trade_type,
+        license_number || null,
+        license_document_url || null,
+        years_experience || 0,
+        hourly_rate,
+        service_radius_km || 20,
+      ],
+    );
+
+    // Update users table
+    await client.query(
+      'UPDATE users SET is_service_provider = TRUE WHERE user_id = $1',
+      [user.id],
+    );
+
+    await client.query('COMMIT');
+    res.json({ success: true, provider: result.rows[0] });
+  } catch (err) {
+    await client.query('ROLLBACK');
+    console.error('Provider registration error:', err);
+    res
+      .status(500)
+      .json({ success: false, error: 'Failed to register as provider' });
+  } finally {
+    client.release();
+  }
+});
+
+// POST /api/provider/upload-license – upload license document to Supabase Storage
+app.post('/api/provider/upload-license', async (req, res) => {
+  try {
+    const authHeader = req.headers.authorization;
+    if (!authHeader)
+      return res.status(401).json({ success: false, error: 'Unauthorized' });
+    const token = authHeader.split(' ')[1];
+    const {
+      data: { user },
+      error,
+    } = await supabase.auth.getUser(token);
+    if (error || !user)
+      return res.status(401).json({ success: false, error: 'Invalid token' });
+
+    const { base64, fileType } = req.body;
+    if (!base64)
+      return res
+        .status(400)
+        .json({ success: false, error: 'No file provided' });
+
+    const fileName = `providers/${user.id}/license_${Date.now()}.${fileType || 'jpg'}`;
+    const buffer = Buffer.from(base64, 'base64');
+    const { error: uploadError } = await supabase.storage
+      .from('provider-licenses')
+      .upload(fileName, buffer, { contentType: `image/${fileType || 'jpeg'}` });
+    if (uploadError) throw uploadError;
+
+    const {
+      data: { publicUrl },
+    } = supabase.storage.from('provider-licenses').getPublicUrl(fileName);
+    res.json({ success: true, url: publicUrl });
+  } catch (err) {
+    console.error('License upload error:', err);
+    res.status(500).json({ success: false, error: 'Upload failed' });
+  }
+});
+
+// GET /api/provider/dashboard – get provider dashboard data
+app.get('/api/provider/dashboard', async (req, res) => {
+  try {
+    const authHeader = req.headers.authorization;
+    if (!authHeader)
+      return res.status(401).json({ success: false, error: 'Unauthorized' });
+    const token = authHeader.split(' ')[1];
+    const {
+      data: { user },
+      error,
+    } = await supabase.auth.getUser(token);
+    if (error || !user)
+      return res.status(401).json({ success: false, error: 'Invalid token' });
+
+    // Get provider record
+    const providerResult = await pool.query(
+      `SELECT * FROM service_providers WHERE provider_id = $1`,
+      [user.id],
+    );
+    if (providerResult.rows.length === 0) {
+      return res
+        .status(404)
+        .json({ success: false, error: 'Provider not found' });
+    }
+    const provider = providerResult.rows[0];
+
+    // Get current job (if any)
+    let currentJob = null;
+    if (provider.current_job_id) {
+      const jobResult = await pool.query(
+        `SELECT sr.*, mr.title, mr.description, mr.media_url, p.title as property_title, p.address_street, p.address_city, p.address_state
+         FROM service_requests sr
+         JOIN maintenance_requests mr ON sr.maintenance_request_id = mr.request_id
+         JOIN properties p ON sr.property_id = p.property_id
+         WHERE sr.service_id = $1`,
+        [provider.current_job_id],
+      );
+      if (jobResult.rows.length) currentJob = jobResult.rows[0];
+    }
+
+    // Get pending job offers (previews without full address)
+    const pendingJobs = await pool.query(
+      `SELECT sr.service_id, sr.trade_type, sr.estimated_hours, sr.created_at,
+              mr.title, mr.description, mr.media_url,
+              p.title as property_title, p.address_city, p.address_state
+       FROM service_requests sr
+       JOIN maintenance_requests mr ON sr.maintenance_request_id = mr.request_id
+       JOIN properties p ON sr.property_id = p.property_id
+       WHERE sr.provider_id IS NULL AND sr.status = 'pending' AND sr.trade_type = $1
+       ORDER BY sr.created_at ASC
+       LIMIT 20`,
+      [provider.trade_type],
+    );
+
+    // Get job history (completed)
+    const jobHistory = await pool.query(
+      `SELECT sr.*, mr.title, p.title as property_title
+       FROM service_requests sr
+       JOIN maintenance_requests mr ON sr.maintenance_request_id = mr.request_id
+       JOIN properties p ON sr.property_id = p.property_id
+       WHERE sr.provider_id = $1 AND sr.status IN ('completed', 'rejected')
+       ORDER BY sr.completed_at DESC
+       LIMIT 20`,
+      [user.id],
+    );
+
+    // Get earnings summary
+    const earnings = await pool.query(
+      `SELECT COALESCE(SUM(actual_cost), 0) as total_earned
+       FROM service_requests
+       WHERE provider_id = $1 AND status = 'completed'`,
+      [user.id],
+    );
+
+    res.json({
+      success: true,
+      provider,
+      currentJob,
+      pendingJobs: pendingJobs.rows,
+      jobHistory: jobHistory.rows,
+      totalEarned: parseFloat(earnings.rows[0].total_earned),
+    });
+  } catch (err) {
+    console.error('Provider dashboard error:', err);
+    res.status(500).json({ success: false, error: err.message });
+  }
+});
+
+// PUT /api/provider/availability – update availability status
+app.put('/api/provider/availability', async (req, res) => {
+  try {
+    const authHeader = req.headers.authorization;
+    if (!authHeader)
+      return res.status(401).json({ success: false, error: 'Unauthorized' });
+    const token = authHeader.split(' ')[1];
+    const {
+      data: { user },
+      error,
+    } = await supabase.auth.getUser(token);
+    if (error || !user)
+      return res.status(401).json({ success: false, error: 'Invalid token' });
+
+    const { availability_status } = req.body;
+    const allowed = ['available', 'at_work', 'unavailable', 'offline'];
+    if (!allowed.includes(availability_status)) {
+      return res.status(400).json({ success: false, error: 'Invalid status' });
+    }
+
+    await pool.query(
+      `UPDATE service_providers SET availability_status = $1, last_status_update = NOW() WHERE provider_id = $2`,
+      [availability_status, user.id],
+    );
+    res.json({ success: true, message: 'Availability updated' });
+  } catch (err) {
+    console.error('Update availability error:', err);
+    res.status(500).json({ success: false, error: err.message });
+  }
+});
+
+// GET /api/provider/jobs/pending – list pending jobs (previews)
+app.get('/api/provider/jobs/pending', async (req, res) => {
+  try {
+    const authHeader = req.headers.authorization;
+    if (!authHeader)
+      return res.status(401).json({ success: false, error: 'Unauthorized' });
+    const token = authHeader.split(' ')[1];
+    const {
+      data: { user },
+      error,
+    } = await supabase.auth.getUser(token);
+    if (error || !user)
+      return res.status(401).json({ success: false, error: 'Invalid token' });
+
+    const providerResult = await pool.query(
+      'SELECT trade_type, service_radius_km FROM service_providers WHERE provider_id = $1',
+      [user.id],
+    );
+    if (providerResult.rows.length === 0)
+      return res
+        .status(404)
+        .json({ success: false, error: 'Provider not found' });
+    const { trade_type, service_radius_km } = providerResult.rows[0];
+
+    // For simplicity, we only filter by trade type and status. Location radius will be added later.
+    const pendingJobs = await pool.query(
+      `SELECT sr.service_id, sr.trade_type, sr.estimated_hours, sr.created_at,
+              mr.title, mr.description, mr.media_url,
+              p.title as property_title, p.address_city, p.address_state
+       FROM service_requests sr
+       JOIN maintenance_requests mr ON sr.maintenance_request_id = mr.request_id
+       JOIN properties p ON sr.property_id = p.property_id
+       WHERE sr.provider_id IS NULL AND sr.status = 'pending' AND sr.trade_type = $1
+       ORDER BY sr.created_at ASC
+       LIMIT 30`,
+      [trade_type],
+    );
+
+    res.json({ success: true, jobs: pendingJobs.rows });
+  } catch (err) {
+    console.error('Pending jobs error:', err);
+    res.status(500).json({ success: false, error: err.message });
+  }
+});
+
+// PUT /api/provider/jobs/:serviceId/accept – accept a job
+app.put('/api/provider/jobs/:serviceId/accept', async (req, res) => {
+  const client = await pool.connect();
+  try {
+    const { serviceId } = req.params;
+    const authHeader = req.headers.authorization;
+    if (!authHeader)
+      return res.status(401).json({ success: false, error: 'Unauthorized' });
+    const token = authHeader.split(' ')[1];
+    const {
+      data: { user },
+      error,
+    } = await supabase.auth.getUser(token);
+    if (error || !user)
+      return res.status(401).json({ success: false, error: 'Invalid token' });
+
+    await client.query('BEGIN');
+
+    // Check service request exists and is pending
+    const serviceResult = await client.query(
+      `SELECT sr.*, p.address_street, p.address_city, p.address_state, p.map_coordinates
+       FROM service_requests sr
+       JOIN properties p ON sr.property_id = p.property_id
+       WHERE sr.service_id = $1 AND sr.status = 'pending' AND sr.provider_id IS NULL`,
+      [serviceId],
+    );
+    if (serviceResult.rows.length === 0) {
+      await client.query('ROLLBACK');
+      return res
+        .status(404)
+        .json({ success: false, error: 'Job not found or already taken' });
+    }
+    const service = serviceResult.rows[0];
+
+    // Update service request
+    await client.query(
+      `UPDATE service_requests SET provider_id = $1, status = 'accepted', accepted_at = NOW() WHERE service_id = $2`,
+      [user.id, serviceId],
+    );
+
+    // Provider availability will be auto‑updated by trigger
+    // But we also update current_job_id manually (trigger does this, but we ensure)
+    await client.query(
+      `UPDATE service_providers SET current_job_id = $1, availability_status = 'at_work', last_status_update = NOW() WHERE provider_id = $2`,
+      [serviceId, user.id],
+    );
+
+    await client.query('COMMIT');
+
+    // Return full address to frontend
+    res.json({
+      success: true,
+      message: 'Job accepted',
+      property_address: {
+        street: service.address_street,
+        city: service.address_city,
+        state: service.address_state,
+        coordinates: service.map_coordinates,
+      },
+    });
+  } catch (err) {
+    await client.query('ROLLBACK');
+    console.error('Accept job error:', err);
+    res.status(500).json({ success: false, error: err.message });
+  } finally {
+    client.release();
+  }
+});
+
+// PUT /api/provider/jobs/:serviceId/decline – decline a job
+app.put('/api/provider/jobs/:serviceId/decline', async (req, res) => {
+  try {
+    const { serviceId } = req.params;
+    const authHeader = req.headers.authorization;
+    if (!authHeader)
+      return res.status(401).json({ success: false, error: 'Unauthorized' });
+    const token = authHeader.split(' ')[1];
+    const {
+      data: { user },
+      error,
+    } = await supabase.auth.getUser(token);
+    if (error || !user)
+      return res.status(401).json({ success: false, error: 'Invalid token' });
+
+    await pool.query(
+      `UPDATE service_requests SET status = 'rejected' WHERE service_id = $1 AND provider_id IS NULL`,
+      [serviceId],
+    );
+    res.json({ success: true, message: 'Job declined' });
+  } catch (err) {
+    console.error('Decline job error:', err);
+    res.status(500).json({ success: false, error: err.message });
+  }
+});
+
+// PUT /api/provider/jobs/:serviceId/complete – mark job completed (provider side)
+app.put('/api/provider/jobs/:serviceId/complete', async (req, res) => {
+  try {
+    const { serviceId } = req.params;
+    const authHeader = req.headers.authorization;
+    if (!authHeader)
+      return res.status(401).json({ success: false, error: 'Unauthorized' });
+    const token = authHeader.split(' ')[1];
+    const {
+      data: { user },
+      error,
+    } = await supabase.auth.getUser(token);
+    if (error || !user)
+      return res.status(401).json({ success: false, error: 'Invalid token' });
+
+    await pool.query(
+      `UPDATE service_requests SET status = 'completed', completed_at = NOW() WHERE service_id = $1 AND provider_id = $2 AND status = 'accepted'`,
+      [serviceId, user.id],
+    );
+    // Trigger will update provider availability to 'available' and clear current_job_id
+    res.json({
+      success: true,
+      message: 'Job marked as completed, awaiting owner confirmation',
+    });
+  } catch (err) {
+    console.error('Complete job error:', err);
+    res.status(500).json({ success: false, error: err.message });
+  }
+});
+
+// ==========================================
+// ADMIN SERVICE PROVIDER ROUTES
+// ==========================================
+
+// GET /api/admin/service-providers – list all providers (admin only)
+app.get('/api/admin/service-providers', requireAdmin, async (req, res) => {
+  try {
+    const { status, trade_type } = req.query; // status: 'pending', 'verified', 'all'
+    let query = `
+      SELECT sp.*, u.name, u.email, u.phone_number
+      FROM service_providers sp
+      JOIN users u ON sp.provider_id = u.user_id
+      WHERE 1=1
+    `;
+    const values = [];
+    let paramIndex = 1;
+    if (status === 'pending') {
+      query += ` AND sp.is_verified = FALSE`;
+    } else if (status === 'verified') {
+      query += ` AND sp.is_verified = TRUE`;
+    }
+    if (trade_type) {
+      query += ` AND sp.trade_type = $${paramIndex}`;
+      values.push(trade_type);
+      paramIndex++;
+    }
+    query += ` ORDER BY sp.created_at DESC`;
+    const result = await pool.query(query, values);
+    res.json({ success: true, providers: result.rows });
+  } catch (err) {
+    console.error('Admin providers error:', err);
+    res.status(500).json({ success: false, error: err.message });
+  }
+});
+
+// PUT /api/admin/service-providers/:providerId/approve – approve provider (admin only)
+app.put(
+  '/api/admin/service-providers/:providerId/approve',
+  requireAdmin,
+  async (req, res) => {
+    try {
+      const { providerId } = req.params;
+      await pool.query(
+        `UPDATE service_providers SET is_verified = TRUE, verified_at = NOW() WHERE provider_id = $1`,
+        [providerId],
+      );
+      await sendPushToUser(
+        providerId,
+        '✅ Provider Approved',
+        'Your service provider account has been verified. You can now receive job requests.',
+      );
+      res.json({ success: true, message: 'Provider approved' });
+    } catch (err) {
+      console.error('Approve provider error:', err);
+      res.status(500).json({ success: false, error: err.message });
+    }
+  },
+);
+
+// PUT /api/admin/service-providers/:providerId/reject – reject provider (admin only)
+app.put(
+  '/api/admin/service-providers/:providerId/reject',
+  requireAdmin,
+  async (req, res) => {
+    try {
+      const { providerId } = req.params;
+      const { reason } = req.body;
+      await pool.query(`DELETE FROM service_providers WHERE provider_id = $1`, [
+        providerId,
+      ]);
+      await pool.query(
+        `UPDATE users SET is_service_provider = FALSE WHERE user_id = $1`,
+        [providerId],
+      );
+      await sendPushToUser(
+        providerId,
+        '❌ Provider Application Rejected',
+        reason ||
+          'Your application did not meet our verification criteria. You can reapply after addressing the issues.',
+      );
+      res.json({ success: true, message: 'Provider rejected and removed' });
+    } catch (err) {
+      console.error('Reject provider error:', err);
+      res.status(500).json({ success: false, error: err.message });
+    }
+  },
+);
+
 // ==========================================
 // START SERVER
 // ==========================================
