@@ -1860,6 +1860,66 @@ app.put('/api/admin/feedback/:id/review', requireAdmin, async (req, res) => {
   }
 });
 
+// GET /api/admin/referrals – list all referrals (admin only)
+app.get('/api/admin/referrals', requireAdmin, async (req, res) => {
+  try {
+    const { status, limit = 100, offset = 0 } = req.query;
+    let query = `
+      SELECT 
+        r.referral_id,
+        r.status,
+        r.reward_type,
+        r.date_referred,
+        r.date_rewarded,
+        referrer.user_id as referrer_id,
+        referrer.name as referrer_name,
+        referrer.email as referrer_email,
+        referee.user_id as referee_id,
+        referee.name as referee_name,
+        referee.email as referee_email
+      FROM referrals r
+      JOIN users referrer ON r.referrer_id = referrer.user_id
+      JOIN users referee ON r.referee_id = referee.user_id
+      WHERE 1=1
+    `;
+    const values = [];
+    let paramIndex = 1;
+
+    if (status && status !== 'all') {
+      query += ` AND r.status = $${paramIndex}`;
+      values.push(status);
+      paramIndex++;
+    }
+
+    query += ` ORDER BY r.date_referred DESC LIMIT $${paramIndex} OFFSET $${paramIndex + 1}`;
+    values.push(parseInt(limit), parseInt(offset));
+
+    const result = await pool.query(query, values);
+
+    // Get summary stats
+    const statsQuery = `
+      SELECT 
+        COUNT(*) as total,
+        SUM(CASE WHEN status = 'Pending' THEN 1 ELSE 0 END) as pending,
+        SUM(CASE WHEN status = 'Completed' THEN 1 ELSE 0 END) as completed,
+        SUM(CASE WHEN status = 'Rewarded' THEN 1 ELSE 0 END) as rewarded,
+        COALESCE(SUM(CASE WHEN status = 'Rewarded' THEN 2000 ELSE 0 END), 0) as total_rewards_paid
+      FROM referrals
+    `;
+    const statsResult = await pool.query(statsQuery);
+
+    res.json({
+      success: true,
+      referrals: result.rows,
+      stats: statsResult.rows[0],
+      total: result.rows.length,
+    });
+  } catch (err) {
+    console.error('Admin referrals error:', err);
+    res.status(500).json({ success: false, error: err.message });
+  }
+});
+
 // GET /api/admin/users – list users with sorting by trust score
 app.get('/api/admin/users', requireAdmin, async (req, res) => {
   try {
@@ -3522,12 +3582,10 @@ app.post('/api/referrals/link', async (req, res) => {
     );
     if (existing.rows.length > 0) {
       await client.query('ROLLBACK');
-      return res
-        .status(400)
-        .json({
-          success: false,
-          error: 'You have already used a referral code',
-        });
+      return res.status(400).json({
+        success: false,
+        error: 'You have already used a referral code',
+      });
     }
 
     // Find referrer by referral_code
@@ -3544,12 +3602,10 @@ app.post('/api/referrals/link', async (req, res) => {
     const referrerId = referrerResult.rows[0].user_id;
     if (referrerId === user.id) {
       await client.query('ROLLBACK');
-      return res
-        .status(400)
-        .json({
-          success: false,
-          error: 'You cannot use your own referral code',
-        });
+      return res.status(400).json({
+        success: false,
+        error: 'You cannot use your own referral code',
+      });
     }
 
     // Create referral record
