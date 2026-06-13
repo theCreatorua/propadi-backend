@@ -3755,8 +3755,7 @@ app.post('/api/referrals/claim', async (req, res) => {
 // SERVICE PROVIDER ROUTES (Phase 1)
 // ==========================================
 
-// POST /api/provider/register – register as a service provider
-// POST /api/provider/register – register as a service provider (updated)
+// POST /api/provider/register – register as a service provider (with explicit daily_wage)
 app.post('/api/provider/register', async (req, res) => {
   const client = await pool.connect();
   try {
@@ -3774,9 +3773,9 @@ app.post('/api/provider/register', async (req, res) => {
     const {
       trade_type,
       license_number,
-      license_document_urls, // array of URLs
-      years_experience, // e.g., "0-1", "1-2", "3-5", "6-10", "10+"
-      daily_wage, // number (₦)
+      license_document_urls,
+      years_experience,
+      daily_wage,
       service_radius_km,
     } = req.body;
 
@@ -3806,15 +3805,15 @@ app.post('/api/provider/register', async (req, res) => {
         });
     }
 
-    // Store license URLs as JSON array (PostgreSQL TEXT column)
+    // Store license URLs as JSON array
     const licenseUrlsJson = license_document_urls
       ? JSON.stringify(license_document_urls)
       : null;
 
-    // Insert into service_providers
+    // Insert into service_providers – using daily_wage column
     const result = await client.query(
       `INSERT INTO service_providers 
-       (provider_id, trade_type, license_number, license_document_url, years_experience, hourly_rate, service_radius_km, is_verified, availability_status)
+       (provider_id, trade_type, license_number, license_document_url, years_experience, daily_wage, service_radius_km, is_verified, availability_status)
        VALUES ($1, $2, $3, $4, $5, $6, $7, false, 'available')
        RETURNING *`,
       [
