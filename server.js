@@ -4256,6 +4256,32 @@ app.put(
   },
 );
 
+app.get('/api/providers/available', async (req, res) => {
+  const { trade_type, lat, lng, radius_km = 20 } = req.query;
+  // Query service_providers with is_verified = true, availability_status = 'available'
+  // Also filter by trade_type. For MVP, we skip geo‑distance (use city/state later).
+  // Return provider name, daily_wage, years_experience, avg_rating.
+});
+
+app.post('/api/service-requests', async (req, res) => {
+  const { maintenance_request_id, provider_id, estimated_hours, notes } =
+    req.body;
+  // Link to maintenance request, set status 'pending', provider_id null (or assigned directly)
+  // If provider_id is provided, assign; else keep as open for matching.
+});
+
+app.get('/api/service-requests/pending', async (req, res) => {
+  // Return requests where status = 'pending' and no provider assigned
+});
+
+app.put('/api/service-requests/:id/accept', async (req, res) => {
+  // Update provider_id, status = 'accepted', reveal full address.
+});
+
+app.put('/api/service-requests/:id/complete', async (req, res) => {
+  // status = 'completed' (owner confirmation later)
+});
+
 // ==========================================
 // START SERVER
 // ==========================================
