@@ -3756,6 +3756,7 @@ app.post('/api/referrals/claim', async (req, res) => {
 // ==========================================
 
 // POST /api/provider/register – register as a service provider
+// POST /api/provider/register – register as a service provider (updated)
 app.post('/api/provider/register', async (req, res) => {
   const client = await pool.connect();
   try {
@@ -3773,17 +3774,18 @@ app.post('/api/provider/register', async (req, res) => {
     const {
       trade_type,
       license_number,
-      license_document_url,
-      years_experience,
-      hourly_rate,
+      license_document_urls, // array of URLs
+      years_experience, // e.g., "0-1", "1-2", "3-5", "6-10", "10+"
+      daily_wage, // number (₦)
       service_radius_km,
     } = req.body;
-    if (!trade_type || !hourly_rate) {
+
+    if (!trade_type || !daily_wage) {
       return res
         .status(400)
         .json({
           success: false,
-          error: 'Trade type and hourly rate are required',
+          error: 'Trade type and daily wage are required',
         });
     }
 
@@ -3804,6 +3806,11 @@ app.post('/api/provider/register', async (req, res) => {
         });
     }
 
+    // Store license URLs as JSON array (PostgreSQL TEXT column)
+    const licenseUrlsJson = license_document_urls
+      ? JSON.stringify(license_document_urls)
+      : null;
+
     // Insert into service_providers
     const result = await client.query(
       `INSERT INTO service_providers 
@@ -3814,9 +3821,9 @@ app.post('/api/provider/register', async (req, res) => {
         user.id,
         trade_type,
         license_number || null,
-        license_document_url || null,
-        years_experience || 0,
-        hourly_rate,
+        licenseUrlsJson,
+        years_experience || '0-1',
+        daily_wage,
         service_radius_km || 20,
       ],
     );
