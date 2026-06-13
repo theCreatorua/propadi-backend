@@ -3780,12 +3780,10 @@ app.post('/api/provider/register', async (req, res) => {
     } = req.body;
 
     if (!trade_type || !daily_wage) {
-      return res
-        .status(400)
-        .json({
-          success: false,
-          error: 'Trade type and daily wage are required',
-        });
+      return res.status(400).json({
+        success: false,
+        error: 'Trade type and daily wage are required',
+      });
     }
 
     await client.query('BEGIN');
@@ -3797,12 +3795,10 @@ app.post('/api/provider/register', async (req, res) => {
     );
     if (existing.rows.length > 0) {
       await client.query('ROLLBACK');
-      return res
-        .status(400)
-        .json({
-          success: false,
-          error: 'You are already registered as a service provider',
-        });
+      return res.status(400).json({
+        success: false,
+        error: 'You are already registered as a service provider',
+      });
     }
 
     // Store license URLs as JSON array
@@ -3846,7 +3842,7 @@ app.post('/api/provider/register', async (req, res) => {
   }
 });
 
-// POST /api/provider/upload-license – upload license document to Supabase Storage
+// POST /api/provider/upload-license – receive base64 image, upload to Supabase Storage
 app.post('/api/provider/upload-license', async (req, res) => {
   try {
     const authHeader = req.headers.authorization;
@@ -3866,7 +3862,7 @@ app.post('/api/provider/upload-license', async (req, res) => {
         .status(400)
         .json({ success: false, error: 'No file provided' });
 
-    const fileName = `providers/${user.id}/license_${Date.now()}.${fileType || 'jpg'}`;
+    const fileName = `providers/${user.id}/license_${Date.now()}_${Math.random()}.${fileType || 'jpg'}`;
     const buffer = Buffer.from(base64, 'base64');
     const { error: uploadError } = await supabase.storage
       .from('provider-licenses')
