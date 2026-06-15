@@ -4657,7 +4657,7 @@ app.get('/api/service-requests/owner/:userId', async (req, res) => {
   }
 });
 
-// GET /api/service-requests/:id – get single service request details (for tracking)
+// GET /api/service-requests/:id – single service request (owner, provider, or renter can view limited)
 app.get('/api/service-requests/:id', async (req, res) => {
   try {
     const { id } = req.params;
@@ -4672,23 +4672,62 @@ app.get('/api/service-requests/:id', async (req, res) => {
     if (error || !user)
       return res.status(401).json({ success: false, error: 'Invalid token' });
 
-    const result = await pool.query(
-      `SELECT sr.*, mr.title, mr.description, mr.media_url,
-              p.title as property_title, p.address_street, p.address_city, p.address_state,
-              u_provider.name as provider_name, u_provider.phone_number as provider_phone
-       FROM service_requests sr
-       JOIN maintenance_requests mr ON sr.maintenance_request_id = mr.request_id
-       JOIN properties p ON sr.property_id = p.property_id
-       LEFT JOIN users u_provider ON sr.provider_id = u_provider.user_id
-       WHERE sr.service_id = $1 AND (sr.owner_id = $2 OR sr.provider_id = $2)`,
-      [id, user.id],
-    );
+    const query = `
+      SELECT sr.*, mr.title, mr.description, mr.media_url,
+             p.title as property_title, p.address_street, p.address_city, p.address_state,
+             u_provider.name as provider_name, u_provider.phone_number as provider_phone,
+             u_owner.name as owner_name, u_owner.phone_number as owner_phone,
+             u_renter.name as renter_name
+      FROM service_requests sr
+      JOIN maintenance_requests mr ON sr.maintenance_request_id = mr.request_id
+      JOIN properties p ON sr.property_id = p.property_id
+      LEFT JOIN users u_provider ON sr.provider_id = u_provider.user_id
+      LEFT JOIN users u_owner ON sr.owner_id = u_owner.user_id
+      LEFT JOIN users u_renter ON mr.renter_id = u_renter.user_id
+      WHERE sr.service_id = $1
+    `;
+    const result = await pool.query(query, [id]);
     if (result.rows.length === 0) {
       return res
         .status(404)
         .json({ success: false, error: 'Service request not found' });
     }
-    res.json({ success: true, serviceRequest: result.rows[0] });
+    const service = result.rows[0];
+
+    const isOwner = service.owner_id === user.id;
+    const isProvider = service.provider_id === user.id;
+    const isRenter = service.renter_id === user.id;
+
+    // Build response without TypeScript annotations
+    let responseData = {
+      service_id: service.service_id,
+      status: service.status,
+      trade_type: service.trade_type,
+      description: service.description,
+      estimated_cost: service.estimated_cost,
+      actual_cost: service.actual_cost,
+      created_at: service.created_at,
+      accepted_at: service.accepted_at,
+      completed_at: service.completed_at,
+      property_title: service.property_title,
+      address_city: service.address_city,
+      address_state: service.address_state,
+      title: service.title,
+      media_url: service.media_url,
+    };
+
+    if (isOwner || isProvider) {
+      responseData.address_street = service.address_street;
+      responseData.provider_name = service.provider_name;
+      responseData.provider_phone = service.provider_phone;
+      responseData.owner_name = service.owner_name;
+      responseData.owner_phone = service.owner_phone;
+      responseData.renter_name = service.renter_name;
+    } else if (!isRenter) {
+      return res.status(403).json({ success: false, error: 'Forbidden' });
+    }
+
+    res.json({ success: true, serviceRequest: responseData });
   } catch (err) {
     console.error('Get service request error:', err);
     res.status(500).json({ success: false, error: err.message });
