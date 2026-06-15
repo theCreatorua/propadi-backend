@@ -3880,6 +3880,7 @@ app.post('/api/provider/upload-license', async (req, res) => {
 });
 
 // GET /api/provider/dashboard – get provider dashboard data
+// GET /api/provider/dashboard – get provider dashboard data
 app.get('/api/provider/dashboard', async (req, res) => {
   try {
     const authHeader = req.headers.authorization;
@@ -3905,19 +3906,20 @@ app.get('/api/provider/dashboard', async (req, res) => {
     }
     const provider = providerResult.rows[0];
 
-    // Get current job (if any)
+    // ✅ Updated current job query: includes pending/accepted status (not completed/rejected)
     let currentJob = null;
-    if (provider.current_job_id) {
-      const jobResult = await pool.query(
-        `SELECT sr.*, mr.title, mr.description, mr.media_url, p.title as property_title, p.address_street, p.address_city, p.address_state
-         FROM service_requests sr
-         JOIN maintenance_requests mr ON sr.maintenance_request_id = mr.request_id
-         JOIN properties p ON sr.property_id = p.property_id
-         WHERE sr.service_id = $1`,
-        [provider.current_job_id],
-      );
-      if (jobResult.rows.length) currentJob = jobResult.rows[0];
-    }
+    const currentJobResult = await pool.query(
+      `SELECT sr.service_id, mr.title, mr.description, mr.media_url,
+              p.title as property_title, p.address_street, p.address_city, p.address_state, sr.status
+       FROM service_requests sr
+       JOIN maintenance_requests mr ON sr.maintenance_request_id = mr.request_id
+       JOIN properties p ON sr.property_id = p.property_id
+       WHERE sr.provider_id = $1 AND sr.status NOT IN ('completed', 'rejected')
+       ORDER BY sr.created_at DESC
+       LIMIT 1`,
+      [user.id],
+    );
+    if (currentJobResult.rows.length) currentJob = currentJobResult.rows[0];
 
     // Get pending job offers (previews without full address)
     const pendingJobs = await pool.query(
@@ -4329,7 +4331,6 @@ app.post('/api/service-requests', async (req, res) => {
 
     await client.query('BEGIN');
 
-    // Get maintenance request and property details
     const maintResult = await client.query(
       `SELECT mr.*, p.property_id, p.owner_id, p.address_street, p.address_city, p.address_state,
               p.title as property_title
@@ -4346,7 +4347,6 @@ app.post('/api/service-requests', async (req, res) => {
     }
     const maint = maintResult.rows[0];
 
-    // Ensure the owner matches the authenticated user
     if (maint.owner_id !== user.id) {
       await client.query('ROLLBACK');
       return res.status(403).json({
@@ -4355,10 +4355,9 @@ app.post('/api/service-requests', async (req, res) => {
       });
     }
 
-    // If provider_id is provided, verify provider exists and is verified
-    let providerCheck = null;
+    let dailyWage = 0;
     if (provider_id) {
-      providerCheck = await client.query(
+      const providerCheck = await client.query(
         `SELECT provider_id, daily_wage FROM service_providers WHERE provider_id = $1 AND is_verified = true`,
         [provider_id],
       );
@@ -4369,40 +4368,53 @@ app.post('/api/service-requests', async (req, res) => {
           error: 'Selected provider is not available or not verified',
         });
       }
+      dailyWage = providerCheck.rows[0].daily_wage;
     }
 
-    // Calculate estimated cost (daily_wage * estimated_days) – simplify: daily_wage * 1 day for now
-    const dailyWage = providerCheck ? providerCheck.rows[0].daily_wage : 0;
     const estimatedCost =
       dailyWage * (estimated_hours ? Math.ceil(estimated_hours / 8) : 1);
 
-    // Create service request
     const insertResult = await client.query(
       `INSERT INTO service_requests 
        (maintenance_request_id, property_id, owner_id, provider_id, trade_type, description, estimated_hours, estimated_cost, status)
-       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, 'pending')
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
        RETURNING *`,
       [
         maintenance_request_id,
         maint.property_id,
         user.id,
         provider_id || null,
-        maint.category, // trade type based on maintenance category (plumbing, electrical, etc.)
+        maint.category,
         maint.description,
         estimated_hours || null,
         estimatedCost,
+        provider_id ? 'accepted' : 'pending', // ✅ If provider assigned directly, set status to 'accepted'
       ],
     );
     const serviceRequest = insertResult.rows[0];
 
+    // ✅ If provider was directly assigned, update provider's current_job_id and availability
+    if (provider_id) {
+      await client.query(
+        `UPDATE service_providers 
+         SET current_job_id = $1, availability_status = 'at_work', last_status_update = NOW() 
+         WHERE provider_id = $2`,
+        [serviceRequest.service_id, provider_id],
+      );
+      // Also set accepted_at
+      await client.query(
+        `UPDATE service_requests SET accepted_at = NOW() WHERE service_id = $1`,
+        [serviceRequest.service_id],
+      );
+    }
+
     await client.query('COMMIT');
 
-    // If a specific provider was assigned, send push notification
     if (provider_id) {
       await sendPushToUser(
         provider_id,
         '🔧 New Service Request',
-        `You have a new ${maint.category} request for "${maint.property_title}". Please check your dashboard.`,
+        `You have been assigned a new ${maint.category} request for "${maint.property_title}". Please check your dashboard.`,
         { screen: 'ProviderDashboard', service_id: serviceRequest.service_id },
       );
     }
