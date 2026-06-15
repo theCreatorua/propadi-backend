@@ -3904,8 +3904,7 @@ app.get('/api/provider/dashboard', async (req, res) => {
     }
     const provider = providerResult.rows[0];
 
-    // 1. Current job (accepted)
-    let currentJob = null;
+    // Current job (accepted)
     const currentJobResult = await pool.query(
       `SELECT sr.service_id, mr.title, mr.description, mr.media_url,
               p.title as property_title, p.address_street, p.address_city, p.address_state, sr.status
@@ -3917,9 +3916,9 @@ app.get('/api/provider/dashboard', async (req, res) => {
        LIMIT 1`,
       [user.id],
     );
-    if (currentJobResult.rows.length) currentJob = currentJobResult.rows[0];
+    const currentJob = currentJobResult.rows[0] || null;
 
-    // 2. Pending offers (assigned to provider, waiting for acceptance)
+    // Pending offers (assigned to provider, not yet accepted)
     const pendingOffers = await pool.query(
       `SELECT sr.service_id, sr.trade_type, sr.estimated_hours, sr.created_at, sr.estimated_cost,
               mr.title, mr.description, mr.media_url,
@@ -3932,7 +3931,7 @@ app.get('/api/provider/dashboard', async (req, res) => {
       [user.id],
     );
 
-    // 3. Available jobs (open to all, no provider assigned)
+    // Available jobs (no provider assigned, matching trade)
     const availableJobs = await pool.query(
       `SELECT sr.service_id, sr.trade_type, sr.estimated_hours, sr.created_at, sr.estimated_cost,
               mr.title, mr.description, mr.media_url,
@@ -3946,7 +3945,7 @@ app.get('/api/provider/dashboard', async (req, res) => {
       [provider.trade_type],
     );
 
-    // 4. Job history (completed/rejected)
+    // Job history
     const jobHistory = await pool.query(
       `SELECT sr.*, mr.title, p.title as property_title
        FROM service_requests sr
@@ -3958,7 +3957,7 @@ app.get('/api/provider/dashboard', async (req, res) => {
       [user.id],
     );
 
-    // 5. Earnings summary
+    // Earnings
     const earnings = await pool.query(
       `SELECT COALESCE(SUM(actual_cost), 0) as total_earned
        FROM service_requests
