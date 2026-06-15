@@ -4372,12 +4372,10 @@ app.post('/api/service-requests', async (req, res) => {
     // Ensure the owner matches the authenticated user
     if (maint.owner_id !== user.id) {
       await client.query('ROLLBACK');
-      return res
-        .status(403)
-        .json({
-          success: false,
-          error: 'You are not the owner of this property',
-        });
+      return res.status(403).json({
+        success: false,
+        error: 'You are not the owner of this property',
+      });
     }
 
     // If a specific provider is selected, verify they exist and are verified
@@ -4389,12 +4387,10 @@ app.post('/api/service-requests', async (req, res) => {
       );
       if (providerCheck.rows.length === 0) {
         await client.query('ROLLBACK');
-        return res
-          .status(400)
-          .json({
-            success: false,
-            error: 'Selected provider is not available or not verified',
-          });
+        return res.status(400).json({
+          success: false,
+          error: 'Selected provider is not available or not verified',
+        });
       }
       dailyWage = providerCheck.rows[0].daily_wage;
     }
@@ -4790,26 +4786,19 @@ app.get(
 
 // Remove after debugging
 
-app.get('/api/debug/pending-jobs/:providerId', async (req, res) => {
+app.get('/api/debug/pending-offers/:providerId', async (req, res) => {
   const { providerId } = req.params;
   try {
-    const provider = await pool.query(
-      'SELECT trade_type FROM service_providers WHERE provider_id = $1',
+    const result = await pool.query(
+      `SELECT sr.service_id, sr.status, sr.provider_id, sr.trade_type,
+              mr.title, p.title as property_title
+       FROM service_requests sr
+       JOIN maintenance_requests mr ON sr.maintenance_request_id = mr.request_id
+       JOIN properties p ON sr.property_id = p.property_id
+       WHERE sr.provider_id = $1 AND sr.status = 'pending'`,
       [providerId],
     );
-    if (provider.rows.length === 0)
-      return res.json({ error: 'Provider not found' });
-    const tradeType = provider.rows[0].trade_type;
-    const jobs = await pool.query(
-      `
-      SELECT sr.service_id, sr.trade_type, sr.status, mr.title
-      FROM service_requests sr
-      JOIN maintenance_requests mr ON sr.maintenance_request_id = mr.request_id
-      WHERE LOWER(sr.trade_type) = LOWER($1) AND sr.status = 'pending' AND sr.provider_id IS NULL
-    `,
-      [tradeType],
-    );
-    res.json({ provider_trade: tradeType, pending_jobs: jobs.rows });
+    res.json({ success: true, pendingOffers: result.rows });
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
