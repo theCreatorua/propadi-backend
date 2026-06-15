@@ -4318,6 +4318,7 @@ app.get('/api/providers/available', async (req, res) => {
 });
 
 // POST /api/service-requests – owner creates a service request (linked to a maintenance request)
+// POST /api/service-requests – owner creates a service request (linked to maintenance OR direct)
 app.post('/api/service-requests', async (req, res) => {
   const client = await pool.connect();
   try {
@@ -4334,16 +4335,16 @@ app.post('/api/service-requests', async (req, res) => {
 
     const {
       maintenance_request_id,
+      property_id,
       provider_id,
       estimated_hours,
       notes,
       trade_type,
+      title,
+      description,
+      media_url,
     } = req.body;
-    if (!maintenance_request_id) {
-      return res
-        .status(400)
-        .json({ success: false, error: 'Maintenance request ID is required' });
-    }
+
     if (!trade_type) {
       return res
         .status(400)
@@ -4352,33 +4353,79 @@ app.post('/api/service-requests', async (req, res) => {
 
     await client.query('BEGIN');
 
-    // Get maintenance request and property details
-    const maintResult = await client.query(
-      `SELECT mr.*, p.property_id, p.owner_id, p.address_street, p.address_city, p.address_state,
-              p.title as property_title
-       FROM maintenance_requests mr
-       JOIN properties p ON mr.property_id = p.property_id
-       WHERE mr.request_id = $1`,
-      [maintenance_request_id],
-    );
-    if (maintResult.rows.length === 0) {
-      await client.query('ROLLBACK');
-      return res
-        .status(404)
-        .json({ success: false, error: 'Maintenance request not found' });
-    }
-    const maint = maintResult.rows[0];
+    let propertyId = property_id;
+    let maintDescription = description;
+    let maintTitle = title;
 
-    // Ensure the owner matches the authenticated user
-    if (maint.owner_id !== user.id) {
-      await client.query('ROLLBACK');
-      return res.status(403).json({
-        success: false,
-        error: 'You are not the owner of this property',
-      });
+    // If linked to a maintenance request, get property and details
+    if (maintenance_request_id) {
+      const maintResult = await client.query(
+        `SELECT mr.*, p.property_id, p.owner_id, p.address_street, p.address_city, p.address_state,
+                p.title as property_title
+         FROM maintenance_requests mr
+         JOIN properties p ON mr.property_id = p.property_id
+         WHERE mr.request_id = $1`,
+        [maintenance_request_id],
+      );
+      if (maintResult.rows.length === 0) {
+        await client.query('ROLLBACK');
+        return res
+          .status(404)
+          .json({ success: false, error: 'Maintenance request not found' });
+      }
+      const maint = maintResult.rows[0];
+      if (maint.owner_id !== user.id) {
+        await client.query('ROLLBACK');
+        return res
+          .status(403)
+          .json({
+            success: false,
+            error: 'You are not the owner of this property',
+          });
+      }
+      propertyId = maint.property_id;
+      maintDescription = maint.description;
+      maintTitle = maint.title;
+    } else {
+      // Direct request: property_id must be provided and owner must own it
+      if (!property_id) {
+        await client.query('ROLLBACK');
+        return res
+          .status(400)
+          .json({
+            success: false,
+            error: 'Property ID is required for direct requests',
+          });
+      }
+      const propCheck = await client.query(
+        `SELECT owner_id FROM properties WHERE property_id = $1`,
+        [property_id],
+      );
+      if (
+        propCheck.rows.length === 0 ||
+        propCheck.rows[0].owner_id !== user.id
+      ) {
+        await client.query('ROLLBACK');
+        return res
+          .status(403)
+          .json({
+            success: false,
+            error: 'Property not found or you are not the owner',
+          });
+      }
+      // Use provided title/description or fallback
+      if (!maintTitle || !maintDescription) {
+        await client.query('ROLLBACK');
+        return res
+          .status(400)
+          .json({
+            success: false,
+            error: 'Title and description are required for direct requests',
+          });
+      }
     }
 
-    // If a specific provider is selected, verify they exist and are verified
+    // If provider is selected, verify they are verified and available
     let dailyWage = 0;
     if (provider_id) {
       const providerCheck = await client.query(
@@ -4387,45 +4434,47 @@ app.post('/api/service-requests', async (req, res) => {
       );
       if (providerCheck.rows.length === 0) {
         await client.query('ROLLBACK');
-        return res.status(400).json({
-          success: false,
-          error: 'Selected provider is not available or not verified',
-        });
+        return res
+          .status(400)
+          .json({
+            success: false,
+            error: 'Selected provider is not available or not verified',
+          });
       }
       dailyWage = providerCheck.rows[0].daily_wage;
     }
 
-    // Calculate estimated cost (daily_wage × number of days, using estimated_hours)
     const estimatedCost =
       dailyWage * (estimated_hours ? Math.ceil(estimated_hours / 8) : 1);
 
-    // Insert service request – use the trade_type from frontend (already mapped)
+    // Insert service request
     const insertResult = await client.query(
       `INSERT INTO service_requests 
-       (maintenance_request_id, property_id, owner_id, provider_id, trade_type, description, estimated_hours, estimated_cost, status)
-       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, 'pending')
+       (maintenance_request_id, property_id, owner_id, provider_id, trade_type, description, estimated_hours, estimated_cost, status, title, media_url)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, 'pending', $9, $10)
        RETURNING *`,
       [
-        maintenance_request_id,
-        maint.property_id,
+        maintenance_request_id || null,
+        propertyId,
         user.id,
         provider_id || null,
-        trade_type, // ✅ Now using the mapped trade type (e.g., 'electrician')
-        maint.description,
+        trade_type,
+        maintDescription,
         estimated_hours || null,
         estimatedCost,
+        maintTitle,
+        media_url || null,
       ],
     );
     const serviceRequest = insertResult.rows[0];
 
     await client.query('COMMIT');
 
-    // If a specific provider was assigned, send push notification
     if (provider_id) {
       await sendPushToUser(
         provider_id,
         '🔧 New Service Request',
-        `You have a new ${trade_type} request for "${maint.property_title}". Please check your dashboard.`,
+        `You have a new ${trade_type} request for property "${serviceRequest.title}". Please check your dashboard.`,
         { screen: 'ProviderDashboard', service_id: serviceRequest.service_id },
       );
     }
