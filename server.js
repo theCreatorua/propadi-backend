@@ -4418,6 +4418,7 @@ app.post('/api/service-requests', async (req, res) => {
 });
 
 // GET /api/service-requests/pending – list pending service requests (for providers, filtered by trade)
+// GET /api/service-requests/pending – list unassigned jobs for provider
 app.get('/api/service-requests/pending', async (req, res) => {
   try {
     const authHeader = req.headers.authorization;
@@ -4431,6 +4432,7 @@ app.get('/api/service-requests/pending', async (req, res) => {
     if (error || !user)
       return res.status(401).json({ success: false, error: 'Invalid token' });
 
+    // Get provider details
     const providerResult = await pool.query(
       `SELECT trade_type, is_verified, availability_status 
        FROM service_providers WHERE provider_id = $1`,
@@ -4456,6 +4458,7 @@ app.get('/api/service-requests/pending', async (req, res) => {
     }
     const tradeType = provider.trade_type;
 
+    // Query pending jobs – case‑insensitive trade match
     const pendingQuery = `
       SELECT sr.*, mr.title, mr.description, mr.media_url,
              p.title as property_title, p.address_city, p.address_state
@@ -4757,6 +4760,34 @@ app.get(
     }
   },
 );
+
+// Remove after debugging
+
+app.get('/api/debug/pending-jobs/:providerId', async (req, res) => {
+  const { providerId } = req.params;
+  try {
+    const provider = await pool.query(
+      'SELECT trade_type FROM service_providers WHERE provider_id = $1',
+      [providerId],
+    );
+    if (provider.rows.length === 0)
+      return res.json({ error: 'Provider not found' });
+    const tradeType = provider.rows[0].trade_type;
+    const jobs = await pool.query(
+      `
+      SELECT sr.service_id, sr.trade_type, sr.status, mr.title
+      FROM service_requests sr
+      JOIN maintenance_requests mr ON sr.maintenance_request_id = mr.request_id
+      WHERE LOWER(sr.trade_type) = LOWER($1) AND sr.status = 'pending' AND sr.provider_id IS NULL
+    `,
+      [tradeType],
+    );
+    res.json({ provider_trade: tradeType, pending_jobs: jobs.rows });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+// ==========================================
 
 // ==========================================
 // START SERVER
