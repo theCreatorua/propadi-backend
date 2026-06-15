@@ -3880,7 +3880,6 @@ app.post('/api/provider/upload-license', async (req, res) => {
 });
 
 // GET /api/provider/dashboard – get provider dashboard data
-// GET /api/provider/dashboard – get provider dashboard data
 app.get('/api/provider/dashboard', async (req, res) => {
   try {
     const authHeader = req.headers.authorization;
@@ -3894,7 +3893,6 @@ app.get('/api/provider/dashboard', async (req, res) => {
     if (error || !user)
       return res.status(401).json({ success: false, error: 'Invalid token' });
 
-    // Get provider record
     const providerResult = await pool.query(
       `SELECT * FROM service_providers WHERE provider_id = $1`,
       [user.id],
@@ -3906,7 +3904,7 @@ app.get('/api/provider/dashboard', async (req, res) => {
     }
     const provider = providerResult.rows[0];
 
-    // ✅ Updated current job query: includes pending/accepted status (not completed/rejected)
+    // 1. Current job (accepted)
     let currentJob = null;
     const currentJobResult = await pool.query(
       `SELECT sr.service_id, mr.title, mr.description, mr.media_url,
@@ -3914,16 +3912,29 @@ app.get('/api/provider/dashboard', async (req, res) => {
        FROM service_requests sr
        JOIN maintenance_requests mr ON sr.maintenance_request_id = mr.request_id
        JOIN properties p ON sr.property_id = p.property_id
-       WHERE sr.provider_id = $1 AND sr.status NOT IN ('completed', 'rejected')
+       WHERE sr.provider_id = $1 AND sr.status = 'accepted'
        ORDER BY sr.created_at DESC
        LIMIT 1`,
       [user.id],
     );
     if (currentJobResult.rows.length) currentJob = currentJobResult.rows[0];
 
-    // Get pending job offers (previews without full address)
-    const pendingJobs = await pool.query(
-      `SELECT sr.service_id, sr.trade_type, sr.estimated_hours, sr.created_at,
+    // 2. Pending offers (assigned to provider, waiting for acceptance)
+    const pendingOffers = await pool.query(
+      `SELECT sr.service_id, sr.trade_type, sr.estimated_hours, sr.created_at, sr.estimated_cost,
+              mr.title, mr.description, mr.media_url,
+              p.title as property_title, p.address_city, p.address_state
+       FROM service_requests sr
+       JOIN maintenance_requests mr ON sr.maintenance_request_id = mr.request_id
+       JOIN properties p ON sr.property_id = p.property_id
+       WHERE sr.provider_id = $1 AND sr.status = 'pending'
+       ORDER BY sr.created_at ASC`,
+      [user.id],
+    );
+
+    // 3. Available jobs (open to all, no provider assigned)
+    const availableJobs = await pool.query(
+      `SELECT sr.service_id, sr.trade_type, sr.estimated_hours, sr.created_at, sr.estimated_cost,
               mr.title, mr.description, mr.media_url,
               p.title as property_title, p.address_city, p.address_state
        FROM service_requests sr
@@ -3935,7 +3946,7 @@ app.get('/api/provider/dashboard', async (req, res) => {
       [provider.trade_type],
     );
 
-    // Get job history (completed)
+    // 4. Job history (completed/rejected)
     const jobHistory = await pool.query(
       `SELECT sr.*, mr.title, p.title as property_title
        FROM service_requests sr
@@ -3947,7 +3958,7 @@ app.get('/api/provider/dashboard', async (req, res) => {
       [user.id],
     );
 
-    // Get earnings summary
+    // 5. Earnings summary
     const earnings = await pool.query(
       `SELECT COALESCE(SUM(actual_cost), 0) as total_earned
        FROM service_requests
@@ -3959,7 +3970,8 @@ app.get('/api/provider/dashboard', async (req, res) => {
       success: true,
       provider,
       currentJob,
-      pendingJobs: pendingJobs.rows,
+      pendingOffers: pendingOffers.rows,
+      availableJobs: availableJobs.rows,
       jobHistory: jobHistory.rows,
       totalEarned: parseFloat(earnings.rows[0].total_earned),
     });
@@ -4374,10 +4386,11 @@ app.post('/api/service-requests', async (req, res) => {
     const estimatedCost =
       dailyWage * (estimated_hours ? Math.ceil(estimated_hours / 8) : 1);
 
+    // Always set status to 'pending' – provider must accept later
     const insertResult = await client.query(
       `INSERT INTO service_requests 
        (maintenance_request_id, property_id, owner_id, provider_id, trade_type, description, estimated_hours, estimated_cost, status)
-       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, 'pending')
        RETURNING *`,
       [
         maintenance_request_id,
@@ -4388,33 +4401,18 @@ app.post('/api/service-requests', async (req, res) => {
         maint.description,
         estimated_hours || null,
         estimatedCost,
-        provider_id ? 'accepted' : 'pending', // ✅ If provider assigned directly, set status to 'accepted'
       ],
     );
     const serviceRequest = insertResult.rows[0];
 
-    // ✅ If provider was directly assigned, update provider's current_job_id and availability
-    if (provider_id) {
-      await client.query(
-        `UPDATE service_providers 
-         SET current_job_id = $1, availability_status = 'at_work', last_status_update = NOW() 
-         WHERE provider_id = $2`,
-        [serviceRequest.service_id, provider_id],
-      );
-      // Also set accepted_at
-      await client.query(
-        `UPDATE service_requests SET accepted_at = NOW() WHERE service_id = $1`,
-        [serviceRequest.service_id],
-      );
-    }
-
     await client.query('COMMIT');
 
+    // Send push notification to the provider (if assigned)
     if (provider_id) {
       await sendPushToUser(
         provider_id,
         '🔧 New Service Request',
-        `You have been assigned a new ${maint.category} request for "${maint.property_title}". Please check your dashboard.`,
+        `You have a new ${maint.category} request for "${maint.property_title}". Please check your dashboard.`,
         { screen: 'ProviderDashboard', service_id: serviceRequest.service_id },
       );
     }
