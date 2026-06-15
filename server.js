@@ -4432,15 +4432,29 @@ app.get('/api/service-requests/pending', async (req, res) => {
       return res.status(401).json({ success: false, error: 'Invalid token' });
 
     const providerResult = await pool.query(
-      `SELECT trade_type FROM service_providers WHERE provider_id = $1 AND is_verified = true`,
+      `SELECT trade_type, is_verified, availability_status 
+       FROM service_providers WHERE provider_id = $1`,
       [user.id],
     );
     if (providerResult.rows.length === 0) {
       return res
         .status(403)
-        .json({ success: false, error: 'Not a verified service provider' });
+        .json({ success: false, error: 'Not a service provider' });
     }
-    const tradeType = providerResult.rows[0].trade_type;
+    const provider = providerResult.rows[0];
+    if (!provider.is_verified) {
+      return res.status(403).json({
+        success: false,
+        error: 'Your account is not yet verified by admin',
+      });
+    }
+    if (provider.availability_status !== 'available') {
+      return res.status(403).json({
+        success: false,
+        error: 'You are not available to accept jobs',
+      });
+    }
+    const tradeType = provider.trade_type;
 
     const pendingQuery = `
       SELECT sr.*, mr.title, mr.description, mr.media_url,
@@ -4450,11 +4464,11 @@ app.get('/api/service-requests/pending', async (req, res) => {
       JOIN properties p ON sr.property_id = p.property_id
       WHERE LOWER(sr.trade_type) = LOWER($1)
         AND sr.status = 'pending'
-        AND (sr.provider_id IS NULL OR sr.provider_id = $2)
+        AND sr.provider_id IS NULL
       ORDER BY sr.created_at ASC
       LIMIT 30
     `;
-    const result = await pool.query(pendingQuery, [tradeType, user.id]);
+    const result = await pool.query(pendingQuery, [tradeType]);
     res.json({ success: true, pendingJobs: result.rows });
   } catch (err) {
     console.error('Pending service requests error:', err);
