@@ -4349,12 +4349,10 @@ app.post('/api/service-requests', async (req, res) => {
     // Ensure the owner matches the authenticated user
     if (maint.owner_id !== user.id) {
       await client.query('ROLLBACK');
-      return res
-        .status(403)
-        .json({
-          success: false,
-          error: 'You are not the owner of this property',
-        });
+      return res.status(403).json({
+        success: false,
+        error: 'You are not the owner of this property',
+      });
     }
 
     // If provider_id is provided, verify provider exists and is verified
@@ -4366,12 +4364,10 @@ app.post('/api/service-requests', async (req, res) => {
       );
       if (providerCheck.rows.length === 0) {
         await client.query('ROLLBACK');
-        return res
-          .status(400)
-          .json({
-            success: false,
-            error: 'Selected provider is not available or not verified',
-          });
+        return res.status(400).json({
+          success: false,
+          error: 'Selected provider is not available or not verified',
+        });
       }
     }
 
@@ -4496,12 +4492,10 @@ app.put('/api/service-requests/:id/accept', async (req, res) => {
     );
     if (serviceResult.rows.length === 0) {
       await client.query('ROLLBACK');
-      return res
-        .status(404)
-        .json({
-          success: false,
-          error: 'Service request not found or already accepted',
-        });
+      return res.status(404).json({
+        success: false,
+        error: 'Service request not found or already accepted',
+      });
     }
     const service = serviceResult.rows[0];
 
@@ -4566,12 +4560,10 @@ app.put('/api/service-requests/:id/decline', async (req, res) => {
       [id, user.id],
     );
     if (result.rows.length === 0) {
-      return res
-        .status(404)
-        .json({
-          success: false,
-          error: 'Service request not found or already assigned',
-        });
+      return res.status(404).json({
+        success: false,
+        error: 'Service request not found or already assigned',
+      });
     }
     res.json({ success: true, message: 'Job declined' });
   } catch (err) {
@@ -4600,12 +4592,10 @@ app.put('/api/service-requests/:id/complete', async (req, res) => {
       [id, user.id],
     );
     if (result.rows.length === 0) {
-      return res
-        .status(404)
-        .json({
-          success: false,
-          error: 'Service request not found or not in accepted state',
-        });
+      return res.status(404).json({
+        success: false,
+        error: 'Service request not found or not in accepted state',
+      });
     }
     // Update provider availability back to available (trigger already does this, but safe)
     await pool.query(
@@ -4692,6 +4682,30 @@ app.get('/api/service-requests/:id', async (req, res) => {
     res.status(500).json({ success: false, error: err.message });
   }
 });
+
+// GET /api/service-requests/by-maintenance/:maintenanceId
+app.get(
+  '/api/service-requests/by-maintenance/:maintenanceId',
+  async (req, res) => {
+    const { maintenanceId } = req.params;
+    try {
+      const result = await pool.query(
+        `SELECT sr.*, u.name as provider_name
+       FROM service_requests sr
+       LEFT JOIN users u ON sr.provider_id = u.user_id
+       WHERE sr.maintenance_request_id = $1
+       ORDER BY sr.created_at DESC LIMIT 1`,
+        [maintenanceId],
+      );
+      if (result.rows.length === 0) {
+        return res.json({ success: true, serviceRequest: null });
+      }
+      res.json({ success: true, serviceRequest: result.rows[0] });
+    } catch (err) {
+      res.status(500).json({ success: false, error: err.message });
+    }
+  },
+);
 
 // ==========================================
 // START SERVER
