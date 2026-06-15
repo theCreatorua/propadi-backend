@@ -4431,7 +4431,6 @@ app.get('/api/service-requests/pending', async (req, res) => {
     if (error || !user)
       return res.status(401).json({ success: false, error: 'Invalid token' });
 
-    // Get provider's trade type
     const providerResult = await pool.query(
       `SELECT trade_type FROM service_providers WHERE provider_id = $1 AND is_verified = true`,
       [user.id],
@@ -4443,14 +4442,13 @@ app.get('/api/service-requests/pending', async (req, res) => {
     }
     const tradeType = providerResult.rows[0].trade_type;
 
-    // Get pending service requests matching trade, not yet assigned, or assigned to this provider but not accepted
     const pendingQuery = `
       SELECT sr.*, mr.title, mr.description, mr.media_url,
              p.title as property_title, p.address_city, p.address_state
       FROM service_requests sr
       JOIN maintenance_requests mr ON sr.maintenance_request_id = mr.request_id
       JOIN properties p ON sr.property_id = p.property_id
-      WHERE sr.trade_type = $1
+      WHERE LOWER(sr.trade_type) = LOWER($1)
         AND sr.status = 'pending'
         AND (sr.provider_id IS NULL OR sr.provider_id = $2)
       ORDER BY sr.created_at ASC
