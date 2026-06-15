@@ -4332,16 +4332,27 @@ app.post('/api/service-requests', async (req, res) => {
     if (error || !user)
       return res.status(401).json({ success: false, error: 'Invalid token' });
 
-    const { maintenance_request_id, provider_id, estimated_hours, notes } =
-      req.body;
+    const {
+      maintenance_request_id,
+      provider_id,
+      estimated_hours,
+      notes,
+      trade_type,
+    } = req.body;
     if (!maintenance_request_id) {
       return res
         .status(400)
         .json({ success: false, error: 'Maintenance request ID is required' });
     }
+    if (!trade_type) {
+      return res
+        .status(400)
+        .json({ success: false, error: 'Trade type is required' });
+    }
 
     await client.query('BEGIN');
 
+    // Get maintenance request and property details
     const maintResult = await client.query(
       `SELECT mr.*, p.property_id, p.owner_id, p.address_street, p.address_city, p.address_state,
               p.title as property_title
@@ -4358,14 +4369,18 @@ app.post('/api/service-requests', async (req, res) => {
     }
     const maint = maintResult.rows[0];
 
+    // Ensure the owner matches the authenticated user
     if (maint.owner_id !== user.id) {
       await client.query('ROLLBACK');
-      return res.status(403).json({
-        success: false,
-        error: 'You are not the owner of this property',
-      });
+      return res
+        .status(403)
+        .json({
+          success: false,
+          error: 'You are not the owner of this property',
+        });
     }
 
+    // If a specific provider is selected, verify they exist and are verified
     let dailyWage = 0;
     if (provider_id) {
       const providerCheck = await client.query(
@@ -4374,18 +4389,21 @@ app.post('/api/service-requests', async (req, res) => {
       );
       if (providerCheck.rows.length === 0) {
         await client.query('ROLLBACK');
-        return res.status(400).json({
-          success: false,
-          error: 'Selected provider is not available or not verified',
-        });
+        return res
+          .status(400)
+          .json({
+            success: false,
+            error: 'Selected provider is not available or not verified',
+          });
       }
       dailyWage = providerCheck.rows[0].daily_wage;
     }
 
+    // Calculate estimated cost (daily_wage × number of days, using estimated_hours)
     const estimatedCost =
       dailyWage * (estimated_hours ? Math.ceil(estimated_hours / 8) : 1);
 
-    // Always set status to 'pending' – provider must accept later
+    // Insert service request – use the trade_type from frontend (already mapped)
     const insertResult = await client.query(
       `INSERT INTO service_requests 
        (maintenance_request_id, property_id, owner_id, provider_id, trade_type, description, estimated_hours, estimated_cost, status)
@@ -4396,7 +4414,7 @@ app.post('/api/service-requests', async (req, res) => {
         maint.property_id,
         user.id,
         provider_id || null,
-        maint.category,
+        trade_type, // ✅ Now using the mapped trade type (e.g., 'electrician')
         maint.description,
         estimated_hours || null,
         estimatedCost,
@@ -4406,12 +4424,12 @@ app.post('/api/service-requests', async (req, res) => {
 
     await client.query('COMMIT');
 
-    // Send push notification to the provider (if assigned)
+    // If a specific provider was assigned, send push notification
     if (provider_id) {
       await sendPushToUser(
         provider_id,
         '🔧 New Service Request',
-        `You have a new ${maint.category} request for "${maint.property_title}". Please check your dashboard.`,
+        `You have a new ${trade_type} request for "${maint.property_title}". Please check your dashboard.`,
         { screen: 'ProviderDashboard', service_id: serviceRequest.service_id },
       );
     }
