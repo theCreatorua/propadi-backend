@@ -1261,6 +1261,90 @@ app.post('/api/webhook/paystack', async (req, res) => {
   res.status(200).send('Webhook received successfully');
 });
 
+// POST /api/webhook/paystack-service – handles service escrow payments
+app.post('/api/webhook/paystack-service', async (req, res) => {
+  const hash = crypto
+    .createHmac('sha512', process.env.PAYSTACK_SECRET_KEY)
+    .update(JSON.stringify(req.body))
+    .digest('hex');
+  if (hash !== req.headers['x-paystack-signature']) {
+    return res.status(400).send('Invalid signature');
+  }
+
+  const event = req.body;
+  if (event.event === 'charge.success') {
+    const metadata = event.data.metadata;
+    if (!metadata || metadata.type !== 'service_escrow') {
+      return res.status(200).send('Not a service escrow event, ignored.');
+    }
+    const serviceId = metadata.service_id;
+    if (!serviceId) return res.status(200).send('No service ID, ignored.');
+
+    const client = await pool.connect();
+    try {
+      await client.query('BEGIN');
+
+      // Check if already funded
+      const checkResult = await client.query(
+        `SELECT price_status FROM service_requests WHERE service_id = $1 FOR UPDATE`,
+        [serviceId],
+      );
+      if (
+        checkResult.rows.length === 0 ||
+        checkResult.rows[0].price_status === 'funded'
+      ) {
+        await client.query('ROLLBACK');
+        return res.status(200).send('Already funded');
+      }
+
+      // Update service request status
+      await client.query(
+        `UPDATE service_requests SET price_status = 'funded' WHERE service_id = $1`,
+        [serviceId],
+      );
+
+      // Create escrow record
+      const serviceResult = await client.query(
+        `SELECT final_price, estimated_cost FROM service_requests WHERE service_id = $1`,
+        [serviceId],
+      );
+      const amount =
+        parseFloat(serviceResult.rows[0].final_price) ||
+        parseFloat(serviceResult.rows[0].estimated_cost);
+      await client.query(
+        `INSERT INTO service_escrow (service_request_id, amount, status) VALUES ($1, $2, 'held')`,
+        [serviceId, amount],
+      );
+
+      // Notify provider that job is funded
+      const providerResult = await client.query(
+        `SELECT provider_id FROM service_requests WHERE service_id = $1`,
+        [serviceId],
+      );
+      if (
+        providerResult.rows.length > 0 &&
+        providerResult.rows[0].provider_id
+      ) {
+        await sendPushToUser(
+          providerResult.rows[0].provider_id,
+          '💰 Job Funded',
+          `The owner has funded the escrow for your job. You can now start work.`,
+          { screen: 'ProviderDashboard', service_id: serviceId },
+        );
+      }
+
+      await client.query('COMMIT');
+      console.log(`[SERVICE ESCROW] Service ${serviceId} funded successfully.`);
+    } catch (err) {
+      await client.query('ROLLBACK');
+      console.error('Service escrow webhook error:', err);
+    } finally {
+      client.release();
+    }
+  }
+  res.status(200).send('Webhook received');
+});
+
 // ==========================================
 // ROLE-BASED WALLET & LEDGER ROUTES
 // ==========================================
@@ -4832,26 +4916,311 @@ app.get(
   },
 );
 
-// Remove after debugging
-
-app.get('/api/debug/pending-offers/:providerId', async (req, res) => {
-  const { providerId } = req.params;
+// POST /api/service-requests/:id/counter – provider proposes a new price
+app.post('/api/service-requests/:id/counter', async (req, res) => {
+  const client = await pool.connect();
   try {
-    const result = await pool.query(
-      `SELECT sr.service_id, sr.status, sr.provider_id, sr.trade_type,
-              mr.title, p.title as property_title
+    const { id } = req.params;
+    const { counter_price } = req.body;
+    const authHeader = req.headers.authorization;
+    if (!authHeader)
+      return res.status(401).json({ success: false, error: 'Unauthorized' });
+    const token = authHeader.split(' ')[1];
+    const {
+      data: { user },
+      error,
+    } = await supabase.auth.getUser(token);
+    if (error || !user)
+      return res.status(401).json({ success: false, error: 'Invalid token' });
+
+    if (!counter_price || parseFloat(counter_price) <= 0) {
+      return res
+        .status(400)
+        .json({ success: false, error: 'Valid counter price is required' });
+    }
+
+    await client.query('BEGIN');
+
+    // Check service request exists and is pending, and provider is assigned
+    const serviceResult = await client.query(
+      `SELECT sr.*, u.name as owner_name
        FROM service_requests sr
-       JOIN maintenance_requests mr ON sr.maintenance_request_id = mr.request_id
-       JOIN properties p ON sr.property_id = p.property_id
-       WHERE sr.provider_id = $1 AND sr.status = 'pending'`,
-      [providerId],
+       JOIN users u ON sr.owner_id = u.user_id
+       WHERE sr.service_id = $1 AND sr.provider_id = $2 AND sr.status = 'pending'`,
+      [id, user.id],
     );
-    res.json({ success: true, pendingOffers: result.rows });
+    if (serviceResult.rows.length === 0) {
+      await client.query('ROLLBACK');
+      return res
+        .status(404)
+        .json({
+          success: false,
+          error: 'Service request not found or not eligible for counter',
+        });
+    }
+    const service = serviceResult.rows[0];
+
+    await client.query(
+      `UPDATE service_requests SET counter_price = $1, price_status = 'provider_countered' WHERE service_id = $2`,
+      [parseFloat(counter_price), id],
+    );
+
+    await client.query('COMMIT');
+
+    // Notify owner
+    await sendPushToUser(
+      service.owner_id,
+      '💬 Counter Offer Received',
+      `The provider has proposed ₦${parseFloat(counter_price).toLocaleString()} for your service request.`,
+      { screen: 'ServiceRequest', service_id: id },
+    );
+
+    res.json({ success: true, message: 'Counter offer sent to owner' });
   } catch (err) {
-    res.status(500).json({ error: err.message });
+    await client.query('ROLLBACK');
+    console.error('Counter offer error:', err);
+    res.status(500).json({ success: false, error: err.message });
+  } finally {
+    client.release();
   }
 });
-// ==========================================
+
+// PUT /api/service-requests/:id/accept-price – owner accepts the final price
+app.put('/api/service-requests/:id/accept-price', async (req, res) => {
+  const client = await pool.connect();
+  try {
+    const { id } = req.params;
+    const authHeader = req.headers.authorization;
+    if (!authHeader)
+      return res.status(401).json({ success: false, error: 'Unauthorized' });
+    const token = authHeader.split(' ')[1];
+    const {
+      data: { user },
+      error,
+    } = await supabase.auth.getUser(token);
+    if (error || !user)
+      return res.status(401).json({ success: false, error: 'Invalid token' });
+
+    await client.query('BEGIN');
+
+    // Get service request
+    const serviceResult = await client.query(
+      `SELECT sr.*, sp.provider_id
+       FROM service_requests sr
+       JOIN service_providers sp ON sr.provider_id = sp.provider_id
+       WHERE sr.service_id = $1 AND sr.owner_id = $2 AND sr.status = 'pending'`,
+      [id, user.id],
+    );
+    if (serviceResult.rows.length === 0) {
+      await client.query('ROLLBACK');
+      return res
+        .status(404)
+        .json({
+          success: false,
+          error: 'Service request not found or not yours',
+        });
+    }
+    const service = serviceResult.rows[0];
+
+    // Determine final price: if counter_price exists, use it; else use estimated_cost
+    const finalPrice = service.counter_price || service.estimated_cost;
+    await client.query(
+      `UPDATE service_requests SET final_price = $1, price_status = 'accepted' WHERE service_id = $2`,
+      [finalPrice, id],
+    );
+
+    await client.query('COMMIT');
+
+    // Notify provider
+    await sendPushToUser(
+      service.provider_id,
+      '✅ Price Accepted',
+      `The owner has accepted ₦${finalPrice.toLocaleString()} for the job. Please wait for escrow funding.`,
+      { screen: 'ProviderDashboard', service_id: id },
+    );
+
+    res.json({
+      success: true,
+      message: 'Price accepted. Please fund the escrow.',
+      finalPrice,
+    });
+  } catch (err) {
+    await client.query('ROLLBACK');
+    console.error('Accept price error:', err);
+    res.status(500).json({ success: false, error: err.message });
+  } finally {
+    client.release();
+  }
+});
+
+// POST /api/service-requests/:id/fund – owner funds the escrow
+app.post('/api/service-requests/:id/fund', async (req, res) => {
+  try {
+    const { id } = req.params;
+    const authHeader = req.headers.authorization;
+    if (!authHeader)
+      return res.status(401).json({ success: false, error: 'Unauthorized' });
+    const token = authHeader.split(' ')[1];
+    const {
+      data: { user },
+      error,
+    } = await supabase.auth.getUser(token);
+    if (error || !user)
+      return res.status(401).json({ success: false, error: 'Invalid token' });
+
+    // Get service request and user email
+    const serviceResult = await pool.query(
+      `SELECT sr.*, u.email
+       FROM service_requests sr
+       JOIN users u ON sr.owner_id = u.user_id
+       WHERE sr.service_id = $1 AND sr.owner_id = $2 AND sr.price_status IN ('accepted', 'funded')`,
+      [id, user.id],
+    );
+    if (serviceResult.rows.length === 0) {
+      return res
+        .status(404)
+        .json({
+          success: false,
+          error: 'Service request not found or not ready for funding',
+        });
+    }
+    const service = serviceResult.rows[0];
+
+    // If already funded, return success
+    if (service.price_status === 'funded') {
+      return res.json({ success: true, message: 'Already funded' });
+    }
+
+    const finalPrice =
+      parseFloat(service.final_price) || parseFloat(service.estimated_cost);
+    if (!finalPrice || finalPrice <= 0) {
+      return res.status(400).json({ success: false, error: 'Invalid price' });
+    }
+
+    // Calculate Propadi service fee (e.g., 7%)
+    const serviceFee = finalPrice * 0.07;
+    const totalAmountKobo = Math.round((finalPrice + serviceFee) * 100);
+
+    // Initialize Paystack transaction
+    const paystackResponse = await fetch(
+      'https://api.paystack.co/transaction/initialize',
+      {
+        method: 'POST',
+        headers: {
+          Authorization: `Bearer ${process.env.PAYSTACK_SECRET_KEY}`,
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({
+          email: service.email,
+          amount: totalAmountKobo,
+          metadata: { service_id: id, type: 'service_escrow' },
+          callback_url: 'propadi://paystack-return',
+        }),
+      },
+    );
+    const paystackData = await paystackResponse.json();
+
+    if (paystackData.status) {
+      // Save reference to service_requests
+      await pool.query(
+        `UPDATE service_requests SET payment_reference = $1 WHERE service_id = $2`,
+        [paystackData.data.reference, id],
+      );
+      res.json({
+        success: true,
+        authorization_url: paystackData.data.authorization_url,
+      });
+    } else {
+      res.status(400).json({ success: false, error: paystackData.message });
+    }
+  } catch (err) {
+    console.error('Service escrow funding error:', err);
+    res.status(500).json({ success: false, error: err.message });
+  }
+});
+
+// PUT /api/service-requests/:id/release – owner releases funds to provider
+app.put('/api/service-requests/:id/release', async (req, res) => {
+  const client = await pool.connect();
+  try {
+    const { id } = req.params;
+    const authHeader = req.headers.authorization;
+    if (!authHeader)
+      return res.status(401).json({ success: false, error: 'Unauthorized' });
+    const token = authHeader.split(' ')[1];
+    const {
+      data: { user },
+      error,
+    } = await supabase.auth.getUser(token);
+    if (error || !user)
+      return res.status(401).json({ success: false, error: 'Invalid token' });
+
+    await client.query('BEGIN');
+
+    // Verify request
+    const serviceResult = await client.query(
+      `SELECT sr.*, sp.provider_id
+       FROM service_requests sr
+       JOIN service_providers sp ON sr.provider_id = sp.provider_id
+       WHERE sr.service_id = $1 AND sr.owner_id = $2 AND sr.status = 'completed' AND sr.price_status = 'funded'`,
+      [id, user.id],
+    );
+    if (serviceResult.rows.length === 0) {
+      await client.query('ROLLBACK');
+      return res
+        .status(404)
+        .json({ success: false, error: 'Completed, funded job not found' });
+    }
+    const service = serviceResult.rows[0];
+    const amount =
+      parseFloat(service.final_price) || parseFloat(service.estimated_cost);
+
+    // Update service request
+    await client.query(
+      `UPDATE service_requests SET price_status = 'released' WHERE service_id = $1`,
+      [id],
+    );
+
+    // Update escrow record
+    await client.query(
+      `UPDATE service_escrow SET status = 'released_to_provider', released_at = NOW() WHERE service_request_id = $1`,
+      [id],
+    );
+
+    // Add amount to provider's wallet
+    await client.query(
+      `UPDATE wallets SET balance = balance + $1, total_earned = total_earned + $1 WHERE user_id = $2`,
+      [amount, service.provider_id],
+    );
+
+    // Record transaction
+    await client.query(
+      `INSERT INTO transactions (user_id, type, title, property_ref, amount, status)
+       VALUES ($1, 'credit', 'Service Payment', $2, $3, 'Completed')`,
+      [service.provider_id, `Service Job #${id.substring(0, 8)}`, amount],
+    );
+
+    // Also deduct from owner's balance (already done via Paystack)
+    // Optionally record fee transaction for Propadi (the 7% fee already taken at payment time)
+
+    await client.query('COMMIT');
+
+    await sendPushToUser(
+      service.provider_id,
+      '✅ Payment Released',
+      `₦${amount.toLocaleString()} has been added to your wallet for the completed job.`,
+      { screen: 'ProviderDashboard', service_id: id },
+    );
+
+    res.json({ success: true, message: 'Funds released to provider' });
+  } catch (err) {
+    await client.query('ROLLBACK');
+    console.error('Release escrow error:', err);
+    res.status(500).json({ success: false, error: err.message });
+  } finally {
+    client.release();
+  }
+});
 
 // ==========================================
 // START SERVER
