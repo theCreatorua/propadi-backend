@@ -4320,6 +4320,7 @@ app.get('/api/providers/available', async (req, res) => {
 
 // POST /api/service-requests – owner creates a service request (linked to a maintenance request)
 // POST /api/service-requests – owner creates a service request (linked to maintenance OR direct)
+// POST /api/service-requests – owner creates a service request (linked to maintenance OR direct)
 app.post('/api/service-requests', async (req, res) => {
   const client = await pool.connect();
   try {
@@ -4344,18 +4345,8 @@ app.post('/api/service-requests', async (req, res) => {
       title,
       description,
       media_url,
+      estimated_cost, // ✅ ADDED: extract estimated_cost
     } = req.body;
-
-    // Remove after testing
-
-    console.log('=== DIRECT REQUEST DEBUG ===');
-    console.log('Budget (estimated_cost):', req.body.estimated_cost);
-    console.log('Trade type:', req.body.trade_type);
-    console.log('Title:', req.body.title);
-    console.log('Media URL:', req.body.media_url);
-    console.log('============================');
-
-    ////
 
     if (!trade_type) {
       return res
@@ -4388,10 +4379,12 @@ app.post('/api/service-requests', async (req, res) => {
       const maint = maintResult.rows[0];
       if (maint.owner_id !== user.id) {
         await client.query('ROLLBACK');
-        return res.status(403).json({
-          success: false,
-          error: 'You are not the owner of this property',
-        });
+        return res
+          .status(403)
+          .json({
+            success: false,
+            error: 'You are not the owner of this property',
+          });
       }
       propertyId = maint.property_id;
       maintDescription = maint.description;
@@ -4400,10 +4393,12 @@ app.post('/api/service-requests', async (req, res) => {
       // Direct request: property_id must be provided and owner must own it
       if (!property_id) {
         await client.query('ROLLBACK');
-        return res.status(400).json({
-          success: false,
-          error: 'Property ID is required for direct requests',
-        });
+        return res
+          .status(400)
+          .json({
+            success: false,
+            error: 'Property ID is required for direct requests',
+          });
       }
       const propCheck = await client.query(
         `SELECT owner_id FROM properties WHERE property_id = $1`,
@@ -4414,18 +4409,21 @@ app.post('/api/service-requests', async (req, res) => {
         propCheck.rows[0].owner_id !== user.id
       ) {
         await client.query('ROLLBACK');
-        return res.status(403).json({
-          success: false,
-          error: 'Property not found or you are not the owner',
-        });
+        return res
+          .status(403)
+          .json({
+            success: false,
+            error: 'Property not found or you are not the owner',
+          });
       }
-      // Use provided title/description or fallback
       if (!maintTitle || !maintDescription) {
         await client.query('ROLLBACK');
-        return res.status(400).json({
-          success: false,
-          error: 'Title and description are required for direct requests',
-        });
+        return res
+          .status(400)
+          .json({
+            success: false,
+            error: 'Title and description are required for direct requests',
+          });
       }
     }
 
@@ -4438,23 +4436,28 @@ app.post('/api/service-requests', async (req, res) => {
       );
       if (providerCheck.rows.length === 0) {
         await client.query('ROLLBACK');
-        return res.status(400).json({
-          success: false,
-          error: 'Selected provider is not available or not verified',
-        });
+        return res
+          .status(400)
+          .json({
+            success: false,
+            error: 'Selected provider is not available or not verified',
+          });
       }
       dailyWage = providerCheck.rows[0].daily_wage;
     }
 
-    const estimatedCost =
-      dailyWage * (estimated_hours ? Math.ceil(estimated_hours / 8) : 1);
+    // Calculate estimated cost if not provided directly
+    let finalEstimatedCost = estimated_cost;
+    if (!finalEstimatedCost && estimated_hours) {
+      finalEstimatedCost = dailyWage * Math.ceil(estimated_hours / 8);
+    }
 
-    // Insert service request
+    // Insert service request – using estimated_cost from body
     const insertResult = await client.query(
       `INSERT INTO service_requests 
-   (maintenance_request_id, property_id, owner_id, provider_id, trade_type, description, estimated_hours, estimated_cost, status, title, media_url)
-   VALUES ($1, $2, $3, $4, $5, $6, $7, $8, 'pending', $9, $10)
-   RETURNING *`,
+       (maintenance_request_id, property_id, owner_id, provider_id, trade_type, description, estimated_hours, estimated_cost, status, title, media_url)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, 'pending', $9, $10)
+       RETURNING *`,
       [
         maintenance_request_id || null,
         propertyId,
@@ -4463,7 +4466,7 @@ app.post('/api/service-requests', async (req, res) => {
         trade_type,
         maintDescription,
         estimated_hours || null,
-        estimated_cost, // ✅ this must be present
+        finalEstimatedCost || 0, // ✅ Use the provided or calculated cost
         maintTitle,
         media_url || null,
       ],
