@@ -3921,31 +3921,32 @@ app.get('/api/provider/dashboard', async (req, res) => {
     // Pending offers (assigned to this provider, not yet accepted)
     const pendingOffers = await pool.query(
       `SELECT sr.service_id, sr.trade_type, sr.estimated_hours, sr.created_at, sr.estimated_cost,
-          sr.maintenance_request_id,
-          COALESCE(sr.title, mr.title) as title, sr.description, mr.media_url,
-          p.title as property_title, p.address_city, p.address_state
-   FROM service_requests sr
-   LEFT JOIN maintenance_requests mr ON sr.maintenance_request_id = mr.request_id
-   JOIN properties p ON sr.property_id = p.property_id
-   WHERE sr.provider_id = $1 AND sr.status = 'pending'
-   ORDER BY sr.created_at ASC`,
+              sr.maintenance_request_id,
+              COALESCE(sr.title, mr.title) as title, sr.description, mr.media_url,
+              p.title as property_title, p.address_city, p.address_state
+       FROM service_requests sr
+       LEFT JOIN maintenance_requests mr ON sr.maintenance_request_id = mr.request_id
+       JOIN properties p ON sr.property_id = p.property_id
+       WHERE sr.provider_id = $1 AND sr.status = 'pending'
+       ORDER BY sr.created_at ASC`,
       [user.id],
     );
 
-    // Available jobs (open to any provider with matching trade)
+    // Available jobs (open to any provider with matching trade) – ✅ includes media_url
     const availableJobs = await pool.query(
       `SELECT sr.service_id, sr.trade_type, sr.estimated_hours, sr.created_at, sr.estimated_cost,
-          sr.maintenance_request_id,
-          COALESCE(sr.title, mr.title) as title, sr.description, mr.media_url,
-          p.title as property_title, p.address_city, p.address_state
-   FROM service_requests sr
-   LEFT JOIN maintenance_requests mr ON sr.maintenance_request_id = mr.request_id
-   JOIN properties p ON sr.property_id = p.property_id
-   WHERE sr.provider_id IS NULL
-     AND sr.status = 'pending'
-     AND LOWER(sr.trade_type) = LOWER($1)
-   ORDER BY sr.created_at ASC
-   LIMIT 30`,
+              sr.maintenance_request_id,
+              COALESCE(sr.title, mr.title) as title, sr.description,
+              COALESCE(sr.media_url, mr.media_url) as media_url,   -- ✅ fallback for direct requests
+              p.title as property_title, p.address_city, p.address_state
+       FROM service_requests sr
+       LEFT JOIN maintenance_requests mr ON sr.maintenance_request_id = mr.request_id
+       JOIN properties p ON sr.property_id = p.property_id
+       WHERE sr.provider_id IS NULL
+         AND sr.status = 'pending'
+         AND LOWER(sr.trade_type) = LOWER($1)
+       ORDER BY sr.created_at ASC
+       LIMIT 30`,
       [provider.trade_type],
     );
 
@@ -3983,6 +3984,7 @@ app.get('/api/provider/dashboard', async (req, res) => {
     res.status(500).json({ success: false, error: err.message });
   }
 });
+
 // PUT /api/provider/availability – update availability status
 app.put('/api/provider/availability', async (req, res) => {
   try {
