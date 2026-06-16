@@ -4452,9 +4452,9 @@ app.post('/api/service-requests', async (req, res) => {
     // Insert service request
     const insertResult = await client.query(
       `INSERT INTO service_requests 
-       (maintenance_request_id, property_id, owner_id, provider_id, trade_type, description, estimated_hours, estimated_cost, status, title, media_url)
-       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, 'pending', $9, $10)
-       RETURNING *`,
+   (maintenance_request_id, property_id, owner_id, provider_id, trade_type, description, estimated_hours, estimated_cost, status, title, media_url)
+   VALUES ($1, $2, $3, $4, $5, $6, $7, $8, 'pending', $9, $10)
+   RETURNING *`,
       [
         maintenance_request_id || null,
         propertyId,
@@ -4463,7 +4463,7 @@ app.post('/api/service-requests', async (req, res) => {
         trade_type,
         maintDescription,
         estimated_hours || null,
-        estimatedCost,
+        estimated_cost, // ✅ this must be present
         maintTitle,
         media_url || null,
       ],
