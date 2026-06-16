@@ -3921,29 +3921,31 @@ app.get('/api/provider/dashboard', async (req, res) => {
     // Pending offers (assigned to this provider, not yet accepted)
     const pendingOffers = await pool.query(
       `SELECT sr.service_id, sr.trade_type, sr.estimated_hours, sr.created_at, sr.estimated_cost,
-              COALESCE(sr.title, mr.title) as title, sr.description, mr.media_url,
-              p.title as property_title, p.address_city, p.address_state
-       FROM service_requests sr
-       LEFT JOIN maintenance_requests mr ON sr.maintenance_request_id = mr.request_id
-       JOIN properties p ON sr.property_id = p.property_id
-       WHERE sr.provider_id = $1 AND sr.status = 'pending'
-       ORDER BY sr.created_at ASC`,
+          sr.maintenance_request_id,
+          COALESCE(sr.title, mr.title) as title, sr.description, mr.media_url,
+          p.title as property_title, p.address_city, p.address_state
+   FROM service_requests sr
+   LEFT JOIN maintenance_requests mr ON sr.maintenance_request_id = mr.request_id
+   JOIN properties p ON sr.property_id = p.property_id
+   WHERE sr.provider_id = $1 AND sr.status = 'pending'
+   ORDER BY sr.created_at ASC`,
       [user.id],
     );
 
     // Available jobs (open to any provider with matching trade)
     const availableJobs = await pool.query(
       `SELECT sr.service_id, sr.trade_type, sr.estimated_hours, sr.created_at, sr.estimated_cost,
-              COALESCE(sr.title, mr.title) as title, sr.description, mr.media_url,
-              p.title as property_title, p.address_city, p.address_state
-       FROM service_requests sr
-       LEFT JOIN maintenance_requests mr ON sr.maintenance_request_id = mr.request_id
-       JOIN properties p ON sr.property_id = p.property_id
-       WHERE sr.provider_id IS NULL
-         AND sr.status = 'pending'
-         AND LOWER(sr.trade_type) = LOWER($1)
-       ORDER BY sr.created_at ASC
-       LIMIT 30`,
+          sr.maintenance_request_id,
+          COALESCE(sr.title, mr.title) as title, sr.description, mr.media_url,
+          p.title as property_title, p.address_city, p.address_state
+   FROM service_requests sr
+   LEFT JOIN maintenance_requests mr ON sr.maintenance_request_id = mr.request_id
+   JOIN properties p ON sr.property_id = p.property_id
+   WHERE sr.provider_id IS NULL
+     AND sr.status = 'pending'
+     AND LOWER(sr.trade_type) = LOWER($1)
+   ORDER BY sr.created_at ASC
+   LIMIT 30`,
       [provider.trade_type],
     );
 
@@ -4379,12 +4381,10 @@ app.post('/api/service-requests', async (req, res) => {
       const maint = maintResult.rows[0];
       if (maint.owner_id !== user.id) {
         await client.query('ROLLBACK');
-        return res
-          .status(403)
-          .json({
-            success: false,
-            error: 'You are not the owner of this property',
-          });
+        return res.status(403).json({
+          success: false,
+          error: 'You are not the owner of this property',
+        });
       }
       propertyId = maint.property_id;
       maintDescription = maint.description;
@@ -4393,12 +4393,10 @@ app.post('/api/service-requests', async (req, res) => {
       // Direct request: property_id must be provided and owner must own it
       if (!property_id) {
         await client.query('ROLLBACK');
-        return res
-          .status(400)
-          .json({
-            success: false,
-            error: 'Property ID is required for direct requests',
-          });
+        return res.status(400).json({
+          success: false,
+          error: 'Property ID is required for direct requests',
+        });
       }
       const propCheck = await client.query(
         `SELECT owner_id FROM properties WHERE property_id = $1`,
@@ -4409,21 +4407,17 @@ app.post('/api/service-requests', async (req, res) => {
         propCheck.rows[0].owner_id !== user.id
       ) {
         await client.query('ROLLBACK');
-        return res
-          .status(403)
-          .json({
-            success: false,
-            error: 'Property not found or you are not the owner',
-          });
+        return res.status(403).json({
+          success: false,
+          error: 'Property not found or you are not the owner',
+        });
       }
       if (!maintTitle || !maintDescription) {
         await client.query('ROLLBACK');
-        return res
-          .status(400)
-          .json({
-            success: false,
-            error: 'Title and description are required for direct requests',
-          });
+        return res.status(400).json({
+          success: false,
+          error: 'Title and description are required for direct requests',
+        });
       }
     }
 
@@ -4436,12 +4430,10 @@ app.post('/api/service-requests', async (req, res) => {
       );
       if (providerCheck.rows.length === 0) {
         await client.query('ROLLBACK');
-        return res
-          .status(400)
-          .json({
-            success: false,
-            error: 'Selected provider is not available or not verified',
-          });
+        return res.status(400).json({
+          success: false,
+          error: 'Selected provider is not available or not verified',
+        });
       }
       dailyWage = providerCheck.rows[0].daily_wage;
     }
