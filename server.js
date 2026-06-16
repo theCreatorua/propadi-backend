@@ -4346,6 +4346,17 @@ app.post('/api/service-requests', async (req, res) => {
       media_url,
     } = req.body;
 
+    // Remove after testing
+
+    console.log('=== DIRECT REQUEST DEBUG ===');
+    console.log('Budget (estimated_cost):', req.body.estimated_cost);
+    console.log('Trade type:', req.body.trade_type);
+    console.log('Title:', req.body.title);
+    console.log('Media URL:', req.body.media_url);
+    console.log('============================');
+
+    ////
+
     if (!trade_type) {
       return res
         .status(400)
