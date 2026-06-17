@@ -4917,11 +4917,12 @@ app.get(
 );
 
 // POST /api/service-requests/:id/counter – provider proposes a new price
+// POST /api/service-requests/:id/counter – provider proposes a new price with reason
 app.post('/api/service-requests/:id/counter', async (req, res) => {
   const client = await pool.connect();
   try {
     const { id } = req.params;
-    const { counter_price } = req.body;
+    const { counter_price, reason } = req.body;
     const authHeader = req.headers.authorization;
     if (!authHeader)
       return res.status(401).json({ success: false, error: 'Unauthorized' });
@@ -4941,7 +4942,6 @@ app.post('/api/service-requests/:id/counter', async (req, res) => {
 
     await client.query('BEGIN');
 
-    // Check service request exists and is pending, and provider is assigned
     const serviceResult = await client.query(
       `SELECT sr.*, u.name as owner_name
        FROM service_requests sr
@@ -4961,17 +4961,18 @@ app.post('/api/service-requests/:id/counter', async (req, res) => {
     const service = serviceResult.rows[0];
 
     await client.query(
-      `UPDATE service_requests SET counter_price = $1, price_status = 'provider_countered' WHERE service_id = $2`,
-      [parseFloat(counter_price), id],
+      `UPDATE service_requests 
+       SET counter_price = $1, counter_reason = $2, price_status = 'provider_countered' 
+       WHERE service_id = $3`,
+      [parseFloat(counter_price), reason || null, id],
     );
 
     await client.query('COMMIT');
 
-    // Notify owner
     await sendPushToUser(
       service.owner_id,
       '💬 Counter Offer Received',
-      `The provider has proposed ₦${parseFloat(counter_price).toLocaleString()} for your service request.`,
+      `The provider has proposed ₦${parseFloat(counter_price).toLocaleString()} for your service request.${reason ? ` Reason: ${reason}` : ''}`,
       { screen: 'ServiceRequest', service_id: id },
     );
 
@@ -5013,12 +5014,10 @@ app.put('/api/service-requests/:id/accept-price', async (req, res) => {
     );
     if (serviceResult.rows.length === 0) {
       await client.query('ROLLBACK');
-      return res
-        .status(404)
-        .json({
-          success: false,
-          error: 'Service request not found or not yours',
-        });
+      return res.status(404).json({
+        success: false,
+        error: 'Service request not found or not yours',
+      });
     }
     const service = serviceResult.rows[0];
 
@@ -5077,12 +5076,10 @@ app.post('/api/service-requests/:id/fund', async (req, res) => {
       [id, user.id],
     );
     if (serviceResult.rows.length === 0) {
-      return res
-        .status(404)
-        .json({
-          success: false,
-          error: 'Service request not found or not ready for funding',
-        });
+      return res.status(404).json({
+        success: false,
+        error: 'Service request not found or not ready for funding',
+      });
     }
     const service = serviceResult.rows[0];
 
@@ -5219,6 +5216,51 @@ app.put('/api/service-requests/:id/release', async (req, res) => {
     res.status(500).json({ success: false, error: err.message });
   } finally {
     client.release();
+  }
+});
+
+// PUT /api/service-requests/:id/in-progress – provider marks job as in progress
+app.put('/api/service-requests/:id/in-progress', async (req, res) => {
+  try {
+    const { id } = req.params;
+    const authHeader = req.headers.authorization;
+    if (!authHeader)
+      return res.status(401).json({ success: false, error: 'Unauthorized' });
+    const token = authHeader.split(' ')[1];
+    const {
+      data: { user },
+      error,
+    } = await supabase.auth.getUser(token);
+    if (error || !user)
+      return res.status(401).json({ success: false, error: 'Invalid token' });
+
+    const result = await pool.query(
+      `UPDATE service_requests SET status = 'in_progress' 
+       WHERE service_id = $1 AND provider_id = $2 AND status = 'accepted' 
+       RETURNING *`,
+      [id, user.id],
+    );
+    if (result.rows.length === 0) {
+      return res
+        .status(404)
+        .json({
+          success: false,
+          error: 'Job not found or not in accepted state',
+        });
+    }
+
+    // Notify owner
+    await sendPushToUser(
+      result.rows[0].owner_id,
+      '🔧 Work Started',
+      `The provider has started working on your service request.`,
+      { screen: 'ServiceRequest', service_id: id },
+    );
+
+    res.json({ success: true, message: 'Job marked as in progress' });
+  } catch (err) {
+    console.error('In-progress error:', err);
+    res.status(500).json({ success: false, error: err.message });
   }
 });
 
