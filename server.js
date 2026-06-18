@@ -4070,6 +4070,7 @@ app.get('/api/provider/dashboard', async (req, res) => {
 });
 
 // PUT /api/provider/availability – update availability status
+// PUT /api/provider/availability – update availability status (with guardrails)
 app.put('/api/provider/availability', async (req, res) => {
   try {
     const authHeader = req.headers.authorization;
@@ -4087,6 +4088,21 @@ app.put('/api/provider/availability', async (req, res) => {
     const allowed = ['available', 'at_work', 'unavailable', 'offline'];
     if (!allowed.includes(availability_status)) {
       return res.status(400).json({ success: false, error: 'Invalid status' });
+    }
+
+    // ✅ Prevent setting 'available' if provider has an active job
+    if (availability_status === 'available') {
+      const activeJob = await pool.query(
+        `SELECT current_job_id FROM service_providers WHERE provider_id = $1 AND current_job_id IS NOT NULL`,
+        [user.id],
+      );
+      if (activeJob.rows.length > 0) {
+        return res.status(400).json({
+          success: false,
+          error:
+            'You cannot set yourself as available while you have an active job. Please complete the job first.',
+        });
+      }
     }
 
     await pool.query(
@@ -4363,6 +4379,7 @@ app.put(
 // ==========================================
 
 // GET /api/providers/available – list verified providers by trade (simple location filter by city/state)
+// GET /api/providers/available – list verified providers by trade and location
 app.get('/api/providers/available', async (req, res) => {
   try {
     const { trade_type, city, state, limit = 20 } = req.query;
@@ -4379,7 +4396,7 @@ app.get('/api/providers/available', async (req, res) => {
       JOIN users u ON sp.provider_id = u.user_id
       WHERE sp.is_verified = true
         AND sp.availability_status = 'available'
-        AND sp.trade_type = $1
+        AND LOWER(sp.trade_type) = LOWER($1)
     `;
     const values = [trade_type];
     let paramIndex = 2;
@@ -4951,12 +4968,10 @@ app.post('/api/service-requests/:id/counter', async (req, res) => {
     );
     if (serviceResult.rows.length === 0) {
       await client.query('ROLLBACK');
-      return res
-        .status(404)
-        .json({
-          success: false,
-          error: 'Service request not found or not eligible for counter',
-        });
+      return res.status(404).json({
+        success: false,
+        error: 'Service request not found or not eligible for counter',
+      });
     }
     const service = serviceResult.rows[0];
 
@@ -5241,12 +5256,10 @@ app.put('/api/service-requests/:id/in-progress', async (req, res) => {
       [id, user.id],
     );
     if (result.rows.length === 0) {
-      return res
-        .status(404)
-        .json({
-          success: false,
-          error: 'Job not found or not in accepted state',
-        });
+      return res.status(404).json({
+        success: false,
+        error: 'Job not found or not in accepted state',
+      });
     }
 
     // Notify owner
