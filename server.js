@@ -3964,6 +3964,7 @@ app.post('/api/provider/upload-license', async (req, res) => {
 });
 
 // GET /api/provider/dashboard – get provider dashboard data
+// GET /api/provider/dashboard – get provider dashboard data
 app.get('/api/provider/dashboard', async (req, res) => {
   try {
     const authHeader = req.headers.authorization;
@@ -3988,19 +3989,20 @@ app.get('/api/provider/dashboard', async (req, res) => {
     }
     const provider = providerResult.rows[0];
 
-    // Current job (accepted)
-    const currentJobResult = await pool.query(
-      `SELECT sr.service_id, mr.title, mr.description, mr.media_url,
-              p.title as property_title, p.address_street, p.address_city, p.address_state, sr.status
-       FROM service_requests sr
-       JOIN maintenance_requests mr ON sr.maintenance_request_id = mr.request_id
-       JOIN properties p ON sr.property_id = p.property_id
-       WHERE sr.provider_id = $1 AND sr.status = 'accepted'
-       ORDER BY sr.created_at DESC
-       LIMIT 1`,
-      [user.id],
-    );
-    const currentJob = currentJobResult.rows[0] || null;
+    // ✅ Current job – fetch using current_job_id directly
+    let currentJob = null;
+    if (provider.current_job_id) {
+      const currentJobResult = await pool.query(
+        `SELECT sr.service_id, mr.title, mr.description, mr.media_url,
+                p.title as property_title, p.address_street, p.address_city, p.address_state, sr.status
+         FROM service_requests sr
+         LEFT JOIN maintenance_requests mr ON sr.maintenance_request_id = mr.request_id
+         JOIN properties p ON sr.property_id = p.property_id
+         WHERE sr.service_id = $1`,
+        [provider.current_job_id],
+      );
+      if (currentJobResult.rows.length) currentJob = currentJobResult.rows[0];
+    }
 
     // Pending offers (assigned to this provider, not yet accepted)
     const pendingOffers = await pool.query(
@@ -4016,12 +4018,12 @@ app.get('/api/provider/dashboard', async (req, res) => {
       [user.id],
     );
 
-    // Available jobs (open to any provider with matching trade) – ✅ includes media_url
+    // Available jobs (open to any provider with matching trade)
     const availableJobs = await pool.query(
       `SELECT sr.service_id, sr.trade_type, sr.estimated_hours, sr.created_at, sr.estimated_cost,
               sr.maintenance_request_id,
               COALESCE(sr.title, mr.title) as title, sr.description,
-              COALESCE(sr.media_url, mr.media_url) as media_url,   -- ✅ fallback for direct requests
+              COALESCE(sr.media_url, mr.media_url) as media_url,
               p.title as property_title, p.address_city, p.address_state
        FROM service_requests sr
        LEFT JOIN maintenance_requests mr ON sr.maintenance_request_id = mr.request_id
