@@ -5297,6 +5297,377 @@ app.put('/api/service-requests/:id/in-progress', async (req, res) => {
   }
 });
 
+// GET /api/maintenance-visits/:userId – list visits where user is owner, provider, or renter
+app.get('/api/maintenance-visits/:userId', async (req, res) => {
+  try {
+    const { userId } = req.params;
+    const authHeader = req.headers.authorization;
+    if (!authHeader)
+      return res.status(401).json({ success: false, error: 'Unauthorized' });
+    const token = authHeader.split(' ')[1];
+    const {
+      data: { user },
+      error,
+    } = await supabase.auth.getUser(token);
+    if (error || !user || user.id !== userId)
+      return res.status(403).json({ success: false, error: 'Forbidden' });
+
+    // Fetch visits where user is owner, provider, or renter
+    const query = `
+      SELECT 
+        mv.visit_id,
+        mv.scheduled_start,
+        mv.scheduled_end,
+        mv.status,
+        mv.check_in_time,
+        mv.check_out_time,
+        mv.renter_safety_confirmed,
+        mv.provider_safety_confirmed,
+        sr.service_id,
+        sr.trade_type,
+        sr.title,
+        sr.description,
+        p.property_id,
+        p.title as property_title,
+        p.address_street,
+        p.address_city,
+        p.address_state,
+        u_owner.name as owner_name,
+        u_provider.name as provider_name,
+        u_renter.name as renter_name
+      FROM maintenance_visits mv
+      JOIN service_requests sr ON mv.service_request_id = sr.service_id
+      JOIN properties p ON sr.property_id = p.property_id
+      LEFT JOIN users u_owner ON sr.owner_id = u_owner.user_id
+      LEFT JOIN users u_provider ON sr.provider_id = u_provider.user_id
+      LEFT JOIN users u_renter ON sr.renter_id = u_renter.user_id
+      WHERE sr.owner_id = $1 OR sr.provider_id = $1 OR sr.renter_id = $1
+      ORDER BY mv.scheduled_start DESC
+    `;
+    const result = await pool.query(query, [userId]);
+    res.json({ success: true, visits: result.rows });
+  } catch (err) {
+    console.error('Error fetching visits:', err);
+    res.status(500).json({ success: false, error: err.message });
+  }
+});
+
+// POST /api/maintenance-visits – owner schedules a visit (generates QR/PIN)
+app.post('/api/maintenance-visits', async (req, res) => {
+  const client = await pool.connect();
+  try {
+    const authHeader = req.headers.authorization;
+    if (!authHeader)
+      return res.status(401).json({ success: false, error: 'Unauthorized' });
+    const token = authHeader.split(' ')[1];
+    const {
+      data: { user },
+      error,
+    } = await supabase.auth.getUser(token);
+    if (error || !user)
+      return res.status(401).json({ success: false, error: 'Invalid token' });
+
+    const { service_request_id, scheduled_start, scheduled_end } = req.body;
+    if (!service_request_id || !scheduled_start) {
+      return res
+        .status(400)
+        .json({
+          success: false,
+          error: 'Service request ID and start time are required',
+        });
+    }
+
+    await client.query('BEGIN');
+
+    // Verify ownership
+    const serviceCheck = await client.query(
+      `SELECT owner_id FROM service_requests WHERE service_id = $1`,
+      [service_request_id],
+    );
+    if (
+      serviceCheck.rows.length === 0 ||
+      serviceCheck.rows[0].owner_id !== user.id
+    ) {
+      await client.query('ROLLBACK');
+      return res
+        .status(403)
+        .json({
+          success: false,
+          error: 'You are not the owner of this service request',
+        });
+    }
+
+    // Generate secure PIN (6 digits) and QR code (for simplicity, we store a random string)
+    const pin = Math.floor(100000 + Math.random() * 900000).toString();
+    const qrCode = `VISIT_${Date.now()}_${Math.random().toString(36).substring(2, 8)}`;
+
+    const insertResult = await client.query(
+      `INSERT INTO maintenance_visits 
+       (service_request_id, scheduled_start, scheduled_end, qr_code, pin, status)
+       VALUES ($1, $2, $3, $4, $5, 'scheduled')
+       RETURNING *`,
+      [service_request_id, scheduled_start, scheduled_end || null, qrCode, pin],
+    );
+    const visit = insertResult.rows[0];
+
+    await client.query('COMMIT');
+
+    // Notify provider and renter
+    const serviceResult = await client.query(
+      `SELECT provider_id, renter_id FROM service_requests WHERE service_id = $1`,
+      [service_request_id],
+    );
+    if (serviceResult.rows.length > 0) {
+      const { provider_id, renter_id } = serviceResult.rows[0];
+      await sendPushToUser(
+        provider_id,
+        '📅 Visit Scheduled',
+        `A maintenance visit has been scheduled for ${new Date(scheduled_start).toLocaleString()}. Please confirm your availability.`,
+        { screen: 'Maintenance', visit_id: visit.visit_id },
+      );
+      await sendPushToUser(
+        renter_id,
+        '📅 Visit Scheduled',
+        `A maintenance visit has been scheduled for ${new Date(scheduled_start).toLocaleString()}. Please confirm your availability.`,
+        { screen: 'Maintenance', visit_id: visit.visit_id },
+      );
+    }
+
+    res.json({ success: true, visit });
+  } catch (err) {
+    await client.query('ROLLBACK');
+    console.error('Schedule visit error:', err);
+    res.status(500).json({ success: false, error: err.message });
+  } finally {
+    client.release();
+  }
+});
+
+// PUT /api/maintenance-visits/:id/confirm – provider or renter confirms
+app.put('/api/maintenance-visits/:id/confirm', async (req, res) => {
+  try {
+    const { id } = req.params;
+    const authHeader = req.headers.authorization;
+    if (!authHeader)
+      return res.status(401).json({ success: false, error: 'Unauthorized' });
+    const token = authHeader.split(' ')[1];
+    const {
+      data: { user },
+      error,
+    } = await supabase.auth.getUser(token);
+    if (error || !user)
+      return res.status(401).json({ success: false, error: 'Invalid token' });
+
+    // Update visit status to 'scheduled' (already) – we can track who confirmed in future
+    // For simplicity, we just mark that it's confirmed by setting status to 'scheduled' (already)
+    // but we can add a confirmed_at column if needed.
+    // For now, we send a notification to the owner.
+    const visitResult = await pool.query(
+      `SELECT service_request_id FROM maintenance_visits WHERE visit_id = $1`,
+      [id],
+    );
+    if (visitResult.rows.length === 0) {
+      return res.status(404).json({ success: false, error: 'Visit not found' });
+    }
+    const serviceId = visitResult.rows[0].service_request_id;
+    const serviceResult = await pool.query(
+      `SELECT owner_id FROM service_requests WHERE service_id = $1`,
+      [serviceId],
+    );
+    if (serviceResult.rows.length > 0) {
+      await sendPushToUser(
+        serviceResult.rows[0].owner_id,
+        '✅ Visit Confirmed',
+        `The visit has been confirmed by ${user.email}.`,
+        { screen: 'Maintenance', visit_id: id },
+      );
+    }
+
+    res.json({ success: true, message: 'Confirmation sent' });
+  } catch (err) {
+    console.error('Confirm visit error:', err);
+    res.status(500).json({ success: false, error: err.message });
+  }
+});
+
+// POST /api/maintenance-visits/:id/checkin – provider checks in with QR/PIN and GPS
+app.post('/api/maintenance-visits/:id/checkin', async (req, res) => {
+  try {
+    const { id } = req.params;
+    const { pin, gps_lat, gps_lng } = req.body;
+    const authHeader = req.headers.authorization;
+    if (!authHeader)
+      return res.status(401).json({ success: false, error: 'Unauthorized' });
+    const token = authHeader.split(' ')[1];
+    const {
+      data: { user },
+      error,
+    } = await supabase.auth.getUser(token);
+    if (error || !user)
+      return res.status(401).json({ success: false, error: 'Invalid token' });
+
+    if (!pin) {
+      return res.status(400).json({ success: false, error: 'PIN is required' });
+    }
+
+    const visitResult = await pool.query(
+      `SELECT * FROM maintenance_visits WHERE visit_id = $1 AND status = 'scheduled'`,
+      [id],
+    );
+    if (visitResult.rows.length === 0) {
+      return res
+        .status(404)
+        .json({
+          success: false,
+          error: 'Visit not found or not in scheduled state',
+        });
+    }
+    const visit = visitResult.rows[0];
+
+    // Verify PIN
+    if (visit.pin !== pin) {
+      return res.status(400).json({ success: false, error: 'Invalid PIN' });
+    }
+
+    // Update check-in
+    await pool.query(
+      `UPDATE maintenance_visits 
+       SET status = 'checked_in', 
+           check_in_time = NOW(), 
+           gps_lat = $1, 
+           gps_lng = $2 
+       WHERE visit_id = $3`,
+      [gps_lat || null, gps_lng || null, id],
+    );
+
+    // Notify owner and renter
+    const serviceResult = await pool.query(
+      `SELECT owner_id, renter_id FROM service_requests WHERE service_id = (SELECT service_request_id FROM maintenance_visits WHERE visit_id = $1)`,
+      [id],
+    );
+    if (serviceResult.rows.length > 0) {
+      const { owner_id, renter_id } = serviceResult.rows[0];
+      await sendPushToUser(
+        owner_id,
+        '🔧 Provider Checked In',
+        `The provider has arrived for the scheduled visit.`,
+        { screen: 'Maintenance', visit_id: id },
+      );
+      await sendPushToUser(
+        renter_id,
+        '🔧 Provider Checked In',
+        `The provider has arrived. Please ensure safety.`,
+        { screen: 'Maintenance', visit_id: id },
+      );
+    }
+
+    res.json({ success: true, message: 'Check-in successful' });
+  } catch (err) {
+    console.error('Check-in error:', err);
+    res.status(500).json({ success: false, error: err.message });
+  }
+});
+
+// PUT /api/maintenance-visits/:id/safety – confirm safety (renter or provider)
+app.put('/api/maintenance-visits/:id/safety', async (req, res) => {
+  try {
+    const { id } = req.params;
+    const { role } = req.body; // 'renter' or 'provider'
+    const authHeader = req.headers.authorization;
+    if (!authHeader)
+      return res.status(401).json({ success: false, error: 'Unauthorized' });
+    const token = authHeader.split(' ')[1];
+    const {
+      data: { user },
+      error,
+    } = await supabase.auth.getUser(token);
+    if (error || !user)
+      return res.status(401).json({ success: false, error: 'Invalid token' });
+
+    const updateField =
+      role === 'renter'
+        ? 'renter_safety_confirmed'
+        : 'provider_safety_confirmed';
+    await pool.query(
+      `UPDATE maintenance_visits SET ${updateField} = TRUE WHERE visit_id = $1`,
+      [id],
+    );
+
+    res.json({ success: true, message: 'Safety confirmed' });
+  } catch (err) {
+    console.error('Safety confirmation error:', err);
+    res.status(500).json({ success: false, error: err.message });
+  }
+});
+
+// PUT /api/maintenance-visits/:id/status – update status (in_progress, completed)
+app.put('/api/maintenance-visits/:id/status', async (req, res) => {
+  try {
+    const { id } = req.params;
+    const { status } = req.body;
+    const allowed = ['in_progress', 'completed', 'cancelled'];
+    if (!allowed.includes(status)) {
+      return res.status(400).json({ success: false, error: 'Invalid status' });
+    }
+    const authHeader = req.headers.authorization;
+    if (!authHeader)
+      return res.status(401).json({ success: false, error: 'Unauthorized' });
+    const token = authHeader.split(' ')[1];
+    const {
+      data: { user },
+      error,
+    } = await supabase.auth.getUser(token);
+    if (error || !user)
+      return res.status(401).json({ success: false, error: 'Invalid token' });
+
+    // Only provider or owner can update status? For now, allow provider to mark in_progress and completed.
+    // We'll check if user is the provider.
+    const visitResult = await pool.query(
+      `SELECT mv.*, sr.provider_id 
+       FROM maintenance_visits mv
+       JOIN service_requests sr ON mv.service_request_id = sr.service_id
+       WHERE mv.visit_id = $1`,
+      [id],
+    );
+    if (visitResult.rows.length === 0) {
+      return res.status(404).json({ success: false, error: 'Visit not found' });
+    }
+    const visit = visitResult.rows[0];
+    if (visit.provider_id !== user.id && status !== 'cancelled') {
+      return res
+        .status(403)
+        .json({ success: false, error: 'You are not the assigned provider' });
+    }
+
+    await pool.query(
+      `UPDATE maintenance_visits SET status = $1 WHERE visit_id = $2`,
+      [status, id],
+    );
+
+    // If completed, notify owner to release payment
+    if (status === 'completed') {
+      const serviceId = visit.service_request_id;
+      const serviceResult = await pool.query(
+        `SELECT owner_id FROM service_requests WHERE service_id = $1`,
+        [serviceId],
+      );
+      if (serviceResult.rows.length > 0) {
+        await sendPushToUser(
+          serviceResult.rows[0].owner_id,
+          '✅ Visit Completed',
+          `The provider has marked the visit as completed. Please confirm and release payment.`,
+          { screen: 'ServiceRequest', service_id: serviceId },
+        );
+      }
+    }
+
+    res.json({ success: true, message: `Visit status updated to ${status}` });
+  } catch (err) {
+    console.error('Update visit status error:', err);
+    res.status(500).json({ success: false, error: err.message });
+  }
+});
+
 // ==========================================
 // START SERVER
 // ==========================================
