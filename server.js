@@ -3963,8 +3963,7 @@ app.post('/api/provider/upload-license', async (req, res) => {
   }
 });
 
-// GET /api/provider/dashboard – get provider dashboard data
-// GET /api/provider/dashboard – get provider dashboard data
+// GET /api/provider/dashboard – get provider dashboard data (with visit info)
 app.get('/api/provider/dashboard', async (req, res) => {
   try {
     const authHeader = req.headers.authorization;
@@ -3989,23 +3988,35 @@ app.get('/api/provider/dashboard', async (req, res) => {
     }
     const provider = providerResult.rows[0];
 
-    // ✅ Current job – fetch using current_job_id directly
+    // Current job (accepted) – join to get full details
     let currentJob = null;
-    if (provider.current_job_id) {
-      // Inside the current job query:
-      const currentJobResult = await pool.query(
-        `SELECT sr.service_id, 
-          COALESCE(sr.title, mr.title) as title,
-          COALESCE(sr.description, mr.description) as description,
-          sr.media_url, mr.media_url as maintenance_media_url,
-          p.title as property_title, p.address_street, p.address_city, p.address_state, sr.status
-   FROM service_requests sr
-   LEFT JOIN maintenance_requests mr ON sr.maintenance_request_id = mr.request_id
-   JOIN properties p ON sr.property_id = p.property_id
-   WHERE sr.service_id = $1`,
-        [provider.current_job_id],
+    const currentJobResult = await pool.query(
+      `SELECT sr.service_id, mr.title, mr.description, mr.media_url,
+              p.title as property_title, p.address_street, p.address_city, p.address_state, sr.status,
+              sr.estimated_cost, sr.final_price
+       FROM service_requests sr
+       LEFT JOIN maintenance_requests mr ON sr.maintenance_request_id = mr.request_id
+       JOIN properties p ON sr.property_id = p.property_id
+       WHERE sr.provider_id = $1 AND sr.status = 'accepted'
+       ORDER BY sr.created_at DESC
+       LIMIT 1`,
+      [user.id],
+    );
+    if (currentJobResult.rows.length > 0) {
+      currentJob = currentJobResult.rows[0];
+
+      // Fetch associated visit (if any)
+      const visitResult = await pool.query(
+        `SELECT visit_id, scheduled_start, scheduled_end, status, check_in_time, check_out_time
+         FROM maintenance_visits
+         WHERE service_request_id = $1
+         ORDER BY created_at DESC
+         LIMIT 1`,
+        [currentJob.service_id],
       );
-      if (currentJobResult.rows.length) currentJob = currentJobResult.rows[0];
+      if (visitResult.rows.length > 0) {
+        currentJob.visit = visitResult.rows[0];
+      }
     }
 
     // Pending offers (assigned to this provider, not yet accepted)
