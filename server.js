@@ -5369,12 +5369,10 @@ app.post('/api/maintenance-visits', async (req, res) => {
 
     const { service_request_id, scheduled_start, scheduled_end } = req.body;
     if (!service_request_id || !scheduled_start) {
-      return res
-        .status(400)
-        .json({
-          success: false,
-          error: 'Service request ID and start time are required',
-        });
+      return res.status(400).json({
+        success: false,
+        error: 'Service request ID and start time are required',
+      });
     }
 
     await client.query('BEGIN');
@@ -5389,12 +5387,10 @@ app.post('/api/maintenance-visits', async (req, res) => {
       serviceCheck.rows[0].owner_id !== user.id
     ) {
       await client.query('ROLLBACK');
-      return res
-        .status(403)
-        .json({
-          success: false,
-          error: 'You are not the owner of this service request',
-        });
+      return res.status(403).json({
+        success: false,
+        error: 'You are not the owner of this service request',
+      });
     }
 
     // Generate secure PIN (6 digits) and QR code (for simplicity, we store a random string)
@@ -5515,12 +5511,10 @@ app.post('/api/maintenance-visits/:id/checkin', async (req, res) => {
       [id],
     );
     if (visitResult.rows.length === 0) {
-      return res
-        .status(404)
-        .json({
-          success: false,
-          error: 'Visit not found or not in scheduled state',
-        });
+      return res.status(404).json({
+        success: false,
+        error: 'Visit not found or not in scheduled state',
+      });
     }
     const visit = visitResult.rows[0];
 
@@ -5664,6 +5658,61 @@ app.put('/api/maintenance-visits/:id/status', async (req, res) => {
     res.json({ success: true, message: `Visit status updated to ${status}` });
   } catch (err) {
     console.error('Update visit status error:', err);
+    res.status(500).json({ success: false, error: err.message });
+  }
+});
+
+// GET /api/maintenance-visits/single/:visitId – get details of a single visit
+app.get('/api/maintenance-visits/single/:visitId', async (req, res) => {
+  try {
+    const { visitId } = req.params;
+    const authHeader = req.headers.authorization;
+    if (!authHeader)
+      return res.status(401).json({ success: false, error: 'Unauthorized' });
+    const token = authHeader.split(' ')[1];
+    const {
+      data: { user },
+      error,
+    } = await supabase.auth.getUser(token);
+    if (error || !user)
+      return res.status(401).json({ success: false, error: 'Invalid token' });
+
+    const query = `
+      SELECT 
+        mv.visit_id,
+        mv.scheduled_start,
+        mv.scheduled_end,
+        mv.status,
+        mv.pin,
+        mv.check_in_time,
+        mv.renter_safety_confirmed,
+        mv.provider_safety_confirmed,
+        sr.service_id,
+        sr.trade_type,
+        sr.title,
+        sr.description,
+        p.title as property_title,
+        p.address_street,
+        p.address_city,
+        p.address_state,
+        u_owner.name as owner_name,
+        u_provider.name as provider_name,
+        u_renter.name as renter_name
+      FROM maintenance_visits mv
+      JOIN service_requests sr ON mv.service_request_id = sr.service_id
+      JOIN properties p ON sr.property_id = p.property_id
+      LEFT JOIN users u_owner ON sr.owner_id = u_owner.user_id
+      LEFT JOIN users u_provider ON sr.provider_id = u_provider.user_id
+      LEFT JOIN users u_renter ON sr.renter_id = u_renter.user_id
+      WHERE mv.visit_id = $1
+    `;
+    const result = await pool.query(query, [visitId]);
+    if (result.rows.length === 0) {
+      return res.status(404).json({ success: false, error: 'Visit not found' });
+    }
+    res.json({ success: true, visit: result.rows[0] });
+  } catch (err) {
+    console.error('Error fetching visit:', err);
     res.status(500).json({ success: false, error: err.message });
   }
 });
