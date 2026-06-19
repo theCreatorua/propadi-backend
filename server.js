@@ -3992,13 +3992,17 @@ app.get('/api/provider/dashboard', async (req, res) => {
     // ✅ Current job – fetch using current_job_id directly
     let currentJob = null;
     if (provider.current_job_id) {
+      // Inside the current job query:
       const currentJobResult = await pool.query(
-        `SELECT sr.service_id, mr.title, mr.description, mr.media_url,
-                p.title as property_title, p.address_street, p.address_city, p.address_state, sr.status
-         FROM service_requests sr
-         LEFT JOIN maintenance_requests mr ON sr.maintenance_request_id = mr.request_id
-         JOIN properties p ON sr.property_id = p.property_id
-         WHERE sr.service_id = $1`,
+        `SELECT sr.service_id, 
+          COALESCE(sr.title, mr.title) as title,
+          COALESCE(sr.description, mr.description) as description,
+          sr.media_url, mr.media_url as maintenance_media_url,
+          p.title as property_title, p.address_street, p.address_city, p.address_state, sr.status
+   FROM service_requests sr
+   LEFT JOIN maintenance_requests mr ON sr.maintenance_request_id = mr.request_id
+   JOIN properties p ON sr.property_id = p.property_id
+   WHERE sr.service_id = $1`,
         [provider.current_job_id],
       );
       if (currentJobResult.rows.length) currentJob = currentJobResult.rows[0];
@@ -4670,6 +4674,20 @@ app.put('/api/service-requests/:id/accept', async (req, res) => {
       return res.status(401).json({ success: false, error: 'Invalid token' });
 
     await client.query('BEGIN');
+
+    // ✅ Check if provider already has a current job
+    const providerCheck = await client.query(
+      `SELECT current_job_id FROM service_providers WHERE provider_id = $1`,
+      [user.id],
+    );
+    if (providerCheck.rows.length > 0 && providerCheck.rows[0].current_job_id) {
+      await client.query('ROLLBACK');
+      return res.status(400).json({
+        success: false,
+        error:
+          'You already have an active job. Please complete it before accepting another.',
+      });
+    }
 
     // Get service request
     const serviceResult = await client.query(
