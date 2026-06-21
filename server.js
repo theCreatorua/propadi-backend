@@ -5032,6 +5032,76 @@ app.post('/api/service-requests/:id/counter', async (req, res) => {
   }
 });
 
+// PUT /api/service-requests/:id/decline-counter – owner declines provider counter offer
+app.put('/api/service-requests/:id/decline-counter', async (req, res) => {
+  const client = await pool.connect();
+  try {
+    const { id } = req.params;
+    const authHeader = req.headers.authorization;
+    if (!authHeader)
+      return res.status(401).json({ success: false, error: 'Unauthorized' });
+    const token = authHeader.split(' ')[1];
+    const {
+      data: { user },
+      error,
+    } = await supabase.auth.getUser(token);
+    if (error || !user)
+      return res.status(401).json({ success: false, error: 'Invalid token' });
+
+    await client.query('BEGIN');
+
+    // Verify ownership and that a counter exists
+    const serviceResult = await client.query(
+      `SELECT sr.*, sp.provider_id
+       FROM service_requests sr
+       LEFT JOIN service_providers sp ON sr.provider_id = sp.provider_id
+       WHERE sr.service_id = $1 AND sr.owner_id = $2 AND sr.price_status = 'provider_countered'`,
+      [id, user.id],
+    );
+    if (serviceResult.rows.length === 0) {
+      await client.query('ROLLBACK');
+      return res.status(404).json({
+        success: false,
+        error: 'Service request not found, not yours, or no counter to decline',
+      });
+    }
+    const service = serviceResult.rows[0];
+
+    // Reset price status, clear counter fields
+    await client.query(
+      `UPDATE service_requests 
+       SET price_status = 'owner_proposed', 
+           counter_price = NULL, 
+           counter_reason = NULL 
+       WHERE service_id = $1`,
+      [id],
+    );
+
+    await client.query('COMMIT');
+
+    // Notify provider that counter was declined
+    if (service.provider_id) {
+      await sendPushToUser(
+        service.provider_id,
+        '❌ Counter Declined',
+        `The owner has declined your counter offer for "${service.title || 'job'}". The original budget remains.`,
+        { screen: 'ProviderDashboard', service_id: id },
+      );
+    }
+
+    res.json({
+      success: true,
+      message: 'Counter offer declined. Price reset to owner proposed.',
+    });
+  } catch (err) {
+    await client.query('ROLLBACK');
+    console.error('Decline counter error:', err);
+    res.status(500).json({ success: false, error: err.message });
+  } finally {
+    client.release();
+  }
+});
+
 // PUT /api/service-requests/:id/accept-price – owner accepts the final price
 app.put('/api/service-requests/:id/accept-price', async (req, res) => {
   const client = await pool.connect();
