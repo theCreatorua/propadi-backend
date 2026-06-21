@@ -5379,6 +5379,7 @@ app.put('/api/service-requests/:id/in-progress', async (req, res) => {
 });
 
 // GET /api/maintenance-visits/:userId – list visits where user is owner, provider, or renter
+// GET /api/maintenance-visits/:userId – list visits where user is owner, provider, or renter
 app.get('/api/maintenance-visits/:userId', async (req, res) => {
   try {
     const { userId } = req.params;
@@ -5393,7 +5394,7 @@ app.get('/api/maintenance-visits/:userId', async (req, res) => {
     if (error || !user || user.id !== userId)
       return res.status(403).json({ success: false, error: 'Forbidden' });
 
-    // Fetch visits where user is owner, provider, or renter
+    // Fetch visits where user is owner, provider, or renter (via maintenance_requests)
     const query = `
       SELECT 
         mv.visit_id,
@@ -5406,8 +5407,8 @@ app.get('/api/maintenance-visits/:userId', async (req, res) => {
         mv.provider_safety_confirmed,
         sr.service_id,
         sr.trade_type,
-        sr.title,
-        sr.description,
+        COALESCE(sr.title, mr.title) as title,
+        COALESCE(sr.description, mr.description) as description,
         p.property_id,
         p.title as property_title,
         p.address_street,
@@ -5418,11 +5419,12 @@ app.get('/api/maintenance-visits/:userId', async (req, res) => {
         u_renter.name as renter_name
       FROM maintenance_visits mv
       JOIN service_requests sr ON mv.service_request_id = sr.service_id
+      LEFT JOIN maintenance_requests mr ON sr.maintenance_request_id = mr.request_id
       JOIN properties p ON sr.property_id = p.property_id
       LEFT JOIN users u_owner ON sr.owner_id = u_owner.user_id
       LEFT JOIN users u_provider ON sr.provider_id = u_provider.user_id
-      LEFT JOIN users u_renter ON sr.renter_id = u_renter.user_id
-      WHERE sr.owner_id = $1 OR sr.provider_id = $1 OR sr.renter_id = $1
+      LEFT JOIN users u_renter ON mr.renter_id = u_renter.user_id
+      WHERE sr.owner_id = $1 OR sr.provider_id = $1 OR mr.renter_id = $1
       ORDER BY mv.scheduled_start DESC
     `;
     const result = await pool.query(query, [userId]);
