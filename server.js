@@ -3990,16 +3990,26 @@ app.get('/api/provider/dashboard', async (req, res) => {
 
     // Current job (accepted) – join to get full details
     let currentJob = null;
+    // Current job (accepted or in_progress)
     const currentJobResult = await pool.query(
-      `SELECT sr.service_id, mr.title, mr.description, mr.media_url,
-              p.title as property_title, p.address_street, p.address_city, p.address_state, sr.status,
-              sr.estimated_cost, sr.final_price
-       FROM service_requests sr
-       LEFT JOIN maintenance_requests mr ON sr.maintenance_request_id = mr.request_id
-       JOIN properties p ON sr.property_id = p.property_id
-       WHERE sr.provider_id = $1 AND sr.status = 'accepted'
-       ORDER BY sr.created_at DESC
-       LIMIT 1`,
+      `SELECT sr.service_id, 
+          COALESCE(sr.title, mr.title) as title, 
+          COALESCE(sr.description, mr.description) as description, 
+          sr.media_url, 
+          mr.media_url as maintenance_media_url,
+          p.title as property_title, 
+          p.address_street, 
+          p.address_city, 
+          p.address_state, 
+          sr.status,
+          sr.estimated_cost, 
+          sr.final_price
+   FROM service_requests sr
+   LEFT JOIN maintenance_requests mr ON sr.maintenance_request_id = mr.request_id
+   JOIN properties p ON sr.property_id = p.property_id
+   WHERE sr.provider_id = $1 AND sr.status IN ('accepted', 'in_progress')
+   ORDER BY sr.created_at DESC
+   LIMIT 1`,
       [user.id],
     );
     if (currentJobResult.rows.length > 0) {
@@ -4051,15 +4061,17 @@ app.get('/api/provider/dashboard', async (req, res) => {
       [provider.trade_type],
     );
 
-    // Job history
+    // Job history (completed or rejected)
     const jobHistory = await pool.query(
-      `SELECT sr.*, COALESCE(sr.title, mr.title) as title, p.title as property_title
-       FROM service_requests sr
-       LEFT JOIN maintenance_requests mr ON sr.maintenance_request_id = mr.request_id
-       JOIN properties p ON sr.property_id = p.property_id
-       WHERE sr.provider_id = $1 AND sr.status IN ('completed', 'rejected')
-       ORDER BY sr.completed_at DESC
-       LIMIT 20`,
+      `SELECT sr.*, 
+          COALESCE(sr.title, mr.title) as title, 
+          p.title as property_title
+   FROM service_requests sr
+   LEFT JOIN maintenance_requests mr ON sr.maintenance_request_id = mr.request_id
+   JOIN properties p ON sr.property_id = p.property_id
+   WHERE sr.provider_id = $1 AND sr.status IN ('completed', 'rejected')
+   ORDER BY sr.completed_at DESC
+   LIMIT 20`,
       [user.id],
     );
 
