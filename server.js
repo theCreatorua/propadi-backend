@@ -4681,6 +4681,7 @@ app.get('/api/service-requests/pending', async (req, res) => {
 });
 
 // PUT /api/service-requests/:id/accept – provider accepts a job
+// PUT /api/service-requests/:id/accept – provider accepts a job
 app.put('/api/service-requests/:id/accept', async (req, res) => {
   const client = await pool.connect();
   try {
@@ -4698,7 +4699,7 @@ app.put('/api/service-requests/:id/accept', async (req, res) => {
 
     await client.query('BEGIN');
 
-    // ✅ Check if provider already has a current job
+    // Check if provider already has a current job
     const providerCheck = await client.query(
       `SELECT current_job_id FROM service_providers WHERE provider_id = $1`,
       [user.id],
@@ -4712,13 +4713,13 @@ app.put('/api/service-requests/:id/accept', async (req, res) => {
       });
     }
 
-    // Get service request
+    // Get service request details
     const serviceResult = await client.query(
       `SELECT sr.*, p.address_street, p.address_city, p.address_state
        FROM service_requests sr
        JOIN properties p ON sr.property_id = p.property_id
-       WHERE sr.service_id = $1 AND sr.status = 'pending'`,
-      [id],
+       WHERE sr.service_id = $1 AND sr.status = 'pending' AND (sr.provider_id IS NULL OR sr.provider_id = $2)`,
+      [id, user.id],
     );
     if (serviceResult.rows.length === 0) {
       await client.query('ROLLBACK');
@@ -4729,15 +4730,41 @@ app.put('/api/service-requests/:id/accept', async (req, res) => {
     }
     const service = serviceResult.rows[0];
 
-    // Update service request
+    // Determine final price and price_status based on whether a counter exists
+    let finalPrice = service.estimated_cost;
+    let priceStatus = 'accepted';
+    if (service.counter_price) {
+      // A counter exists; we keep price_status as 'provider_countered' until owner accepts
+      // But we still set status to 'accepted' for the job
+      priceStatus = 'provider_countered';
+      // finalPrice stays null; owner will set it later
+      finalPrice = null;
+    } else {
+      // No counter; auto-accept the owner's proposed price
+      finalPrice = service.estimated_cost;
+      priceStatus = 'accepted';
+    }
+
+    // Update service request: set provider_id, status='accepted', accepted_at=NOW()
+    // Also set final_price and price_status as determined
     await client.query(
-      `UPDATE service_requests SET provider_id = $1, status = 'accepted', accepted_at = NOW() WHERE service_id = $2`,
-      [user.id, id],
+      `UPDATE service_requests 
+       SET provider_id = $1, 
+           status = 'accepted', 
+           accepted_at = NOW(),
+           final_price = $2,
+           price_status = $3
+       WHERE service_id = $4`,
+      [user.id, finalPrice, priceStatus, id],
     );
 
-    // Update provider availability
+    // Update provider availability and current_job_id
     await client.query(
-      `UPDATE service_providers SET availability_status = 'at_work', current_job_id = $1, last_status_update = NOW() WHERE provider_id = $2`,
+      `UPDATE service_providers 
+       SET availability_status = 'at_work', 
+           current_job_id = $1, 
+           last_status_update = NOW() 
+       WHERE provider_id = $2`,
       [id, user.id],
     );
 
