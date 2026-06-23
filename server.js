@@ -4682,6 +4682,7 @@ app.get('/api/service-requests/pending', async (req, res) => {
 
 // PUT /api/service-requests/:id/accept – provider accepts a job
 // PUT /api/service-requests/:id/accept – provider accepts a job
+// PUT /api/service-requests/:id/accept – provider accepts a job
 app.put('/api/service-requests/:id/accept', async (req, res) => {
   const client = await pool.connect();
   try {
@@ -4699,7 +4700,7 @@ app.put('/api/service-requests/:id/accept', async (req, res) => {
 
     await client.query('BEGIN');
 
-    // ✅ Check if provider already has a current job
+    // Check if provider already has a current job
     const providerCheck = await client.query(
       `SELECT current_job_id FROM service_providers WHERE provider_id = $1`,
       [user.id],
@@ -4713,9 +4714,9 @@ app.put('/api/service-requests/:id/accept', async (req, res) => {
       });
     }
 
-    // Get service request and check if counter exists
+    // Get service request details
     const serviceResult = await client.query(
-      `SELECT estimated_cost, counter_price, owner_id, property_id 
+      `SELECT estimated_cost, counter_price, owner_id, property_id, title 
        FROM service_requests 
        WHERE service_id = $1 AND status = 'pending' AND provider_id IS NULL`,
       [id],
@@ -4727,19 +4728,20 @@ app.put('/api/service-requests/:id/accept', async (req, res) => {
         error: 'Service request not found or already accepted',
       });
     }
-    const { estimated_cost, counter_price, owner_id, property_id } =
+    const { estimated_cost, counter_price, owner_id, property_id, title } =
       serviceResult.rows[0];
 
     // Determine final price and price_status
     let finalPrice = estimated_cost;
     let priceStatus = 'accepted';
-    // If a counter exists, we keep price_status as 'provider_countered' and final_price NULL
-    // The owner must accept the counter later via the accept-price endpoint.
+
+    // If a counter exists, keep price_status as 'provider_countered'
+    // The owner must accept it later via the accept-price endpoint.
     if (counter_price) {
-      finalPrice = null; // not set yet
+      finalPrice = null;
       priceStatus = 'provider_countered';
     } else {
-      // No counter, auto-accept the owner's proposed price
+      // No counter → auto‑accept the owner's proposed price
       finalPrice = estimated_cost;
       priceStatus = 'accepted';
     }
@@ -4775,7 +4777,7 @@ app.put('/api/service-requests/:id/accept', async (req, res) => {
 
     await client.query('COMMIT');
 
-    // Get property address to return to provider
+    // Get property address
     const addressResult = await pool.query(
       `SELECT address_street, address_city, address_state FROM properties WHERE property_id = $1`,
       [property_id],
@@ -4787,7 +4789,7 @@ app.put('/api/service-requests/:id/accept', async (req, res) => {
       await sendPushToUser(
         owner_id,
         '🔧 Service Provider Accepted',
-        `Your service request has been accepted. ${!counter_price ? 'The price has been automatically accepted.' : 'They have proposed a counter offer.'}`,
+        `Your service request "${title || 'Job'}" has been accepted. ${!counter_price ? 'The price has been automatically accepted. You can now schedule a visit.' : 'They have proposed a counter offer. Please review it.'}`,
         { screen: 'ServiceRequest', service_id: id },
       );
     } catch (pushErr) {
@@ -4887,6 +4889,7 @@ app.put('/api/service-requests/:id/complete', async (req, res) => {
 });
 
 // GET /api/service-requests/owner/:userId – list service requests for owner
+// GET /api/service-requests/owner/:userId – list service requests for owner
 app.get('/api/service-requests/owner/:userId', async (req, res) => {
   try {
     const { userId } = req.params;
@@ -4902,12 +4905,18 @@ app.get('/api/service-requests/owner/:userId', async (req, res) => {
       return res.status(403).json({ success: false, error: 'Forbidden' });
     }
 
+    // Get all service requests for the owner
     const result = await pool.query(
-      `SELECT sr.*, mr.title, mr.description, p.title as property_title, u_provider.name as provider_name
+      `SELECT sr.*, 
+              COALESCE(sr.title, mr.title) as title,
+              p.title as property_title, 
+              u_provider.name as provider_name,
+              mr.title as maintenance_title,
+              mr.request_id as maintenance_request_id
        FROM service_requests sr
-       JOIN maintenance_requests mr ON sr.maintenance_request_id = mr.request_id
        JOIN properties p ON sr.property_id = p.property_id
        LEFT JOIN users u_provider ON sr.provider_id = u_provider.user_id
+       LEFT JOIN maintenance_requests mr ON sr.maintenance_request_id = mr.request_id
        WHERE sr.owner_id = $1
        ORDER BY sr.created_at DESC`,
       [userId],
