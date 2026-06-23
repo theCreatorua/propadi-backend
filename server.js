@@ -4876,6 +4876,7 @@ app.get('/api/service-requests/owner/:userId', async (req, res) => {
 });
 
 // GET /api/service-requests/:id – single service request (owner, provider, or renter can view limited)
+// GET /api/service-requests/:id – single service request (owner, provider, or renter can view limited)
 app.get('/api/service-requests/:id', async (req, res) => {
   try {
     const { id } = req.params;
@@ -4891,18 +4892,51 @@ app.get('/api/service-requests/:id', async (req, res) => {
       return res.status(401).json({ success: false, error: 'Invalid token' });
 
     const query = `
-      SELECT sr.*, mr.title, mr.description, mr.media_url,
-             p.title as property_title, p.address_street, p.address_city, p.address_state,
-             u_provider.name as provider_name, u_provider.phone_number as provider_phone,
-             u_owner.name as owner_name, u_owner.phone_number as owner_phone,
-             u_renter.name as renter_name
+      SELECT 
+        sr.service_id,
+        sr.status,
+        sr.trade_type,
+        sr.description,
+        sr.estimated_cost,
+        sr.actual_cost,
+        sr.created_at,
+        sr.accepted_at,
+        sr.completed_at,
+        sr.counter_price,
+        sr.counter_reason,
+        sr.final_price,
+        sr.price_status,
+        sr.owner_id,
+        sr.provider_id,
+        sr.title,
+        sr.media_url,
+        p.title as property_title,
+        p.address_street,
+        p.address_city,
+        p.address_state,
+        u_provider.name as provider_name,
+        u_provider.phone_number as provider_phone,
+        u_owner.name as owner_name,
+        u_owner.phone_number as owner_phone,
+        u_renter.name as renter_name,
+        mv.visit_id,
+        mv.scheduled_start,
+        mv.scheduled_end,
+        mv.status as visit_status,
+        mv.check_in_time,
+        mv.check_out_time,
+        mv.renter_safety_confirmed,
+        mv.provider_safety_confirmed
       FROM service_requests sr
-      JOIN maintenance_requests mr ON sr.maintenance_request_id = mr.request_id
+      LEFT JOIN maintenance_requests mr ON sr.maintenance_request_id = mr.request_id
       JOIN properties p ON sr.property_id = p.property_id
       LEFT JOIN users u_provider ON sr.provider_id = u_provider.user_id
       LEFT JOIN users u_owner ON sr.owner_id = u_owner.user_id
       LEFT JOIN users u_renter ON mr.renter_id = u_renter.user_id
+      LEFT JOIN maintenance_visits mv ON sr.service_id = mv.service_request_id
       WHERE sr.service_id = $1
+      ORDER BY mv.created_at DESC
+      LIMIT 1
     `;
     const result = await pool.query(query, [id]);
     if (result.rows.length === 0) {
@@ -4912,12 +4946,39 @@ app.get('/api/service-requests/:id', async (req, res) => {
     }
     const service = result.rows[0];
 
+    // Authorization: ensure the user is owner, provider, or renter (if renter exists)
     const isOwner = service.owner_id === user.id;
     const isProvider = service.provider_id === user.id;
-    const isRenter = service.renter_id === user.id;
+    // Renter is only available via maintenance_requests
+    const isRenter = service.renter_name !== null; // simplified; we need to check if the user is renter
+    // Better: check if user is renter via maintenance_requests
+    const renterCheck = await pool.query(
+      `SELECT renter_id FROM maintenance_requests mr 
+       JOIN service_requests sr ON mr.request_id = sr.maintenance_request_id 
+       WHERE sr.service_id = $1 AND mr.renter_id = $2`,
+      [id, user.id],
+    );
+    const isRenterValid = renterCheck.rows.length > 0;
 
-    // Build response without TypeScript annotations
-    let responseData = {
+    if (!isOwner && !isProvider && !isRenterValid) {
+      return res.status(403).json({ success: false, error: 'Forbidden' });
+    }
+
+    // Build visit object if exists
+    const visit = service.visit_id
+      ? {
+          visit_id: service.visit_id,
+          scheduled_start: service.scheduled_start,
+          scheduled_end: service.scheduled_end,
+          status: service.visit_status,
+          check_in_time: service.check_in_time,
+          check_out_time: service.check_out_time,
+          renter_safety_confirmed: service.renter_safety_confirmed,
+          provider_safety_confirmed: service.provider_safety_confirmed,
+        }
+      : null;
+
+    const responseData = {
       service_id: service.service_id,
       status: service.status,
       trade_type: service.trade_type,
@@ -4928,22 +4989,24 @@ app.get('/api/service-requests/:id', async (req, res) => {
       accepted_at: service.accepted_at,
       completed_at: service.completed_at,
       property_title: service.property_title,
+      address_street: service.address_street,
       address_city: service.address_city,
       address_state: service.address_state,
       title: service.title,
       media_url: service.media_url,
+      counter_price: service.counter_price,
+      counter_reason: service.counter_reason,
+      final_price: service.final_price,
+      price_status: service.price_status,
+      owner_id: service.owner_id,
+      provider_id: service.provider_id,
+      provider_name: service.provider_name,
+      provider_phone: service.provider_phone,
+      owner_name: service.owner_name,
+      owner_phone: service.owner_phone,
+      renter_name: service.renter_name,
+      visit: visit, // include visit info
     };
-
-    if (isOwner || isProvider) {
-      responseData.address_street = service.address_street;
-      responseData.provider_name = service.provider_name;
-      responseData.provider_phone = service.provider_phone;
-      responseData.owner_name = service.owner_name;
-      responseData.owner_phone = service.owner_phone;
-      responseData.renter_name = service.renter_name;
-    } else if (!isRenter) {
-      return res.status(403).json({ success: false, error: 'Forbidden' });
-    }
 
     res.json({ success: true, serviceRequest: responseData });
   } catch (err) {
