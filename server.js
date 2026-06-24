@@ -1830,13 +1830,25 @@ app.post('/api/maintenance', async (req, res) => {
       'SELECT title FROM properties WHERE property_id = $1',
       [property_id],
     );
+    const propertyTitle = propResult.rows[0].title;
+    // After creating the ticket, notify the owner
+    try {
+      await sendPushToUser(
+        owner_id,
+        '🔧 New Maintenance Issue Reported',
+        `A tenant reported "${title}" for ${propertyTitle}`,
+        { screen: 'Maintenance', ticket_id: result.rows[0].request_id },
+      );
+    } catch (pushErr) {
+      console.error('Push notification error:', pushErr);
+    }
     res.json({
       success: true,
       ticket: {
         ...result.rows[0],
         id: result.rows[0].request_id,
         created_at: result.rows[0].date_submitted,
-        property_title: propResult.rows[0].title,
+        property_title: propertyTitle,
       },
     });
   } catch (err) {
