@@ -4032,14 +4032,14 @@ app.get('/api/provider/dashboard', async (req, res) => {
     // Pending offers (assigned to this provider, not yet accepted)
     const pendingOffers = await pool.query(
       `SELECT sr.service_id, sr.trade_type, sr.estimated_hours, sr.created_at, sr.estimated_cost,
-              sr.maintenance_request_id,
-              COALESCE(sr.title, mr.title) as title, sr.description, mr.media_url,
-              p.title as property_title, p.address_city, p.address_state
-       FROM service_requests sr
-       LEFT JOIN maintenance_requests mr ON sr.maintenance_request_id = mr.request_id
-       JOIN properties p ON sr.property_id = p.property_id
-       WHERE sr.provider_id = $1 AND sr.status = 'pending'
-       ORDER BY sr.created_at ASC`,
+          sr.maintenance_request_id, sr.status, sr.price_status,
+          COALESCE(sr.title, mr.title) as title, sr.description, mr.media_url,
+          p.title as property_title, p.address_city, p.address_state
+   FROM service_requests sr
+   LEFT JOIN maintenance_requests mr ON sr.maintenance_request_id = mr.request_id
+   JOIN properties p ON sr.property_id = p.property_id
+   WHERE sr.provider_id = $1 AND sr.status = 'pending'
+   ORDER BY sr.created_at ASC`,
       [user.id],
     );
 
@@ -4553,6 +4553,8 @@ app.post('/api/service-requests', async (req, res) => {
       }
     }
 
+    const finalEstimatedCost = estimated_cost || 0;
+
     // If provider is selected, verify they are verified and available
     let dailyWage = 0;
     if (provider_id) {
@@ -4682,7 +4684,6 @@ app.get('/api/service-requests/pending', async (req, res) => {
 
 // PUT /api/service-requests/:id/accept – provider accepts a job
 // PUT /api/service-requests/:id/accept – provider accepts a job
-// PUT /api/service-requests/:id/accept – provider accepts a job
 app.put('/api/service-requests/:id/accept', async (req, res) => {
   const client = await pool.connect();
   try {
@@ -4716,7 +4717,7 @@ app.put('/api/service-requests/:id/accept', async (req, res) => {
 
     // Get service request details
     const serviceResult = await client.query(
-      `SELECT estimated_cost, counter_price, owner_id, property_id, title 
+      `SELECT estimated_cost, owner_id, property_id, title 
        FROM service_requests 
        WHERE service_id = $1 AND status = 'pending' AND provider_id IS NULL`,
       [id],
@@ -4728,42 +4729,20 @@ app.put('/api/service-requests/:id/accept', async (req, res) => {
         error: 'Service request not found or already accepted',
       });
     }
-    const { estimated_cost, counter_price, owner_id, property_id, title } =
+    const { estimated_cost, owner_id, property_id, title } =
       serviceResult.rows[0];
 
-    // Determine final price and price_status
-    let finalPrice = estimated_cost;
-    let priceStatus = 'accepted';
-
-    // If a counter exists, keep price_status as 'provider_countered'
-    // The owner must accept it later via the accept-price endpoint.
-    if (counter_price) {
-      finalPrice = null;
-      priceStatus = 'provider_countered';
-    } else {
-      // No counter → auto‑accept the owner's proposed price
-      finalPrice = estimated_cost;
-      priceStatus = 'accepted';
-    }
-
-    // Update service request
-    const updateResult = await client.query(
+    // Update service request – set status='accepted', price_status='accepted', final_price=estimated_cost
+    await client.query(
       `UPDATE service_requests 
        SET provider_id = $1, 
            status = 'accepted', 
            accepted_at = NOW(),
            final_price = $2,
-           price_status = $3
-       WHERE service_id = $4
-       RETURNING *`,
-      [user.id, finalPrice, priceStatus, id],
+           price_status = 'accepted'
+       WHERE service_id = $3`,
+      [user.id, estimated_cost, id],
     );
-    if (updateResult.rows.length === 0) {
-      await client.query('ROLLBACK');
-      return res
-        .status(404)
-        .json({ success: false, error: 'Failed to update' });
-    }
 
     // Update provider current_job_id and availability
     await client.query(
@@ -4789,7 +4768,7 @@ app.put('/api/service-requests/:id/accept', async (req, res) => {
       await sendPushToUser(
         owner_id,
         '🔧 Service Provider Accepted',
-        `Your service request "${title || 'Job'}" has been accepted. ${!counter_price ? 'The price has been automatically accepted. You can now schedule a visit.' : 'They have proposed a counter offer. Please review it.'}`,
+        `Your service request "${title || 'Job'}" has been accepted and the price is locked. You can now schedule a visit.`,
         { screen: 'ServiceRequest', service_id: id },
       );
     } catch (pushErr) {
@@ -4804,7 +4783,6 @@ app.put('/api/service-requests/:id/accept', async (req, res) => {
         city: address.address_city || '',
         state: address.address_state || '',
       },
-      serviceRequest: updateResult.rows[0],
     });
   } catch (err) {
     await client.query('ROLLBACK');
