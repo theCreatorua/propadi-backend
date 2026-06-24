@@ -4553,8 +4553,6 @@ app.post('/api/service-requests', async (req, res) => {
       }
     }
 
-    const finalEstimatedCost = estimated_cost || 0;
-
     // If provider is selected, verify they are verified and available
     let dailyWage = 0;
     if (provider_id) {
