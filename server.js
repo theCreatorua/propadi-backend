@@ -4696,21 +4696,27 @@ app.get('/api/service-requests/pending', async (req, res) => {
 // PUT /api/service-requests/:id/accept – provider accepts a job
 // PUT /api/service-requests/:id/accept – provider accepts a job
 app.put('/api/service-requests/:id/accept', async (req, res) => {
+  console.log('🔵 Accept endpoint called with service_id:', req.params.id);
   const client = await pool.connect();
   try {
     const { id } = req.params;
-    console.log('Accept job called with service_id:', id);
+    console.log('🔵 Service ID:', id);
 
     const authHeader = req.headers.authorization;
-    if (!authHeader)
+    if (!authHeader) {
+      console.log('🔴 No auth header');
       return res.status(401).json({ success: false, error: 'Unauthorized' });
+    }
     const token = authHeader.split(' ')[1];
     const {
       data: { user },
       error,
     } = await supabase.auth.getUser(token);
-    if (error || !user)
+    if (error || !user) {
+      console.log('🔴 Invalid token:', error);
       return res.status(401).json({ success: false, error: 'Invalid token' });
+    }
+    console.log('🔵 User ID:', user.id);
 
     await client.query('BEGIN');
 
@@ -4720,6 +4726,10 @@ app.put('/api/service-requests/:id/accept', async (req, res) => {
       [user.id],
     );
     if (providerCheck.rows.length > 0 && providerCheck.rows[0].current_job_id) {
+      console.log(
+        '🔴 Provider already has current job:',
+        providerCheck.rows[0].current_job_id,
+      );
       await client.query('ROLLBACK');
       return res.status(400).json({
         success: false,
@@ -4729,21 +4739,20 @@ app.put('/api/service-requests/:id/accept', async (req, res) => {
     }
 
     // Get service request details
-    console.log('Querying for service request with id:', id);
     const serviceResult = await client.query(
-      `SELECT estimated_cost, owner_id, property_id, title, status, provider_id 
+      `SELECT estimated_cost, owner_id, property_id, title, status, provider_id
        FROM service_requests 
        WHERE service_id = $1`,
       [id],
     );
-    console.log('Service request found:', serviceResult.rows);
+    console.log('🔵 Service request found:', serviceResult.rows[0]);
 
     if (serviceResult.rows.length === 0) {
+      console.log('🔴 Service request not found');
       await client.query('ROLLBACK');
-      console.log('No service request found for id:', id);
       return res.status(404).json({
         success: false,
-        error: 'Service request not found or already accepted',
+        error: 'Service request not found',
       });
     }
 
@@ -4755,16 +4764,23 @@ app.put('/api/service-requests/:id/accept', async (req, res) => {
       status,
       provider_id,
     } = serviceResult.rows[0];
-
-    // Check if it's already accepted
     if (status !== 'pending' || provider_id !== null) {
-      await client.query('ROLLBACK');
       console.log(
-        `Service request status: ${status}, provider_id: ${provider_id}`,
+        '🔴 Service request is not pending or already has provider:',
+        {
+          status: status,
+          provider_id: provider_id,
+        },
       );
+      await client.query('ROLLBACK');
       return res.status(400).json({
         success: false,
-        error: 'Service request is not pending or already has a provider',
+        error:
+          'Service request is not available for acceptance (status=' +
+          status +
+          ', provider_id=' +
+          provider_id +
+          ')',
       });
     }
 
@@ -4811,6 +4827,7 @@ app.put('/api/service-requests/:id/accept', async (req, res) => {
       console.error('Push error:', pushErr);
     }
 
+    console.log('✅ Job accepted successfully');
     res.json({
       success: true,
       message: 'Job accepted successfully',
@@ -4822,7 +4839,7 @@ app.put('/api/service-requests/:id/accept', async (req, res) => {
     });
   } catch (err) {
     await client.query('ROLLBACK');
-    console.error('Accept job error:', err);
+    console.error('🔴 Accept job error:', err);
     res.status(500).json({ success: false, error: err.message });
   } finally {
     client.release();
