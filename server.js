@@ -4694,10 +4694,13 @@ app.get('/api/service-requests/pending', async (req, res) => {
 
 // PUT /api/service-requests/:id/accept – provider accepts a job
 // PUT /api/service-requests/:id/accept – provider accepts a job
+// PUT /api/service-requests/:id/accept – provider accepts a job
 app.put('/api/service-requests/:id/accept', async (req, res) => {
   const client = await pool.connect();
   try {
     const { id } = req.params;
+    console.log('Accept job called with service_id:', id);
+
     const authHeader = req.headers.authorization;
     if (!authHeader)
       return res.status(401).json({ success: false, error: 'Unauthorized' });
@@ -4726,21 +4729,44 @@ app.put('/api/service-requests/:id/accept', async (req, res) => {
     }
 
     // Get service request details
+    console.log('Querying for service request with id:', id);
     const serviceResult = await client.query(
-      `SELECT estimated_cost, owner_id, property_id, title 
+      `SELECT estimated_cost, owner_id, property_id, title, status, provider_id 
        FROM service_requests 
-       WHERE service_id = $1 AND status = 'pending' AND provider_id IS NULL`,
+       WHERE service_id = $1`,
       [id],
     );
+    console.log('Service request found:', serviceResult.rows);
+
     if (serviceResult.rows.length === 0) {
       await client.query('ROLLBACK');
+      console.log('No service request found for id:', id);
       return res.status(404).json({
         success: false,
         error: 'Service request not found or already accepted',
       });
     }
-    const { estimated_cost, owner_id, property_id, title } =
-      serviceResult.rows[0];
+
+    const {
+      estimated_cost,
+      owner_id,
+      property_id,
+      title,
+      status,
+      provider_id,
+    } = serviceResult.rows[0];
+
+    // Check if it's already accepted
+    if (status !== 'pending' || provider_id !== null) {
+      await client.query('ROLLBACK');
+      console.log(
+        `Service request status: ${status}, provider_id: ${provider_id}`,
+      );
+      return res.status(400).json({
+        success: false,
+        error: 'Service request is not pending or already has a provider',
+      });
+    }
 
     // Update service request – set status='accepted', price_status='accepted', final_price=estimated_cost
     await client.query(
