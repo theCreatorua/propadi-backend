@@ -4693,18 +4693,14 @@ app.get('/api/service-requests/pending', async (req, res) => {
 });
 
 // PUT /api/service-requests/:id/accept – provider accepts a job
-// PUT /api/service-requests/:id/accept – provider accepts a job
-// PUT /api/service-requests/:id/accept – provider accepts a job
 app.put('/api/service-requests/:id/accept', async (req, res) => {
-  console.log('🔵 Accept endpoint called with service_id:', req.params.id);
   const client = await pool.connect();
   try {
     const { id } = req.params;
-    console.log('🔵 Service ID:', id);
+    console.log('🔵 Accept endpoint called with service_id:', id);
 
     const authHeader = req.headers.authorization;
     if (!authHeader) {
-      console.log('🔴 No auth header');
       return res.status(401).json({ success: false, error: 'Unauthorized' });
     }
     const token = authHeader.split(' ')[1];
@@ -4713,7 +4709,6 @@ app.put('/api/service-requests/:id/accept', async (req, res) => {
       error,
     } = await supabase.auth.getUser(token);
     if (error || !user) {
-      console.log('🔴 Invalid token:', error);
       return res.status(401).json({ success: false, error: 'Invalid token' });
     }
     console.log('🔵 User ID:', user.id);
@@ -4738,7 +4733,7 @@ app.put('/api/service-requests/:id/accept', async (req, res) => {
       });
     }
 
-    // Get service request details
+    // Get service request – check status = 'pending' and provider_id = current user
     const serviceResult = await client.query(
       `SELECT estimated_cost, owner_id, property_id, title, status, provider_id
        FROM service_requests 
@@ -4748,7 +4743,6 @@ app.put('/api/service-requests/:id/accept', async (req, res) => {
     console.log('🔵 Service request found:', serviceResult.rows[0]);
 
     if (serviceResult.rows.length === 0) {
-      console.log('🔴 Service request not found');
       await client.query('ROLLBACK');
       return res.status(404).json({
         success: false,
@@ -4756,44 +4750,31 @@ app.put('/api/service-requests/:id/accept', async (req, res) => {
       });
     }
 
-    const {
-      estimated_cost,
-      owner_id,
-      property_id,
-      title,
-      status,
-      provider_id,
-    } = serviceResult.rows[0];
-    if (status !== 'pending' || provider_id !== null) {
+    const service = serviceResult.rows[0];
+
+    // ✅ Correct condition: pending AND provider_id matches the current user
+    if (service.status !== 'pending' || service.provider_id !== user.id) {
       console.log(
-        '🔴 Service request is not pending or already has provider:',
-        {
-          status: status,
-          provider_id: provider_id,
-        },
+        `🔴 Invalid state: status=${service.status}, provider_id=${service.provider_id}`,
       );
       await client.query('ROLLBACK');
       return res.status(400).json({
         success: false,
-        error:
-          'Service request is not available for acceptance (status=' +
-          status +
-          ', provider_id=' +
-          provider_id +
-          ')',
+        error: 'This job is not available for you to accept',
+        current_status: service.status,
+        current_provider: service.provider_id,
       });
     }
 
-    // Update service request – set status='accepted', price_status='accepted', final_price=estimated_cost
+    // ✅ Update: status = 'accepted', price_status = 'accepted', final_price = estimated_cost
     await client.query(
       `UPDATE service_requests 
-       SET provider_id = $1, 
-           status = 'accepted', 
+       SET status = 'accepted', 
            accepted_at = NOW(),
-           final_price = $2,
+           final_price = $1,
            price_status = 'accepted'
-       WHERE service_id = $3`,
-      [user.id, estimated_cost, id],
+       WHERE service_id = $2`,
+      [service.estimated_cost, id],
     );
 
     // Update provider current_job_id and availability
@@ -4811,16 +4792,16 @@ app.put('/api/service-requests/:id/accept', async (req, res) => {
     // Get property address
     const addressResult = await pool.query(
       `SELECT address_street, address_city, address_state FROM properties WHERE property_id = $1`,
-      [property_id],
+      [service.property_id],
     );
     const address = addressResult.rows[0] || {};
 
     // Notify owner
     try {
       await sendPushToUser(
-        owner_id,
+        service.owner_id,
         '🔧 Service Provider Accepted',
-        `Your service request "${title || 'Job'}" has been accepted and the price is locked. You can now schedule a visit.`,
+        `Your service request "${service.title || 'Job'}" has been accepted. The price is locked. You can now schedule a visit.`,
         { screen: 'ServiceRequest', service_id: id },
       );
     } catch (pushErr) {
