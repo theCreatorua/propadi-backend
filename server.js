@@ -4014,7 +4014,8 @@ app.get('/api/provider/dashboard', async (req, res) => {
           p.address_city, 
           p.address_state, 
           sr.status,
-          sr.estimated_cost, 
+          sr.estimated_cost,
+          sr.materials_cost,
           sr.final_price
    FROM service_requests sr
    LEFT JOIN maintenance_requests mr ON sr.maintenance_request_id = mr.request_id
@@ -4043,7 +4044,7 @@ app.get('/api/provider/dashboard', async (req, res) => {
 
     // Pending offers (assigned to this provider, not yet accepted)
     const pendingOffers = await pool.query(
-      `SELECT sr.service_id, sr.trade_type, sr.estimated_hours, sr.created_at, sr.estimated_cost,
+      `SELECT sr.service_id, sr.trade_type, sr.estimated_hours, sr.created_at, sr.estimated_cost, sr.materials_cost,
           sr.maintenance_request_id, sr.status, sr.price_status,
           COALESCE(sr.title, mr.title) as title, sr.description, mr.media_url,
           p.title as property_title, p.address_city, p.address_state
@@ -4057,7 +4058,7 @@ app.get('/api/provider/dashboard', async (req, res) => {
 
     // Available jobs (open to any provider with matching trade)
     const availableJobs = await pool.query(
-      `SELECT sr.service_id, sr.trade_type, sr.estimated_hours, sr.created_at, sr.estimated_cost,
+      `SELECT sr.service_id, sr.trade_type, sr.estimated_hours, sr.created_at, sr.estimated_cost, sr.materials_cost,
               sr.maintenance_request_id,
               COALESCE(sr.title, mr.title) as title, sr.description,
               COALESCE(sr.media_url, mr.media_url) as media_url,
@@ -4492,6 +4493,7 @@ app.post('/api/service-requests', async (req, res) => {
       description,
       media_url,
       estimated_cost, // ✅ ADDED: extract estimated_cost
+      materials_cost, // ✅ add this
     } = req.body;
 
     if (!trade_type) {
@@ -4588,11 +4590,11 @@ app.post('/api/service-requests', async (req, res) => {
       finalEstimatedCost = dailyWage * Math.ceil(estimated_hours / 8);
     }
 
-    // Insert service request – using estimated_cost from body
+    // Insert service request – using estimated_cost and materials_cost from body
     const insertResult = await client.query(
       `INSERT INTO service_requests 
-       (maintenance_request_id, property_id, owner_id, provider_id, trade_type, description, estimated_hours, estimated_cost, status, title, media_url)
-       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, 'pending', $9, $10)
+       (maintenance_request_id, property_id, owner_id, provider_id, trade_type, description, estimated_hours, estimated_cost, materials_cost, status, title, media_url)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, 'pending', $10, $11)
        RETURNING *`,
       [
         maintenance_request_id || null,
@@ -4602,7 +4604,8 @@ app.post('/api/service-requests', async (req, res) => {
         trade_type,
         maintDescription,
         estimated_hours || null,
-        finalEstimatedCost || 0, // ✅ Use the provided or calculated cost
+        finalEstimatedCost || 0, // labour cost
+        materials_cost || 0, // ✅ materials cost (new)
         maintTitle,
         media_url || null,
       ],
@@ -4831,6 +4834,7 @@ app.put('/api/service-requests/:id/accept', async (req, res) => {
 app.put('/api/service-requests/:id/decline', async (req, res) => {
   try {
     const { id } = req.params;
+    const { reason } = req.body; // ✅ Get reason from request body
     const authHeader = req.headers.authorization;
     if (!authHeader)
       return res.status(401).json({ success: false, error: 'Unauthorized' });
@@ -4842,10 +4846,27 @@ app.put('/api/service-requests/:id/decline', async (req, res) => {
     if (error || !user)
       return res.status(401).json({ success: false, error: 'Invalid token' });
 
-    // Only allow decline if provider is assigned or no provider yet
+    // ✅ Get service details for notifications
+    const serviceResult = await pool.query(
+      `SELECT owner_id, title, maintenance_request_id FROM service_requests WHERE service_id = $1`,
+      [id],
+    );
+    if (serviceResult.rows.length === 0) {
+      return res
+        .status(404)
+        .json({ success: false, error: 'Service request not found' });
+    }
+    const service = serviceResult.rows[0];
+
+    // ✅ Update status to rejected and store reason
     const result = await pool.query(
-      `UPDATE service_requests SET status = 'rejected' WHERE service_id = $1 AND (provider_id = $2 OR provider_id IS NULL) RETURNING *`,
-      [id, user.id],
+      `UPDATE service_requests 
+       SET status = 'rejected', 
+           rejection_reason = $1, 
+           status_remark = $2 
+       WHERE service_id = $3 AND (provider_id = $4 OR provider_id IS NULL)
+       RETURNING *`,
+      [reason, `Declined: ${reason}`, id, user.id],
     );
     if (result.rows.length === 0) {
       return res.status(404).json({
@@ -4853,6 +4874,21 @@ app.put('/api/service-requests/:id/decline', async (req, res) => {
         error: 'Service request not found or already assigned',
       });
     }
+
+    // ✅ Send notifications
+    await sendPushToUser(
+      service.owner_id,
+      '❌ Service Provider Declined',
+      `The provider has declined your service request for "${service.title}". ${reason ? 'Reason: ' + reason : ''}`,
+      { screen: 'Maintenance', ticket_id: service.maintenance_request_id },
+    );
+    await sendPushToUser(
+      user.id,
+      '❌ Job Declined',
+      `You have declined the service request for "${service.title}".`,
+      { screen: 'ProviderDashboard' },
+    );
+
     res.json({ success: true, message: 'Job declined' });
   } catch (err) {
     console.error('Decline service request error:', err);
@@ -4963,6 +4999,7 @@ app.get('/api/service-requests/:id', async (req, res) => {
         sr.trade_type,
         sr.description,
         sr.estimated_cost,
+        sr.materials_cost,
         sr.actual_cost,
         sr.created_at,
         sr.accepted_at,
@@ -5049,6 +5086,7 @@ app.get('/api/service-requests/:id', async (req, res) => {
       trade_type: service.trade_type,
       description: service.description,
       estimated_cost: service.estimated_cost,
+      materials_cost: service.materials_cost,
       actual_cost: service.actual_cost,
       created_at: service.created_at,
       accepted_at: service.accepted_at,
@@ -5155,10 +5193,11 @@ app.post('/api/service-requests/:id/counter', async (req, res) => {
 
     await client.query('COMMIT');
 
+    // Notify owner
     await sendPushToUser(
       service.owner_id,
-      '💬 Counter Offer Received',
-      `The provider has proposed ₦${parseFloat(counter_price).toLocaleString()} for your service request.${reason ? ` Reason: ${reason}` : ''}`,
+      '💬 Counter Offer Proposed',
+      `The provider has proposed a counter offer of ₦${parseFloat(counter_price).toLocaleString()} for "${service.title || 'your job'}". ${reason ? 'Reason: ' + reason : ''}`,
       { screen: 'ServiceRequest', service_id: id },
     );
 
@@ -5220,14 +5259,18 @@ app.put('/api/service-requests/:id/decline-counter', async (req, res) => {
     await client.query('COMMIT');
 
     // Notify provider that counter was declined
-    if (service.provider_id) {
-      await sendPushToUser(
-        service.provider_id,
-        '❌ Counter Declined',
-        `The owner has declined your counter offer for "${service.title || 'job'}". The original budget remains.`,
-        { screen: 'ProviderDashboard', service_id: id },
-      );
-    }
+    await sendPushToUser(
+      service.provider_id,
+      '❌ Counter Declined',
+      `The owner has declined your counter offer for "${service.title}". The original price remains.`,
+      { screen: 'ProviderDashboard', service_id: id },
+    );
+    await sendPushToUser(
+      service.owner_id,
+      '❌ Counter Declined',
+      `You have declined the provider's counter offer for "${service.title}". The price has been reset.`,
+      { screen: 'ServiceRequest', service_id: id },
+    );
 
     res.json({
       success: true,
@@ -5290,7 +5333,7 @@ app.put('/api/service-requests/:id/accept-price', async (req, res) => {
     await sendPushToUser(
       service.provider_id,
       '✅ Price Accepted',
-      `The owner has accepted ₦${finalPrice.toLocaleString()} for the job. Please wait for escrow funding.`,
+      `The owner has accepted your counter offer of ₦${finalPrice.toLocaleString()} for "${service.title}". You can now proceed.`,
       { screen: 'ProviderDashboard', service_id: id },
     );
 
