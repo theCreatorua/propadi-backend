@@ -4017,7 +4017,7 @@ app.get('/api/provider/dashboard', async (req, res) => {
           sr.estimated_cost,
           sr.materials_cost,
           sr.final_price,
-          sr.estimated_hours   // ✅ ADD THIS LINE
+          sr.estimated_hours
    FROM service_requests sr
    LEFT JOIN maintenance_requests mr ON sr.maintenance_request_id = mr.request_id
    JOIN properties p ON sr.property_id = p.property_id
@@ -4493,8 +4493,8 @@ app.post('/api/service-requests', async (req, res) => {
       title,
       description,
       media_url,
-      estimated_cost, // ✅ ADDED: extract estimated_cost
-      materials_cost, // ✅ add this
+      estimated_cost,
+      materials_cost,
     } = req.body;
 
     if (!trade_type) {
