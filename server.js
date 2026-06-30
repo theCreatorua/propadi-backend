@@ -4108,6 +4108,10 @@ app.get('/api/provider/dashboard', async (req, res) => {
               sr.estimated_cost, 
               sr.final_price,
               sr.trade_type,
+              sr.status,
+              sr.estimated_hours,
+              sr.materials_cost,
+              sr.maintenance_request_id,
               p.title as property_title, 
               p.address_city, 
               p.address_state,
@@ -4177,6 +4181,11 @@ app.get('/api/provider/dashboard', async (req, res) => {
       [user.id],
     );
 
+    // Get capacity usage
+    const todayJobs = await countJobsToday(user.id);
+    const weekJobs = await countJobsThisWeek(user.id);
+    const activeJobs = await countActiveJobs(user.id);
+
     res.json({
       success: true,
       provider,
@@ -4186,6 +4195,14 @@ app.get('/api/provider/dashboard', async (req, res) => {
       availableJobs: availableJobs.rows,
       jobHistory: jobHistory.rows,
       totalEarned: parseFloat(earnings.rows[0].total_earned),
+      capacity: {
+        activeJobs,
+        todayJobs,
+        weekJobs,
+        dailyCapacity: provider.daily_capacity,
+        weeklyCapacity: provider.weekly_capacity,
+        maxActiveJobs: provider.max_active_jobs,
+      },
     });
   } catch (err) {
     console.error('Provider dashboard error:', err);
