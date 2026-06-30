@@ -4016,7 +4016,8 @@ app.get('/api/provider/dashboard', async (req, res) => {
           sr.status,
           sr.estimated_cost,
           sr.materials_cost,
-          sr.final_price
+          sr.final_price,
+          sr.estimated_hours   // ✅ ADD THIS LINE
    FROM service_requests sr
    LEFT JOIN maintenance_requests mr ON sr.maintenance_request_id = mr.request_id
    JOIN properties p ON sr.property_id = p.property_id
@@ -4999,6 +5000,7 @@ app.get('/api/service-requests/:id', async (req, res) => {
         sr.trade_type,
         sr.description,
         sr.estimated_cost,
+        sr.estimated_hours,
         sr.materials_cost,
         sr.actual_cost,
         sr.created_at,
