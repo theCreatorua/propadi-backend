@@ -5088,6 +5088,7 @@ app.get('/api/service-requests/:id', async (req, res) => {
       trade_type: service.trade_type,
       description: service.description,
       estimated_cost: service.estimated_cost,
+      estimated_hours: service.estimated_hours,
       materials_cost: service.materials_cost,
       actual_cost: service.actual_cost,
       created_at: service.created_at,
