@@ -23,6 +23,55 @@ const pool = new Pool({
   ssl: { rejectUnauthorized: false },
 });
 
+// Helper: Count active jobs for a provider (accepted + in_progress)
+async function countActiveJobs(providerId) {
+  const result = await pool.query(
+    `SELECT COUNT(*) as count FROM service_requests 
+     WHERE provider_id = $1 AND status IN ('accepted', 'in_progress')`,
+    [providerId],
+  );
+  return parseInt(result.rows[0].count, 10);
+}
+
+// Helper: Count jobs accepted today
+async function countJobsToday(providerId) {
+  const result = await pool.query(
+    `SELECT COUNT(*) as count FROM service_requests 
+     WHERE provider_id = $1 AND DATE(accepted_at) = CURRENT_DATE`,
+    [providerId],
+  );
+  return parseInt(result.rows[0].count, 10);
+}
+
+// Helper: Count jobs accepted this week (Monday–Sunday)
+async function countJobsThisWeek(providerId) {
+  const result = await pool.query(
+    `SELECT COUNT(*) as count FROM service_requests 
+     WHERE provider_id = $1 
+     AND DATE_PART('week', accepted_at) = DATE_PART('week', CURRENT_DATE)
+     AND DATE_PART('year', accepted_at) = DATE_PART('year', CURRENT_DATE)`,
+    [providerId],
+  );
+  return parseInt(result.rows[0].count, 10);
+}
+
+// Helper: Check scheduling conflict
+async function hasScheduleConflict(providerId, proposedStart, proposedEnd) {
+  const result = await pool.query(
+    `SELECT COUNT(*) as count FROM maintenance_visits mv
+     JOIN service_requests sr ON mv.service_request_id = sr.service_id
+     WHERE sr.provider_id = $1 
+     AND mv.status != 'completed'
+     AND (
+       (mv.scheduled_start <= $2 AND mv.scheduled_end > $2) OR
+       (mv.scheduled_start < $3 AND mv.scheduled_end >= $3) OR
+       (mv.scheduled_start >= $2 AND mv.scheduled_end <= $3)
+     )`,
+    [providerId, proposedStart, proposedEnd],
+  );
+  return parseInt(result.rows[0].count, 0) > 0;
+}
+
 // ==========================================
 // ADMIN MIDDLEWARE (must be defined before any admin routes)
 // ==========================================
@@ -3873,6 +3922,9 @@ app.post('/api/provider/register', async (req, res) => {
       years_experience,
       daily_wage,
       service_radius_km,
+      daily_capacity,
+      weekly_capacity,
+      max_active_jobs,
     } = req.body;
 
     if (!trade_type || !daily_wage) {
@@ -3905,8 +3957,9 @@ app.post('/api/provider/register', async (req, res) => {
     // Insert into service_providers – using daily_wage column
     const result = await client.query(
       `INSERT INTO service_providers 
-       (provider_id, trade_type, license_number, license_document_url, years_experience, daily_wage, service_radius_km, is_verified, availability_status)
-       VALUES ($1, $2, $3, $4, $5, $6, $7, false, 'available')
+       (provider_id, trade_type, license_number, license_document_url, years_experience, daily_wage, service_radius_km, 
+        daily_capacity, weekly_capacity, max_active_jobs, is_verified, availability_status)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, false, 'available')
        RETURNING *`,
       [
         user.id,
@@ -3916,6 +3969,9 @@ app.post('/api/provider/register', async (req, res) => {
         years_experience || '0-1',
         daily_wage,
         service_radius_km || 20,
+        daily_capacity || 3,
+        weekly_capacity || 15,
+        max_active_jobs || 3,
       ],
     );
 
@@ -4043,6 +4099,30 @@ app.get('/api/provider/dashboard', async (req, res) => {
       }
     }
 
+    // Awaiting schedule: accepted jobs without a visit
+    const awaitingSchedule = await pool.query(
+      `SELECT sr.service_id, 
+              COALESCE(sr.title, mr.title) as title, 
+              COALESCE(sr.description, mr.description) as description, 
+              sr.media_url, 
+              sr.estimated_cost, 
+              sr.final_price,
+              sr.trade_type,
+              p.title as property_title, 
+              p.address_city, 
+              p.address_state,
+              sr.created_at
+       FROM service_requests sr
+       LEFT JOIN maintenance_requests mr ON sr.maintenance_request_id = mr.request_id
+       JOIN properties p ON sr.property_id = p.property_id
+       LEFT JOIN maintenance_visits mv ON sr.service_id = mv.service_request_id
+       WHERE sr.provider_id = $1 
+         AND sr.status = 'accepted'
+         AND mv.visit_id IS NULL
+       ORDER BY sr.created_at ASC`,
+      [user.id],
+    );
+
     // Pending offers (assigned to this provider, not yet accepted)
     const pendingOffers = await pool.query(
       `SELECT sr.service_id, sr.trade_type, sr.estimated_hours, sr.created_at, sr.estimated_cost, sr.materials_cost,
@@ -4101,6 +4181,7 @@ app.get('/api/provider/dashboard', async (req, res) => {
       success: true,
       provider,
       currentJob,
+      awaitingSchedule: awaitingSchedule.rows,
       pendingOffers: pendingOffers.rows,
       availableJobs: availableJobs.rows,
       jobHistory: jobHistory.rows,
@@ -4717,6 +4798,36 @@ app.put('/api/service-requests/:id/accept', async (req, res) => {
     }
     console.log('🔵 User ID:', user.id);
 
+    // Before BEGIN, check capacity
+    const activeJobs = await countActiveJobs(user.id);
+    const todayJobs = await countJobsToday(user.id);
+    const weekJobs = await countJobsThisWeek(user.id);
+
+    const capResult = await pool.query(
+      `SELECT daily_capacity, weekly_capacity, max_active_jobs 
+       FROM service_providers WHERE provider_id = $1`,
+      [user.id],
+    );
+    const cap = capResult.rows[0];
+    if (activeJobs >= cap.max_active_jobs) {
+      return res.status(400).json({
+        success: false,
+        error: `You have reached your maximum active jobs limit (${cap.max_active_jobs}). Please complete some jobs before accepting new ones.`,
+      });
+    }
+    if (todayJobs >= cap.daily_capacity) {
+      return res.status(400).json({
+        success: false,
+        error: `You have reached your daily capacity (${cap.daily_capacity} jobs). Please try again tomorrow.`,
+      });
+    }
+    if (weekJobs >= cap.weekly_capacity) {
+      return res.status(400).json({
+        success: false,
+        error: `You have reached your weekly capacity (${cap.weekly_capacity} jobs).`,
+      });
+    }
+
     await client.query('BEGIN');
 
     // Check if provider already has a current job
@@ -4773,12 +4884,14 @@ app.put('/api/service-requests/:id/accept', async (req, res) => {
     // ✅ Update: status = 'accepted', price_status = 'accepted', final_price = estimated_cost
     await client.query(
       `UPDATE service_requests 
-       SET status = 'accepted', 
-           accepted_at = NOW(),
-           final_price = $1,
-           price_status = 'accepted'
-       WHERE service_id = $2`,
-      [service.estimated_cost, id],
+   SET provider_id = $1, 
+       status = 'accepted', 
+       accepted_at = NOW(),
+       accepted_date = CURRENT_DATE,
+       final_price = $2,
+       price_status = $3
+   WHERE service_id = $4`,
+      [user.id, finalPrice, priceStatus, id],
     );
 
     // Update provider current_job_id and availability
@@ -5585,6 +5698,13 @@ app.put('/api/service-requests/:id/in-progress', async (req, res) => {
       });
     }
 
+    await pool.query(
+      `UPDATE service_providers 
+       SET availability_status = 'at_work' 
+       WHERE provider_id = $1`,
+      [user.id],
+    );
+
     // Notify owner
     await sendPushToUser(
       result.rows[0].owner_id,
@@ -5684,7 +5804,7 @@ app.post('/api/maintenance-visits', async (req, res) => {
 
     // Verify ownership
     const serviceCheck = await client.query(
-      `SELECT owner_id FROM service_requests WHERE service_id = $1`,
+      `SELECT owner_id, provider_id FROM service_requests WHERE service_id = $1`,
       [service_request_id],
     );
     if (
@@ -5695,6 +5815,20 @@ app.post('/api/maintenance-visits', async (req, res) => {
       return res.status(403).json({
         success: false,
         error: 'You are not the owner of this service request',
+      });
+    }
+
+    const hasConflict = await hasScheduleConflict(
+      serviceCheck.rows[0].provider_id,
+      scheduled_start,
+      scheduled_end || new Date(new Date(scheduled_start).getTime() + 3600000),
+    );
+    if (hasConflict) {
+      await client.query('ROLLBACK');
+      return res.status(400).json({
+        success: false,
+        error:
+          'The provider already has a scheduled visit at that time. Please choose a different time.',
       });
     }
 
