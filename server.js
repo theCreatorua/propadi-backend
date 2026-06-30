@@ -4784,7 +4784,7 @@ app.put('/api/service-requests/:id/accept', async (req, res) => {
     await client.query(
       `UPDATE service_providers 
        SET current_job_id = $1, 
-           availability_status = 'at_work',
+           availability_status = 'available',
            last_status_update = NOW()
        WHERE provider_id = $2`,
       [id, user.id],
@@ -5251,10 +5251,42 @@ app.put('/api/service-requests/:id/decline-counter', async (req, res) => {
       `UPDATE service_requests 
        SET price_status = 'owner_proposed', 
            counter_price = NULL, 
-           counter_reason = NULL 
+           counter_reason = NULL,
+           counter_attempts = counter_attempts + 1 
        WHERE service_id = $1`,
       [id],
     );
+
+    // Check if attempts reached 3
+    const attemptsResult = await client.query(
+      `SELECT counter_attempts FROM service_requests WHERE service_id = $1`,
+      [id],
+    );
+
+    if (attemptsResult.rows[0].counter_attempts >= 3) {
+      // Auto-reject the job
+      await client.query(
+        `UPDATE service_requests 
+     SET status = 'rejected',
+         status_remark = 'Counter attempts exceeded (max 3)'
+     WHERE service_id = $1`,
+        [id],
+      );
+
+      // Notify both parties about auto-rejection
+      await sendPushToUser(
+        service.provider_id,
+        '❌ Job Auto-Rejected',
+        `Your counter attempts for "${service.title}" exceeded the limit (3). The job has been rejected.`,
+        { screen: 'ProviderDashboard' },
+      );
+      await sendPushToUser(
+        service.owner_id,
+        '❌ Counter Attempts Exceeded',
+        `The provider's counter attempts for "${service.title}" exceeded the limit. The job has been rejected. You can request service again.`,
+        { screen: 'Maintenance' },
+      );
+    }
 
     await client.query('COMMIT');
 
@@ -5323,7 +5355,11 @@ app.put('/api/service-requests/:id/accept-price', async (req, res) => {
     // Determine final price: if counter_price exists, use it; else use estimated_cost
     const finalPrice = service.counter_price || service.estimated_cost;
     await client.query(
-      `UPDATE service_requests SET final_price = $1, price_status = 'accepted' WHERE service_id = $2`,
+      `UPDATE service_requests 
+   SET final_price = $1, 
+       price_status = 'accepted',
+       status = 'accepted'
+   WHERE service_id = $2`,
       [finalPrice, id],
     );
 
