@@ -4898,16 +4898,20 @@ app.put('/api/service-requests/:id/accept', async (req, res) => {
       });
     }
 
+    // ✅ DEFINE finalPrice AND priceStatus HERE
+    const finalPrice = parseFloat(service.estimated_cost);
+    const priceStatus = 'accepted';
+
     // ✅ Update: status = 'accepted', price_status = 'accepted', final_price = estimated_cost
     await client.query(
       `UPDATE service_requests 
-   SET provider_id = $1, 
-       status = 'accepted', 
-       accepted_at = NOW(),
-       accepted_date = CURRENT_DATE,
-       final_price = $2,
-       price_status = $3
-   WHERE service_id = $4`,
+       SET provider_id = $1, 
+           status = 'accepted', 
+           accepted_at = NOW(),
+           accepted_date = CURRENT_DATE,
+           final_price = $2,
+           price_status = $3
+       WHERE service_id = $4`,
       [user.id, finalPrice, priceStatus, id],
     );
 
