@@ -4915,6 +4915,14 @@ app.put('/api/service-requests/:id/accept', async (req, res) => {
       [user.id, finalPrice, priceStatus, id],
     );
 
+    // Notify provider that they accepted the job
+    await sendPushToUser(
+      user.id, // provider is the current user
+      '✅ Job Accepted',
+      `You have accepted the job "${service.title || 'Job'}". The owner will schedule a visit. You will be notified when a visit is scheduled.`,
+      { screen: 'ProviderDashboard' },
+    );
+
     // Update provider current_job_id and availability
     await client.query(
       `UPDATE service_providers 
