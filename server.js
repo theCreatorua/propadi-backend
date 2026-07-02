@@ -4112,6 +4112,7 @@ app.get('/api/provider/dashboard', async (req, res) => {
               sr.estimated_hours,
               sr.materials_cost,
               sr.maintenance_request_id,
+              sr.notes,
               p.title as property_title, 
               p.address_city, 
               p.address_state,
@@ -4131,7 +4132,7 @@ app.get('/api/provider/dashboard', async (req, res) => {
     const pendingOffers = await pool.query(
       `SELECT sr.service_id, sr.trade_type, sr.estimated_hours, sr.created_at, sr.estimated_cost, sr.materials_cost,
           sr.maintenance_request_id, sr.status, sr.price_status,
-          COALESCE(sr.title, mr.title) as title, sr.description, mr.media_url,
+          COALESCE(sr.title, mr.title) as title, sr.description, sr.notes, mr.media_url,
           p.title as property_title, p.address_city, p.address_state
    FROM service_requests sr
    LEFT JOIN maintenance_requests mr ON sr.maintenance_request_id = mr.request_id
@@ -4145,7 +4146,7 @@ app.get('/api/provider/dashboard', async (req, res) => {
     const availableJobs = await pool.query(
       `SELECT sr.service_id, sr.trade_type, sr.estimated_hours, sr.created_at, sr.estimated_cost, sr.materials_cost,
               sr.maintenance_request_id,
-              COALESCE(sr.title, mr.title) as title, sr.description,
+              COALESCE(sr.title, mr.title) as title, sr.description, sr.notes,
               COALESCE(sr.media_url, mr.media_url) as media_url,
               p.title as property_title, p.address_city, p.address_state
        FROM service_requests sr
@@ -4846,24 +4847,6 @@ app.put('/api/service-requests/:id/accept', async (req, res) => {
     }
 
     await client.query('BEGIN');
-
-    // Check if provider already has a current job
-    const providerCheck = await client.query(
-      `SELECT current_job_id FROM service_providers WHERE provider_id = $1`,
-      [user.id],
-    );
-    if (providerCheck.rows.length > 0 && providerCheck.rows[0].current_job_id) {
-      console.log(
-        '🔴 Provider already has current job:',
-        providerCheck.rows[0].current_job_id,
-      );
-      await client.query('ROLLBACK');
-      return res.status(400).json({
-        success: false,
-        error:
-          'You already have an active job. Please complete it before accepting another.',
-      });
-    }
 
     // Get service request – check status = 'pending' and provider_id = current user
     const serviceResult = await client.query(
