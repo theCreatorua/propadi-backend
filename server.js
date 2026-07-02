@@ -5486,13 +5486,24 @@ app.put('/api/service-requests/:id/accept-price', async (req, res) => {
 
     // Determine final price: if counter_price exists, use it; else use estimated_cost
     const finalPrice = service.counter_price || service.estimated_cost;
+
+    // Update service request with status='accepted', price_status='accepted', final_price, and accepted_date if not set
     await client.query(
       `UPDATE service_requests 
-   SET final_price = $1, 
-       price_status = 'accepted',
-       status = 'accepted'
-   WHERE service_id = $2`,
+       SET final_price = $1, 
+           price_status = 'accepted',
+           status = 'accepted',
+           accepted_date = COALESCE(accepted_date, CURRENT_DATE)   -- ✅ Set accepted_date if not already
+       WHERE service_id = $2`,
       [finalPrice, id],
+    );
+
+    // ✅ Update provider availability to 'available' (not at_work)
+    await client.query(
+      `UPDATE service_providers 
+       SET availability_status = 'available'
+       WHERE provider_id = $1`,
+      [service.provider_id],
     );
 
     await client.query('COMMIT');
