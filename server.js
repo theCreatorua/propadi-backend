@@ -4073,7 +4073,8 @@ app.get('/api/provider/dashboard', async (req, res) => {
           sr.estimated_cost,
           sr.materials_cost,
           sr.final_price,
-          sr.estimated_hours
+          sr.estimated_hours,
+          sr.notes
    FROM service_requests sr
    LEFT JOIN maintenance_requests mr ON sr.maintenance_request_id = mr.request_id
    JOIN properties p ON sr.property_id = p.property_id
@@ -4132,7 +4133,7 @@ app.get('/api/provider/dashboard', async (req, res) => {
     const pendingOffers = await pool.query(
       `SELECT sr.service_id, sr.trade_type, sr.estimated_hours, sr.created_at, sr.estimated_cost, sr.materials_cost,
           sr.maintenance_request_id, sr.status, sr.price_status,
-          COALESCE(sr.title, mr.title) as title, sr.description, sr.notes, mr.media_url,
+          COALESCE(sr.title, mr.title) as title, sr.description, mr.media_url, sr.notes,
           p.title as property_title, p.address_city, p.address_state
    FROM service_requests sr
    LEFT JOIN maintenance_requests mr ON sr.maintenance_request_id = mr.request_id
@@ -4146,8 +4147,8 @@ app.get('/api/provider/dashboard', async (req, res) => {
     const availableJobs = await pool.query(
       `SELECT sr.service_id, sr.trade_type, sr.estimated_hours, sr.created_at, sr.estimated_cost, sr.materials_cost,
               sr.maintenance_request_id,
-              COALESCE(sr.title, mr.title) as title, sr.description, sr.notes,
-              COALESCE(sr.media_url, mr.media_url) as media_url,
+              COALESCE(sr.title, mr.title) as title, sr.description, 
+              COALESCE(sr.media_url, mr.media_url) as media_url, sr.notes,
               p.title as property_title, p.address_city, p.address_state
        FROM service_requests sr
        LEFT JOIN maintenance_requests mr ON sr.maintenance_request_id = mr.request_id
@@ -4164,7 +4165,7 @@ app.get('/api/provider/dashboard', async (req, res) => {
     const jobHistory = await pool.query(
       `SELECT sr.*, 
           COALESCE(sr.title, mr.title) as title, 
-          p.title as property_title
+          p.title as property_title, sr.notes
    FROM service_requests sr
    LEFT JOIN maintenance_requests mr ON sr.maintenance_request_id = mr.request_id
    JOIN properties p ON sr.property_id = p.property_id
@@ -4693,9 +4694,9 @@ app.post('/api/service-requests', async (req, res) => {
     // Insert service request – using estimated_cost and materials_cost from body
     const insertResult = await client.query(
       `INSERT INTO service_requests 
-       (maintenance_request_id, property_id, owner_id, provider_id, trade_type, description, estimated_hours, estimated_cost, materials_cost, status, title, media_url)
-       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, 'pending', $10, $11)
-       RETURNING *`,
+   (maintenance_request_id, property_id, owner_id, provider_id, trade_type, description, estimated_hours, estimated_cost, materials_cost, notes, status, title, media_url)
+   VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, 'pending', $11, $12)
+   RETURNING *`,
       [
         maintenance_request_id || null,
         propertyId,
@@ -4704,8 +4705,9 @@ app.post('/api/service-requests', async (req, res) => {
         trade_type,
         maintDescription,
         estimated_hours || null,
-        finalEstimatedCost || 0, // labour cost
-        materials_cost || 0, // ✅ materials cost (new)
+        estimated_cost || 0,
+        materials_cost || 0,
+        notes || null, // ✅ NOTES added here
         maintTitle,
         media_url || null,
       ],
