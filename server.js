@@ -4134,6 +4134,7 @@ app.get('/api/provider/dashboard', async (req, res) => {
     );
 
     // Pending offers (assigned to this provider, not yet accepted)
+    // Pending offers – includes both 'pending' and 'negotiating'
     const pendingOffers = await pool.query(
       `SELECT sr.service_id, sr.trade_type, sr.estimated_hours, sr.created_at, sr.estimated_cost,
           sr.materials_cost,
@@ -4144,7 +4145,7 @@ app.get('/api/provider/dashboard', async (req, res) => {
    FROM service_requests sr
    LEFT JOIN maintenance_requests mr ON sr.maintenance_request_id = mr.request_id
    JOIN properties p ON sr.property_id = p.property_id
-   WHERE sr.provider_id = $1 AND sr.status = 'pending'
+   WHERE sr.provider_id = $1 AND sr.status IN ('pending', 'negotiating')
    ORDER BY sr.created_at ASC`,
       [user.id],
     );
