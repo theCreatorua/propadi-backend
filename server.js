@@ -4065,16 +4065,18 @@ app.get('/api/provider/dashboard', async (req, res) => {
           COALESCE(sr.description, mr.description) as description, 
           sr.media_url, 
           mr.media_url as maintenance_media_url,
+          sr.estimated_cost, 
+          sr.materials_cost,
+          sr.final_price,
+          sr.status,
+          sr.price_status,
+          sr.estimated_hours,
+          sr.notes,
+          sr.accepted_at,
           p.title as property_title, 
           p.address_street, 
           p.address_city, 
-          p.address_state, 
-          sr.status,
-          sr.estimated_cost,
-          sr.materials_cost,
-          sr.final_price,
-          sr.estimated_hours,
-          sr.notes
+          p.address_state
    FROM service_requests sr
    LEFT JOIN maintenance_requests mr ON sr.maintenance_request_id = mr.request_id
    JOIN properties p ON sr.property_id = p.property_id
@@ -4108,17 +4110,18 @@ app.get('/api/provider/dashboard', async (req, res) => {
           COALESCE(sr.description, mr.description) as description, 
           sr.media_url, 
           sr.estimated_cost, 
+          sr.materials_cost,
           sr.final_price,
           sr.trade_type,
           sr.status,
+          sr.price_status,
           sr.estimated_hours,
-          sr.materials_cost,
           sr.maintenance_request_id,
           sr.notes,
+          sr.created_at,
           p.title as property_title, 
           p.address_city, 
-          p.address_state,
-          sr.created_at
+          p.address_state
    FROM service_requests sr
    LEFT JOIN maintenance_requests mr ON sr.maintenance_request_id = mr.request_id
    JOIN properties p ON sr.property_id = p.property_id
@@ -4133,6 +4136,7 @@ app.get('/api/provider/dashboard', async (req, res) => {
     // Pending offers (assigned to this provider, not yet accepted)
     const pendingOffers = await pool.query(
       `SELECT sr.service_id, sr.trade_type, sr.estimated_hours, sr.created_at, sr.estimated_cost,
+          sr.materials_cost,
           sr.maintenance_request_id, sr.status, sr.price_status,
           COALESCE(sr.title, mr.title) as title, sr.description, mr.media_url,
           sr.notes,
@@ -4147,27 +4151,47 @@ app.get('/api/provider/dashboard', async (req, res) => {
 
     // Available jobs (open to any provider with matching trade)
     const availableJobs = await pool.query(
-      `SELECT sr.service_id, sr.trade_type, sr.estimated_hours, sr.created_at, sr.estimated_cost, sr.materials_cost,
-              sr.maintenance_request_id,
-              COALESCE(sr.title, mr.title) as title, sr.description, 
-              COALESCE(sr.media_url, mr.media_url) as media_url, sr.notes,
-              p.title as property_title, p.address_city, p.address_state
-       FROM service_requests sr
-       LEFT JOIN maintenance_requests mr ON sr.maintenance_request_id = mr.request_id
-       JOIN properties p ON sr.property_id = p.property_id
-       WHERE sr.provider_id IS NULL
-         AND sr.status = 'pending'
-         AND LOWER(sr.trade_type) = LOWER($1)
-       ORDER BY sr.created_at ASC
-       LIMIT 30`,
+      `SELECT sr.service_id, sr.trade_type, sr.estimated_hours, sr.created_at, sr.estimated_cost,
+          sr.materials_cost,
+          sr.maintenance_request_id,
+          COALESCE(sr.title, mr.title) as title, sr.description,
+          COALESCE(sr.media_url, mr.media_url) as media_url,
+          sr.notes,
+          sr.status,
+          sr.price_status,
+          p.title as property_title, p.address_city, p.address_state
+   FROM service_requests sr
+   LEFT JOIN maintenance_requests mr ON sr.maintenance_request_id = mr.request_id
+   JOIN properties p ON sr.property_id = p.property_id
+   WHERE sr.provider_id IS NULL
+     AND sr.status = 'pending'
+     AND LOWER(sr.trade_type) = LOWER($1)
+   ORDER BY sr.created_at ASC
+   LIMIT 30`,
       [provider.trade_type],
     );
 
     // Job history (completed or rejected)
+    // Job history (completed or rejected) – LIMITED DETAILS for security
     const jobHistory = await pool.query(
-      `SELECT sr.*, 
+      `SELECT sr.service_id, 
           COALESCE(sr.title, mr.title) as title, 
-          p.title as property_title, sr.notes
+          sr.description,
+          sr.media_url,
+          sr.estimated_cost,
+          sr.materials_cost,
+          sr.final_price,
+          sr.status,
+          sr.price_status,
+          sr.estimated_hours,
+          sr.rejection_reason,
+          sr.status_remark,
+          sr.completed_at,
+          sr.created_at,
+          sr.accepted_at,
+          p.title as property_title,
+          p.address_city,
+          p.address_state
    FROM service_requests sr
    LEFT JOIN maintenance_requests mr ON sr.maintenance_request_id = mr.request_id
    JOIN properties p ON sr.property_id = p.property_id
