@@ -4988,7 +4988,15 @@ app.put('/api/service-requests/:id/accept', async (req, res) => {
 app.put('/api/service-requests/:id/decline', async (req, res) => {
   try {
     const { id } = req.params;
-    const { reason } = req.body; // ✅ Get reason from request body
+    // ✅ Safely extract reason with fallback
+    const { reason } = req.body || {};
+    if (!reason) {
+      return res.status(400).json({
+        success: false,
+        error: 'Reason is required to decline this job.',
+      });
+    }
+
     const authHeader = req.headers.authorization;
     if (!authHeader)
       return res.status(401).json({ success: false, error: 'Unauthorized' });
@@ -5000,7 +5008,7 @@ app.put('/api/service-requests/:id/decline', async (req, res) => {
     if (error || !user)
       return res.status(401).json({ success: false, error: 'Invalid token' });
 
-    // ✅ Get service details for notifications
+    // Get service details for notifications
     const serviceResult = await pool.query(
       `SELECT owner_id, title, maintenance_request_id FROM service_requests WHERE service_id = $1`,
       [id],
@@ -5012,7 +5020,7 @@ app.put('/api/service-requests/:id/decline', async (req, res) => {
     }
     const service = serviceResult.rows[0];
 
-    // ✅ Update status to rejected and store reason
+    // Update status to rejected and store reason
     const result = await pool.query(
       `UPDATE service_requests 
        SET status = 'rejected', 
@@ -5029,7 +5037,7 @@ app.put('/api/service-requests/:id/decline', async (req, res) => {
       });
     }
 
-    // ✅ Send notifications
+    // Send notifications
     await sendPushToUser(
       service.owner_id,
       '❌ Service Provider Declined',
