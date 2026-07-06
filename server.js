@@ -23,11 +23,11 @@ const pool = new Pool({
   ssl: { rejectUnauthorized: false },
 });
 
-// Helper: Count active jobs for a provider (accepted + in_progress)
+// Helper: Count active jobs for a provider (accepted + in_progress + negotiating)
 async function countActiveJobs(providerId) {
   const result = await pool.query(
     `SELECT COUNT(*) as count FROM service_requests 
-     WHERE provider_id = $1 AND status IN ('accepted', 'in_progress')`,
+     WHERE provider_id = $1 AND status IN ('negotiating', 'accepted', 'in_progress')`,
     [providerId],
   );
   return parseInt(result.rows[0].count, 10);
@@ -4101,39 +4101,41 @@ app.get('/api/provider/dashboard', async (req, res) => {
     }
 
     // Awaiting schedule: accepted jobs without a visit
+    // Awaiting schedule: accepted jobs without a visit (only status = 'accepted')
     const awaitingSchedule = await pool.query(
       `SELECT sr.service_id, 
-              COALESCE(sr.title, mr.title) as title, 
-              COALESCE(sr.description, mr.description) as description, 
-              sr.media_url, 
-              sr.estimated_cost, 
-              sr.final_price,
-              sr.trade_type,
-              sr.status,
-              sr.estimated_hours,
-              sr.materials_cost,
-              sr.maintenance_request_id,
-              sr.notes,
-              p.title as property_title, 
-              p.address_city, 
-              p.address_state,
-              sr.created_at
-       FROM service_requests sr
-       LEFT JOIN maintenance_requests mr ON sr.maintenance_request_id = mr.request_id
-       JOIN properties p ON sr.property_id = p.property_id
-       LEFT JOIN maintenance_visits mv ON sr.service_id = mv.service_request_id
-       WHERE sr.provider_id = $1 
-         AND sr.status = 'accepted'
-         AND mv.visit_id IS NULL
-       ORDER BY sr.created_at ASC`,
+          COALESCE(sr.title, mr.title) as title, 
+          COALESCE(sr.description, mr.description) as description, 
+          sr.media_url, 
+          sr.estimated_cost, 
+          sr.final_price,
+          sr.trade_type,
+          sr.status,
+          sr.estimated_hours,
+          sr.materials_cost,
+          sr.maintenance_request_id,
+          sr.notes,
+          p.title as property_title, 
+          p.address_city, 
+          p.address_state,
+          sr.created_at
+   FROM service_requests sr
+   LEFT JOIN maintenance_requests mr ON sr.maintenance_request_id = mr.request_id
+   JOIN properties p ON sr.property_id = p.property_id
+   LEFT JOIN maintenance_visits mv ON sr.service_id = mv.service_request_id
+   WHERE sr.provider_id = $1 
+     AND sr.status = 'accepted'
+     AND mv.visit_id IS NULL
+   ORDER BY sr.created_at ASC`,
       [user.id],
     );
 
     // Pending offers (assigned to this provider, not yet accepted)
     const pendingOffers = await pool.query(
-      `SELECT sr.service_id, sr.trade_type, sr.estimated_hours, sr.created_at, sr.estimated_cost, sr.materials_cost,
+      `SELECT sr.service_id, sr.trade_type, sr.estimated_hours, sr.created_at, sr.estimated_cost,
           sr.maintenance_request_id, sr.status, sr.price_status,
-          COALESCE(sr.title, mr.title) as title, sr.description, mr.media_url, sr.notes,
+          COALESCE(sr.title, mr.title) as title, sr.description, mr.media_url,
+          sr.notes,
           p.title as property_title, p.address_city, p.address_state
    FROM service_requests sr
    LEFT JOIN maintenance_requests mr ON sr.maintenance_request_id = mr.request_id
@@ -5276,6 +5278,7 @@ app.get(
 
 // POST /api/service-requests/:id/counter – provider proposes a new price
 // POST /api/service-requests/:id/counter – provider proposes a new price with reason
+// POST /api/service-requests/:id/counter – provider proposes a new price with reason
 app.post('/api/service-requests/:id/counter', async (req, res) => {
   const client = await pool.connect();
   try {
@@ -5298,6 +5301,42 @@ app.post('/api/service-requests/:id/counter', async (req, res) => {
         .json({ success: false, error: 'Valid counter price is required' });
     }
 
+    // ✅ CAPACITY CHECK – Before allowing the counter
+    const activeJobs = await countActiveJobs(user.id);
+    const todayJobs = await countJobsToday(user.id);
+    const weekJobs = await countJobsThisWeek(user.id);
+
+    const capResult = await pool.query(
+      `SELECT daily_capacity, weekly_capacity, max_active_jobs 
+       FROM service_providers WHERE provider_id = $1`,
+      [user.id],
+    );
+    const cap = capResult.rows[0];
+    if (!cap) {
+      return res.status(400).json({
+        success: false,
+        error: 'Provider profile not found. Please complete your registration.',
+      });
+    }
+    if (activeJobs >= cap.max_active_jobs) {
+      return res.status(400).json({
+        success: false,
+        error: `You have reached your maximum active jobs limit (${cap.max_active_jobs}). Please complete some jobs before proposing a counter.`,
+      });
+    }
+    if (todayJobs >= cap.daily_capacity) {
+      return res.status(400).json({
+        success: false,
+        error: `You have reached your daily capacity (${cap.daily_capacity} jobs). Please try again tomorrow.`,
+      });
+    }
+    if (weekJobs >= cap.weekly_capacity) {
+      return res.status(400).json({
+        success: false,
+        error: `You have reached your weekly capacity (${cap.weekly_capacity} jobs).`,
+      });
+    }
+
     await client.query('BEGIN');
 
     const serviceResult = await client.query(
@@ -5316,9 +5355,13 @@ app.post('/api/service-requests/:id/counter', async (req, res) => {
     }
     const service = serviceResult.rows[0];
 
+    // ✅ Update with status = 'negotiating' (counts toward capacity)
     await client.query(
       `UPDATE service_requests 
-       SET counter_price = $1, counter_reason = $2, price_status = 'provider_countered' 
+       SET counter_price = $1, 
+           counter_reason = $2, 
+           price_status = 'provider_countered',
+           status = 'negotiating'   -- ✅ Counts toward active jobs
        WHERE service_id = $3`,
       [parseFloat(counter_price), reason || null, id],
     );
@@ -5344,6 +5387,7 @@ app.post('/api/service-requests/:id/counter', async (req, res) => {
 });
 
 // PUT /api/service-requests/:id/decline-counter – owner declines provider counter offer
+// PUT /api/service-requests/:id/decline-counter – owner declines provider counter offer
 app.put('/api/service-requests/:id/decline-counter', async (req, res) => {
   const client = await pool.connect();
   try {
@@ -5361,7 +5405,6 @@ app.put('/api/service-requests/:id/decline-counter', async (req, res) => {
 
     await client.query('BEGIN');
 
-    // Verify ownership and that a counter exists
     const serviceResult = await client.query(
       `SELECT sr.*, sp.provider_id
        FROM service_requests sr
@@ -5378,13 +5421,14 @@ app.put('/api/service-requests/:id/decline-counter', async (req, res) => {
     }
     const service = serviceResult.rows[0];
 
-    // Reset price status, clear counter fields
+    // ✅ Reset to pending (releases capacity) and increment attempts
     await client.query(
       `UPDATE service_requests 
        SET price_status = 'owner_proposed', 
            counter_price = NULL, 
            counter_reason = NULL,
-           counter_attempts = counter_attempts + 1 
+           status = 'pending',
+           counter_attempts = counter_attempts + 1
        WHERE service_id = $1`,
       [id],
     );
@@ -5396,16 +5440,15 @@ app.put('/api/service-requests/:id/decline-counter', async (req, res) => {
     );
 
     if (attemptsResult.rows[0].counter_attempts >= 3) {
-      // Auto-reject the job
+      // ✅ Auto-reject the job
       await client.query(
         `UPDATE service_requests 
-     SET status = 'rejected',
-         status_remark = 'Counter attempts exceeded (max 3)'
-     WHERE service_id = $1`,
+         SET status = 'rejected',
+             status_remark = 'Counter attempts exceeded (max 3)'
+         WHERE service_id = $1`,
         [id],
       );
 
-      // Notify both parties about auto-rejection
       await sendPushToUser(
         service.provider_id,
         '❌ Job Auto-Rejected',
@@ -5418,23 +5461,23 @@ app.put('/api/service-requests/:id/decline-counter', async (req, res) => {
         `The provider's counter attempts for "${service.title}" exceeded the limit. The job has been rejected. You can request service again.`,
         { screen: 'Maintenance' },
       );
+    } else {
+      // ✅ Notify provider that counter was declined (but still can retry)
+      await sendPushToUser(
+        service.provider_id,
+        '❌ Counter Declined',
+        `The owner has declined your counter offer for "${service.title}". You have ${3 - attemptsResult.rows[0].counter_attempts} attempts remaining.`,
+        { screen: 'ProviderDashboard', service_id: id },
+      );
+      await sendPushToUser(
+        service.owner_id,
+        '❌ Counter Declined',
+        `You have declined the provider's counter offer for "${service.title}". The price has been reset.`,
+        { screen: 'ServiceRequest', service_id: id },
+      );
     }
 
     await client.query('COMMIT');
-
-    // Notify provider that counter was declined
-    await sendPushToUser(
-      service.provider_id,
-      '❌ Counter Declined',
-      `The owner has declined your counter offer for "${service.title}". The original price remains.`,
-      { screen: 'ProviderDashboard', service_id: id },
-    );
-    await sendPushToUser(
-      service.owner_id,
-      '❌ Counter Declined',
-      `You have declined the provider's counter offer for "${service.title}". The price has been reset.`,
-      { screen: 'ServiceRequest', service_id: id },
-    );
 
     res.json({
       success: true,
@@ -5449,6 +5492,7 @@ app.put('/api/service-requests/:id/decline-counter', async (req, res) => {
   }
 });
 
+// PUT /api/service-requests/:id/accept-price – owner accepts the final price
 // PUT /api/service-requests/:id/accept-price – owner accepts the final price
 app.put('/api/service-requests/:id/accept-price', async (req, res) => {
   const client = await pool.connect();
@@ -5467,11 +5511,12 @@ app.put('/api/service-requests/:id/accept-price', async (req, res) => {
 
     await client.query('BEGIN');
 
+    // ✅ Allow status = 'negotiating' as well
     const serviceResult = await client.query(
       `SELECT sr.*, sp.provider_id
        FROM service_requests sr
        JOIN service_providers sp ON sr.provider_id = sp.provider_id
-       WHERE sr.service_id = $1 AND sr.owner_id = $2 AND sr.status = 'pending'`,
+       WHERE sr.service_id = $1 AND sr.owner_id = $2 AND sr.status IN ('pending', 'negotiating')`,
       [id, user.id],
     );
     if (serviceResult.rows.length === 0) {
@@ -5485,7 +5530,7 @@ app.put('/api/service-requests/:id/accept-price', async (req, res) => {
 
     const finalPrice = service.counter_price || service.estimated_cost;
 
-    // ✅ Update with accepted_date AND accepted_at
+    // ✅ Update status to 'accepted'
     await client.query(
       `UPDATE service_requests 
        SET final_price = $1, 
@@ -5497,7 +5542,7 @@ app.put('/api/service-requests/:id/accept-price', async (req, res) => {
       [finalPrice, id],
     );
 
-    // Update provider availability
+    // ✅ Update provider availability to 'available'
     await client.query(
       `UPDATE service_providers 
        SET availability_status = 'available'
