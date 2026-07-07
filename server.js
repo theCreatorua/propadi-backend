@@ -4031,6 +4031,55 @@ app.post('/api/provider/upload-license', async (req, res) => {
   }
 });
 
+// Generic image upload endpoint
+app.post('/api/upload', async (req, res) => {
+  try {
+    const authHeader = req.headers.authorization;
+    if (!authHeader) {
+      return res.status(401).json({ success: false, error: 'Unauthorized' });
+    }
+    const token = authHeader.split(' ')[1];
+    const {
+      data: { user },
+      error,
+    } = await supabase.auth.getUser(token);
+    if (error || !user) {
+      return res.status(401).json({ success: false, error: 'Invalid token' });
+    }
+
+    const { base64, fileType, bucket } = req.body;
+    if (!base64) {
+      return res
+        .status(400)
+        .json({ success: false, error: 'No image provided' });
+    }
+
+    // Use 'direct-request-images' as default bucket
+    const targetBucket = bucket || 'direct-request-images';
+    const fileExtension = fileType || 'jpeg';
+    const fileName = `direct/${user.id}/${Date.now()}_${Math.random().toString(36).substring(2, 8)}.${fileExtension}`;
+
+    const buffer = Buffer.from(base64, 'base64');
+    const { error: uploadError } = await supabase.storage
+      .from(targetBucket)
+      .upload(fileName, buffer, {
+        contentType: `image/${fileExtension}`,
+      });
+    if (uploadError) {
+      console.error('Upload error:', uploadError);
+      throw uploadError;
+    }
+
+    const {
+      data: { publicUrl },
+    } = supabase.storage.from(targetBucket).getPublicUrl(fileName);
+    res.json({ success: true, url: publicUrl });
+  } catch (err) {
+    console.error('Upload error:', err);
+    res.status(500).json({ success: false, error: 'Upload failed' });
+  }
+});
+
 // GET /api/provider/dashboard – get provider dashboard data (with visit info)
 app.get('/api/provider/dashboard', async (req, res) => {
   try {
