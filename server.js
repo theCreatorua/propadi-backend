@@ -5650,7 +5650,7 @@ app.put('/api/service-requests/:id/accept-price', async (req, res) => {
     await sendPushToUser(
       service.provider_id,
       '✅ Price Accepted',
-      `The owner has accepted your counter offer of ₦${finalPrice.toLocaleString()} for "${service.title}". You can now proceed.`,
+      `The owner has accepted your counter offer of ₦${formatCurrency(Number(finalPrice))} for "${service.title}". You can now proceed.`,
       { screen: 'ProviderDashboard', service_id: id },
     );
 
