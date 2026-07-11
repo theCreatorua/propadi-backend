@@ -1297,7 +1297,7 @@ app.post('/api/webhook/paystack', async (req, res) => {
       await sendPushToUser(
         tenancy.owner_id,
         '💰 Rent Payment Received',
-        `₦${rentAmount.toLocaleString()} has been added to your wallet for ${propertyTitle}`,
+        `₦${formatCurrency(Number(rentAmount))} has been added to your wallet for ${propertyTitle}`,
         { screen: 'LandlordWallet' },
       );
     } catch (error) {
@@ -5467,7 +5467,7 @@ app.post('/api/service-requests/:id/counter', async (req, res) => {
     await sendPushToUser(
       service.owner_id,
       '💬 Counter Offer Proposed',
-      `The provider has proposed a counter offer of ₦${parseFloat(counter_price).toLocaleString()} for "${service.title || 'your job'}". ${reason ? 'Reason: ' + reason : ''}`,
+      `The provider has proposed a counter offer of ₦${formatCurrency(Number(parseFloat(counter_price)))} for "${service.title || 'your job'}". ${reason ? 'Reason: ' + reason : ''}`,
       { screen: 'ServiceRequest', service_id: id },
     );
 
@@ -5821,7 +5821,7 @@ app.put('/api/service-requests/:id/release', async (req, res) => {
     await sendPushToUser(
       service.provider_id,
       '✅ Payment Released',
-      `₦${amount.toLocaleString()} has been added to your wallet for the completed job.`,
+      `₦${formatCurrency(Number(amount))} has been added to your wallet for the completed job.`,
       { screen: 'ProviderDashboard', service_id: id },
     );
 
