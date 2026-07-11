@@ -4808,17 +4808,44 @@ app.post('/api/service-requests', async (req, res) => {
         `Direct request ${insertResult.rows[0].service_id} sent to provider ${provider_id}`,
       );
     } else {
-      // ✅ No provider selected – notify all available providers with matching trade
-      // Optional: Filter by location/proximity
-      const nearbyProviders = await client.query(
-        `SELECT sp.provider_id, u.name, u.address_city, u.address_state 
-     FROM service_providers sp
-     JOIN users u ON sp.provider_id = u.user_id
-     WHERE sp.is_verified = true
-       AND sp.availability_status = 'available'
-       AND LOWER(sp.trade_type) = LOWER($1)`,
-        [trade_type],
+      // ✅ No provider selected – notify available providers with matching trade and location
+
+      // Get property location for filtering
+      const propertyResult = await client.query(
+        `SELECT address_city, address_state FROM properties WHERE property_id = $1`,
+        [propertyId],
       );
+      const property = propertyResult.rows[0] || {};
+
+      let nearbyProviders;
+      if (property.address_city || property.address_state) {
+        // Filter by trade + city/state
+        nearbyProviders = await client.query(
+          `SELECT sp.provider_id, u.name, u.address_city, u.address_state 
+       FROM service_providers sp
+       JOIN users u ON sp.provider_id = u.user_id
+       WHERE sp.is_verified = true
+         AND sp.availability_status = 'available'
+         AND LOWER(sp.trade_type) = LOWER($1)
+         AND (u.address_city ILIKE $2 OR u.address_state ILIKE $3)`,
+          [
+            trade_type,
+            `%${property.address_city || ''}%`,
+            `%${property.address_state || ''}%`,
+          ],
+        );
+      } else {
+        // Fallback: filter by trade only if no property location
+        nearbyProviders = await client.query(
+          `SELECT sp.provider_id, u.name, u.address_city, u.address_state 
+       FROM service_providers sp
+       JOIN users u ON sp.provider_id = u.user_id
+       WHERE sp.is_verified = true
+         AND sp.availability_status = 'available'
+         AND LOWER(sp.trade_type) = LOWER($1)`,
+          [trade_type],
+        );
+      }
 
       console.log(
         `Broadcasting direct request ${insertResult.rows[0].service_id} to ${nearbyProviders.rows.length} nearby providers`,
@@ -4828,7 +4855,7 @@ app.post('/api/service-requests', async (req, res) => {
         await sendPushToUser(
           provider.provider_id,
           '🔧 New Direct Service Request',
-          `A new direct request "${title}" is available in ${provider.address_city}.`,
+          `A new direct request "${title}" is available in ${provider.address_city || 'your area'}.`,
           { screen: 'ProviderDashboard' },
         );
       }
