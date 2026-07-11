@@ -4792,13 +4792,46 @@ app.post('/api/service-requests', async (req, res) => {
 
     await client.query('COMMIT');
 
+    // After the insert is successful, notify providers
     if (provider_id) {
+      // ✅ Specific provider selected – notify only them
       await sendPushToUser(
         provider_id,
-        '🔧 New Service Request',
-        `You have a new ${trade_type} request for property "${serviceRequest.title}". Please check your dashboard.`,
-        { screen: 'ProviderDashboard', service_id: serviceRequest.service_id },
+        '🔧 New Direct Service Request',
+        `A new direct service request "${title || 'Job'}" has been created. Check your dashboard.`,
+        {
+          screen: 'ProviderDashboard',
+          service_id: insertResult.rows[0].service_id,
+        },
       );
+      console.log(
+        `Direct request ${insertResult.rows[0].service_id} sent to provider ${provider_id}`,
+      );
+    } else {
+      // ✅ No provider selected – notify all available providers with matching trade
+      // Optional: Filter by location/proximity
+      const nearbyProviders = await client.query(
+        `SELECT sp.provider_id, u.name, u.address_city, u.address_state 
+     FROM service_providers sp
+     JOIN users u ON sp.provider_id = u.user_id
+     WHERE sp.is_verified = true
+       AND sp.availability_status = 'available'
+       AND LOWER(sp.trade_type) = LOWER($1)`,
+        [trade_type],
+      );
+
+      console.log(
+        `Broadcasting direct request ${insertResult.rows[0].service_id} to ${nearbyProviders.rows.length} nearby providers`,
+      );
+
+      for (const provider of nearbyProviders.rows) {
+        await sendPushToUser(
+          provider.provider_id,
+          '🔧 New Direct Service Request',
+          `A new direct request "${title}" is available in ${provider.address_city}.`,
+          { screen: 'ProviderDashboard' },
+        );
+      }
     }
 
     res.json({ success: true, serviceRequest });
