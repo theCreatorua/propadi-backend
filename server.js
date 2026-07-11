@@ -5447,7 +5447,6 @@ app.post('/api/service-requests/:id/counter', async (req, res) => {
         [user.id, id],
       );
     }
-    const service = serviceResult.rows[0];
 
     // ✅ Update with status = 'negotiating' (counts toward capacity)
     await client.query(
