@@ -4946,7 +4946,10 @@ app.put('/api/service-requests/:id/accept', async (req, res) => {
     const service = serviceResult.rows[0];
 
     // ✅ Correct condition: pending AND provider_id matches the current user
-    if (service.status !== 'pending' || service.provider_id !== user.id) {
+    if (
+      service.status !== 'pending' ||
+      (service.provider_id !== null && service.provider_id !== user.id)
+    ) {
       console.log(
         `🔴 Invalid state: status=${service.status}, provider_id=${service.provider_id}`,
       );
@@ -5423,9 +5426,9 @@ app.post('/api/service-requests/:id/counter', async (req, res) => {
 
     const serviceResult = await client.query(
       `SELECT sr.*, u.name as owner_name
-       FROM service_requests sr
-       JOIN users u ON sr.owner_id = u.user_id
-       WHERE sr.service_id = $1 AND sr.provider_id = $2 AND sr.status = 'pending'`,
+   FROM service_requests sr
+   JOIN users u ON sr.owner_id = u.user_id
+   WHERE sr.service_id = $1 AND (sr.provider_id = $2 OR sr.provider_id IS NULL) AND sr.status = 'pending'`,
       [id, user.id],
     );
     if (serviceResult.rows.length === 0) {
@@ -5434,6 +5437,15 @@ app.post('/api/service-requests/:id/counter', async (req, res) => {
         success: false,
         error: 'Service request not found or not eligible for counter',
       });
+    }
+    const service = serviceResult.rows[0];
+
+    // ✅ Assign provider if null
+    if (!service.provider_id) {
+      await client.query(
+        `UPDATE service_requests SET provider_id = $1 WHERE service_id = $2`,
+        [user.id, id],
+      );
     }
     const service = serviceResult.rows[0];
 
