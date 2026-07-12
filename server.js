@@ -1297,7 +1297,7 @@ app.post('/api/webhook/paystack', async (req, res) => {
       await sendPushToUser(
         tenancy.owner_id,
         '💰 Rent Payment Received',
-        `₦${formatCurrency(Number(rentAmount))} has been added to your wallet for ${propertyTitle}`,
+        `₦${parseFloat(Number(rentAmount)).toLocaleString()} has been added to your wallet for ${propertyTitle}`,
         { screen: 'LandlordWallet' },
       );
     } catch (error) {
@@ -5527,7 +5527,7 @@ app.post('/api/service-requests/:id/counter', async (req, res) => {
     await sendPushToUser(
       service.owner_id,
       '💬 Counter Offer Proposed',
-      `The provider has proposed a counter offer of ₦${formatCurrency(Number(parseFloat(counter_price)))} for "${service.title || 'your job'}". ${reason ? 'Reason: ' + reason : ''}`,
+      `The provider has proposed a counter offer of ₦${parseFloat(Number(counter_price)).toLocaleString()} for "${service.title || 'your job'}". ${reason ? 'Reason: ' + reason : ''}`,
       { screen: 'ServiceRequest', service_id: id },
     );
 
@@ -5710,7 +5710,7 @@ app.put('/api/service-requests/:id/accept-price', async (req, res) => {
     await sendPushToUser(
       service.provider_id,
       '✅ Price Accepted',
-      `The owner has accepted your counter offer of ₦${formatCurrency(Number(finalPrice))} for "${service.title}". You can now proceed.`,
+      `The owner has accepted your counter offer of ₦${parseFloat(Number(finalPrice)).toLocaleString()} for "${service.title}". You can now proceed.`,
       { screen: 'ProviderDashboard', service_id: id },
     );
 
@@ -5881,7 +5881,7 @@ app.put('/api/service-requests/:id/release', async (req, res) => {
     await sendPushToUser(
       service.provider_id,
       '✅ Payment Released',
-      `₦${formatCurrency(Number(amount))} has been added to your wallet for the completed job.`,
+      `₦${parseFloat(Number(amount)).toLocaleString()} has been added to your wallet for the completed job.`,
       { screen: 'ProviderDashboard', service_id: id },
     );
 
