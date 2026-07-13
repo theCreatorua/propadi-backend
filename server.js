@@ -6028,15 +6028,24 @@ app.post('/api/maintenance-visits', async (req, res) => {
 
     await client.query('BEGIN');
 
-    // Verify ownership
+    // Verify ownership and get provider + renter info
     const serviceCheck = await client.query(
-      `SELECT owner_id, provider_id FROM service_requests WHERE service_id = $1`,
+      `SELECT sr.owner_id, sr.provider_id, mr.renter_id
+       FROM service_requests sr
+       LEFT JOIN maintenance_requests mr ON sr.maintenance_request_id = mr.request_id
+       WHERE sr.service_id = $1`,
       [service_request_id],
     );
-    if (
-      serviceCheck.rows.length === 0 ||
-      serviceCheck.rows[0].owner_id !== user.id
-    ) {
+    if (serviceCheck.rows.length === 0) {
+      await client.query('ROLLBACK');
+      return res.status(404).json({
+        success: false,
+        error: 'Service request not found',
+      });
+    }
+    const { owner_id, provider_id, renter_id } = serviceCheck.rows[0];
+
+    if (owner_id !== user.id) {
       await client.query('ROLLBACK');
       return res.status(403).json({
         success: false,
@@ -6044,21 +6053,7 @@ app.post('/api/maintenance-visits', async (req, res) => {
       });
     }
 
-    const hasConflict = await hasScheduleConflict(
-      serviceCheck.rows[0].provider_id,
-      scheduled_start,
-      scheduled_end || new Date(new Date(scheduled_start).getTime() + 3600000),
-    );
-    if (hasConflict) {
-      await client.query('ROLLBACK');
-      return res.status(400).json({
-        success: false,
-        error:
-          'The provider already has a scheduled visit at that time. Please choose a different time.',
-      });
-    }
-
-    // Generate secure PIN (6 digits) and QR code (for simplicity, we store a random string)
+    // Generate secure PIN (6 digits) and QR code
     const pin = Math.floor(100000 + Math.random() * 900000).toString();
     const qrCode = `VISIT_${Date.now()}_${Math.random().toString(36).substring(2, 8)}`;
 
@@ -6073,19 +6068,16 @@ app.post('/api/maintenance-visits', async (req, res) => {
 
     await client.query('COMMIT');
 
-    // Notify provider and renter
-    const serviceResult = await client.query(
-      `SELECT provider_id, renter_id FROM service_requests WHERE service_id = $1`,
-      [service_request_id],
-    );
-    if (serviceResult.rows.length > 0) {
-      const { provider_id, renter_id } = serviceResult.rows[0];
+    // Notify provider and renter (if they exist)
+    if (provider_id) {
       await sendPushToUser(
         provider_id,
         '📅 Visit Scheduled',
         `A maintenance visit has been scheduled for ${new Date(scheduled_start).toLocaleString()}. Please confirm your availability.`,
         { screen: 'Maintenance', visit_id: visit.visit_id },
       );
+    }
+    if (renter_id) {
       await sendPushToUser(
         renter_id,
         '📅 Visit Scheduled',
