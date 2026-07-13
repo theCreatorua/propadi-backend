@@ -6053,6 +6053,24 @@ app.post('/api/maintenance-visits', async (req, res) => {
       });
     }
 
+    // ✅ ADD CONFLICT CHECK (prevent overlapping visits)
+    if (provider_id) {
+      const hasConflict = await hasScheduleConflict(
+        provider_id,
+        scheduled_start,
+        scheduled_end ||
+          new Date(new Date(scheduled_start).getTime() + 3600000),
+      );
+      if (hasConflict) {
+        await client.query('ROLLBACK');
+        return res.status(400).json({
+          success: false,
+          error:
+            'The provider already has a scheduled visit at that time. Please choose a different time.',
+        });
+      }
+    }
+
     // Generate secure PIN (6 digits) and QR code
     const pin = Math.floor(100000 + Math.random() * 900000).toString();
     const qrCode = `VISIT_${Date.now()}_${Math.random().toString(36).substring(2, 8)}`;
@@ -6068,7 +6086,7 @@ app.post('/api/maintenance-visits', async (req, res) => {
 
     await client.query('COMMIT');
 
-    // Notify provider and renter (if they exist)
+    // Notify provider and renter (using the already-fetched IDs)
     if (provider_id) {
       await sendPushToUser(
         provider_id,
