@@ -4185,9 +4185,9 @@ app.get('/api/provider/dashboard', async (req, res) => {
     // Pending offers (assigned to this provider, not yet accepted)
     // Pending offers – includes both 'pending' and 'negotiating'
     const pendingOffers = await pool.query(
-      `SELECT sr.service_id, sr.trade_type, sr.estimated_hours, sr.created_at, sr.estimated_cost,
+      `SELECT sr.service_id, sr.trade_type, sr.estimated_hours, sr.counter_price, sr.created_at, sr.estimated_cost,
           sr.materials_cost,
-          sr.maintenance_request_id, sr.status, sr.price_status,
+          sr.maintenance_request_id, sr.status, sr.price_status, 
           sr.provider_id,
           COALESCE(sr.title, mr.title) as title, sr.description, mr.media_url,
           sr.notes,
