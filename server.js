@@ -6467,6 +6467,7 @@ app.get('/api/maintenance-visits/single/:visitId', async (req, res) => {
         p.property_id,
         sr.estimated_cost,
         sr.final_price,
+        sr.media_url,
         sr.price_status,
         sr.materials_cost,
         p.title as property_title,
