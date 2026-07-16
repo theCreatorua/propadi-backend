@@ -4122,6 +4122,10 @@ app.get('/api/provider/dashboard', async (req, res) => {
           sr.estimated_hours,
           sr.notes,
           sr.accepted_at,
+          sr.maintenance_request_id,
+          sr.created_at,
+          sr.trade_type,
+          sr.provider_id,
           p.title as property_title, 
           p.address_street, 
           p.address_city, 
@@ -6374,10 +6378,11 @@ app.get('/api/maintenance-visits/single/:visitId', async (req, res) => {
         u_renter.name as renter_name
       FROM maintenance_visits mv
       JOIN service_requests sr ON mv.service_request_id = sr.service_id
+      LEFT JOIN maintenance_requests mr ON sr.maintenance_request_id = mr.request_id
       JOIN properties p ON sr.property_id = p.property_id
       LEFT JOIN users u_owner ON sr.owner_id = u_owner.user_id
       LEFT JOIN users u_provider ON sr.provider_id = u_provider.user_id
-      LEFT JOIN users u_renter ON sr.renter_id = u_renter.user_id
+      LEFT JOIN users u_renter ON mr.renter_id = u_renter.user_id
       WHERE mv.visit_id = $1
     `;
     const result = await pool.query(query, [visitId]);
