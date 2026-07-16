@@ -6355,6 +6355,7 @@ app.get('/api/maintenance-visits/single/:visitId', async (req, res) => {
     if (error || !user)
       return res.status(401).json({ success: false, error: 'Invalid token' });
 
+    // ✅ CORRECTED: Join with maintenance_requests to get renter_id
     const query = `
       SELECT 
         mv.visit_id,
