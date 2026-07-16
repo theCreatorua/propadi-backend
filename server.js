@@ -6542,6 +6542,7 @@ app.post('/api/maintenance-visits/:id/request-pin', async (req, res) => {
 
 // POST /api/maintenance-visits/:id/generate-pin – owner generates a new PIN for the visit
 // POST /api/maintenance-visits/:id/generate-pin – owner generates a new PIN
+// POST /api/maintenance-visits/:id/generate-pin – owner generates a new PIN
 app.post('/api/maintenance-visits/:id/generate-pin', async (req, res) => {
   try {
     const { id } = req.params;
@@ -6556,9 +6557,9 @@ app.post('/api/maintenance-visits/:id/generate-pin', async (req, res) => {
     if (error || !user)
       return res.status(401).json({ success: false, error: 'Invalid token' });
 
-    // Verify ownership
+    // ✅ Ensure query includes sr.provider_id
     const result = await pool.query(
-      `SELECT sr.owner_id 
+      `SELECT sr.owner_id, sr.provider_id, sr.title 
        FROM maintenance_visits mv 
        JOIN service_requests sr ON mv.service_request_id = sr.service_id 
        WHERE mv.visit_id = $1`,
@@ -6567,7 +6568,12 @@ app.post('/api/maintenance-visits/:id/generate-pin', async (req, res) => {
     if (result.rows.length === 0) {
       return res.status(404).json({ success: false, error: 'Visit not found' });
     }
-    if (result.rows[0].owner_id !== user.id) {
+
+    // ✅ Destructure safely (provider_id may be null)
+    const { owner_id, provider_id, title } = result.rows[0];
+
+    // Verify ownership
+    if (owner_id !== user.id) {
       return res.status(403).json({ success: false, error: 'Not your visit' });
     }
 
@@ -6578,7 +6584,7 @@ app.post('/api/maintenance-visits/:id/generate-pin', async (req, res) => {
       [pin, id],
     );
 
-    // ✅ Send PIN to provider
+    // ✅ Send PIN to provider if provider exists
     if (provider_id) {
       await sendPushToUser(
         provider_id,
@@ -6588,11 +6594,11 @@ app.post('/api/maintenance-visits/:id/generate-pin', async (req, res) => {
       );
     }
 
-    // ✅ Also notify owner that PIN was sent
+    // ✅ Notify owner that PIN was generated (and optionally sent)
     await sendPushToUser(
       owner_id,
-      '📤 PIN Sent',
-      `The PIN has been generated and sent to the provider for "${title}".`,
+      '📤 PIN Generated',
+      `The PIN has been generated and ${provider_id ? 'sent to the provider' : 'is ready to share'} for "${title}".`,
       { screen: 'VisitManagement', visit_id: id },
     );
 
