@@ -6460,6 +6460,15 @@ app.get('/api/maintenance-visits/single/:visitId', async (req, res) => {
         sr.trade_type,
         sr.title,
         sr.description,
+        sr.maintenance_request_id,
+        sr.owner_id,
+        sr.provider_id,
+        mr.renter_id,
+        p.property_id,
+        sr.estimated_cost,
+        sr.final_price,
+        sr.price_status,
+        sr.materials_cost,
         p.title as property_title,
         p.address_street,
         p.address_city,
@@ -6567,6 +6576,24 @@ app.post('/api/maintenance-visits/:id/generate-pin', async (req, res) => {
     await pool.query(
       `UPDATE maintenance_visits SET pin = $1 WHERE visit_id = $2`,
       [pin, id],
+    );
+
+    // ✅ Send PIN to provider
+    if (provider_id) {
+      await sendPushToUser(
+        provider_id,
+        '🔑 PIN Generated',
+        `The owner has generated the PIN for "${title}". You can now check in using this PIN.`,
+        { screen: 'ProviderDashboard' },
+      );
+    }
+
+    // ✅ Also notify owner that PIN was sent
+    await sendPushToUser(
+      owner_id,
+      '📤 PIN Sent',
+      `The PIN has been generated and sent to the provider for "${title}".`,
+      { screen: 'VisitManagement', visit_id: id },
     );
 
     res.json({ success: true, pin });
