@@ -6093,7 +6093,7 @@ app.post('/api/maintenance-visits', async (req, res) => {
     if (provider_id) {
       await sendPushToUser(
         provider_id,
-        '📅 Visit Scheduled',
+        '📅 Maintenance Visit Scheduled',
         `A maintenance visit has been scheduled for ${new Date(scheduled_start).toLocaleString()}. Please confirm your availability.`,
         { screen: 'Maintenance', visit_id: visit.visit_id },
       );
@@ -6101,7 +6101,7 @@ app.post('/api/maintenance-visits', async (req, res) => {
     if (renter_id) {
       await sendPushToUser(
         renter_id,
-        '📅 Visit Scheduled',
+        '📅 Maintenance Visit Scheduled',
         `A maintenance visit has been scheduled for ${new Date(scheduled_start).toLocaleString()}. Please confirm your availability.`,
         { screen: 'Maintenance', visit_id: visit.visit_id },
       );
@@ -6221,14 +6221,14 @@ app.post('/api/maintenance-visits/:id/checkin', async (req, res) => {
       const { owner_id, renter_id } = serviceResult.rows[0];
       await sendPushToUser(
         owner_id,
-        '🔧 Provider Checked In',
-        `The provider has arrived for the scheduled visit.`,
+        '🔧 Provider Has Arrived',
+        `The provider has arrived for the scheduled maintenance visit.`,
         { screen: 'Maintenance', visit_id: id },
       );
       await sendPushToUser(
         renter_id,
-        '🔧 Provider Checked In',
-        `The provider has arrived. Please ensure safety.`,
+        '🔧 Provider Has Arrived',
+        `The provider has arrived for the maintenance visit. Please confirm you are safe.`,
         { screen: 'Maintenance', visit_id: id },
       );
     }
