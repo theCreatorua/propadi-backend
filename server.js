@@ -6590,7 +6590,7 @@ app.post('/api/maintenance-visits/:id/generate-pin', async (req, res) => {
       await sendPushToUser(
         provider_id,
         '🔑 PIN Generated',
-        `The owner has generated the PIN for "${title}". You can now check in using this PIN.`,
+        `The owner has generated the PIN for "${title}". Your PIN: ${pin}. Use this to check in.`,
         { screen: 'ProviderDashboard' },
       );
     }
