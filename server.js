@@ -6232,6 +6232,7 @@ app.put('/api/maintenance-visits/:id/confirm', async (req, res) => {
 });
 
 // POST /api/maintenance-visits/:id/checkin – provider checks in with QR/PIN and GPS
+// POST /api/maintenance-visits/:id/checkin – provider checks in with PIN and GPS
 app.post('/api/maintenance-visits/:id/checkin', async (req, res) => {
   try {
     const { id } = req.params;
@@ -6251,21 +6252,47 @@ app.post('/api/maintenance-visits/:id/checkin', async (req, res) => {
       return res.status(400).json({ success: false, error: 'PIN is required' });
     }
 
+    // ✅ Get visit details including provider, owner, and renter
     const visitResult = await pool.query(
-      `SELECT * FROM maintenance_visits WHERE visit_id = $1 AND status = 'scheduled'`,
+      `SELECT mv.*, 
+              sr.provider_id, 
+              sr.owner_id, 
+              mr.renter_id,
+              sr.title,
+              p.address_city,
+              p.address_state
+       FROM maintenance_visits mv
+       JOIN service_requests sr ON mv.service_request_id = sr.service_id
+       LEFT JOIN maintenance_requests mr ON sr.maintenance_request_id = mr.request_id
+       JOIN properties p ON sr.property_id = p.property_id
+       WHERE mv.visit_id = $1`,
       [id],
     );
     if (visitResult.rows.length === 0) {
-      return res.status(404).json({
-        success: false,
-        error: 'Visit not found or not in scheduled state',
-      });
+      return res.status(404).json({ success: false, error: 'Visit not found' });
     }
     const visit = visitResult.rows[0];
+
+    // Verify the user is the assigned provider
+    if (visit.provider_id !== user.id) {
+      return res
+        .status(403)
+        .json({
+          success: false,
+          error: 'You are not the assigned provider for this visit',
+        });
+    }
 
     // Verify PIN
     if (visit.pin !== pin) {
       return res.status(400).json({ success: false, error: 'Invalid PIN' });
+    }
+
+    // Check if already checked in
+    if (visit.check_in_time) {
+      return res
+        .status(400)
+        .json({ success: false, error: 'Already checked in' });
     }
 
     // Update check-in
@@ -6280,33 +6307,29 @@ app.post('/api/maintenance-visits/:id/checkin', async (req, res) => {
     );
 
     // Notify owner and renter
-    const serviceResult = await pool.query(
-      `SELECT owner_id, renter_id FROM service_requests WHERE service_id = (SELECT service_request_id FROM maintenance_visits WHERE visit_id = $1)`,
-      [id],
-    );
-    if (serviceResult.rows.length > 0) {
-      const { owner_id, renter_id } = serviceResult.rows[0];
+    if (visit.owner_id) {
       await sendPushToUser(
-        owner_id,
-        '🔧 Provider Has Arrived',
-        `The provider has arrived for the scheduled maintenance visit.`,
+        visit.owner_id,
+        '🔧 Provider Checked In',
+        `The provider has arrived for the scheduled visit "${visit.title}".`,
         { screen: 'Maintenance', visit_id: id },
       );
+    }
+    if (visit.renter_id) {
       await sendPushToUser(
-        renter_id,
-        '🔧 Provider Has Arrived',
-        `The provider has arrived for the maintenance visit. Please confirm you are safe.`,
+        visit.renter_id,
+        '🔧 Provider Checked In',
+        `The provider has arrived. Please ensure safety.`,
         { screen: 'Maintenance', visit_id: id },
       );
     }
 
-    res.json({ success: true, message: 'Check-in successful' });
+    res.json({ success: true, message: 'Check‑in successful' });
   } catch (err) {
-    console.error('Check-in error:', err);
+    console.error('Check‑in error:', err);
     res.status(500).json({ success: false, error: err.message });
   }
 });
-
 // PUT /api/maintenance-visits/:id/safety – confirm safety (renter or provider)
 app.put('/api/maintenance-visits/:id/safety', async (req, res) => {
   try {
