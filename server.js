@@ -6104,7 +6104,7 @@ app.post('/api/maintenance-visits', async (req, res) => {
 
     // Verify ownership and get provider + renter info
     const serviceCheck = await client.query(
-      `SELECT sr.owner_id, sr.provider_id, mr.renter_id
+      `SELECT sr.owner_id, sr.provider_id, mr.renter_id, sr.title AS service_title
        FROM service_requests sr
        LEFT JOIN maintenance_requests mr ON sr.maintenance_request_id = mr.request_id
        WHERE sr.service_id = $1`,
@@ -6117,7 +6117,8 @@ app.post('/api/maintenance-visits', async (req, res) => {
         error: 'Service request not found',
       });
     }
-    const { owner_id, provider_id, renter_id } = serviceCheck.rows[0];
+    const { owner_id, provider_id, renter_id, service_title } =
+      serviceCheck.rows[0];
 
     if (owner_id !== user.id) {
       await client.query('ROLLBACK');
@@ -6168,21 +6169,22 @@ app.post('/api/maintenance-visits', async (req, res) => {
       await client.query('COMMIT');
 
       // Notify provider and renter of reschedule
+      const newTimeLabel = new Date(scheduled_start).toLocaleString();
+      const providerMessage = `The visit for ${service_title || 'your service request'} has been rescheduled to ${newTimeLabel}.`;
+      const renterMessage = `Your visit has been rescheduled to ${newTimeLabel}.`;
+
       if (provider_id) {
         await sendPushToUser(
           provider_id,
           '📅 Visit Rescheduled',
-          `The maintenance visit has been rescheduled to ${new Date(scheduled_start).toLocaleString()}.`,
+          providerMessage,
           { screen: 'ProviderDashboard' },
         );
       }
       if (renter_id) {
-        await sendPushToUser(
-          renter_id,
-          '📅 Visit Rescheduled',
-          `The maintenance visit has been rescheduled to ${new Date(scheduled_start).toLocaleString()}.`,
-          { screen: 'Maintenance' },
-        );
+        await sendPushToUser(renter_id, '📅 Visit Rescheduled', renterMessage, {
+          screen: 'Maintenance',
+        });
       }
 
       return res.json({ success: true, visit });
