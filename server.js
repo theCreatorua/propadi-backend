@@ -4256,6 +4256,37 @@ app.get('/api/provider/dashboard', async (req, res) => {
       [user.id],
     );
 
+    // Scheduled jobs: accepted jobs with a visit scheduled, regardless of provider status
+    const scheduledJobs = await pool.query(
+      `SELECT sr.service_id, 
+          COALESCE(sr.title, mr.title) as title, 
+          COALESCE(sr.description, mr.description) as description, 
+          sr.media_url, 
+          sr.estimated_cost, 
+          sr.materials_cost,
+          sr.final_price,
+          sr.trade_type,
+          sr.status,
+          sr.price_status,
+          sr.estimated_hours,
+          sr.maintenance_request_id,
+          sr.notes,
+          p.title as property_title, 
+          p.address_city, 
+          p.address_state,
+          mv.scheduled_start,
+          mv.status as visit_status
+   FROM service_requests sr
+   LEFT JOIN maintenance_requests mr ON sr.maintenance_request_id = mr.request_id
+   JOIN properties p ON sr.property_id = p.property_id
+   JOIN maintenance_visits mv ON sr.service_id = mv.service_request_id
+   WHERE sr.provider_id = $1 
+     AND sr.status = 'accepted'
+     AND mv.status IN ('scheduled', 'checked_in')
+   ORDER BY mv.scheduled_start ASC`,
+      [user.id],
+    );
+
     // Earnings
     const earnings = await pool.query(
       `SELECT COALESCE(SUM(actual_cost), 0) as total_earned
@@ -4274,6 +4305,7 @@ app.get('/api/provider/dashboard', async (req, res) => {
       provider,
       currentJob,
       awaitingSchedule: awaitingSchedule.rows,
+      scheduledJobs: scheduledJobs.rows,
       pendingOffers: pendingOffers.rows,
       availableJobs: availableJobs.rows,
       jobHistory: jobHistory.rows,
@@ -6253,6 +6285,7 @@ app.post('/api/maintenance-visits/:id/checkin', async (req, res) => {
     }
 
     // ✅ Get visit details including provider, owner, and renter
+    // Inside the check‑in endpoint, after fetching the visit
     const visitResult = await pool.query(
       `SELECT mv.*, 
               sr.provider_id, 
@@ -6273,14 +6306,25 @@ app.post('/api/maintenance-visits/:id/checkin', async (req, res) => {
     }
     const visit = visitResult.rows[0];
 
+    if (visit.pin_used) {
+      return res
+        .status(400)
+        .json({ success: false, error: 'PIN already used' });
+    }
+
+    if (!visit.pin_expires_at || new Date() > new Date(visit.pin_expires_at)) {
+      return res.status(400).json({
+        success: false,
+        error: 'PIN has expired. Please request a new one.',
+      });
+    }
+
     // Verify the user is the assigned provider
     if (visit.provider_id !== user.id) {
-      return res
-        .status(403)
-        .json({
-          success: false,
-          error: 'You are not the assigned provider for this visit',
-        });
+      return res.status(403).json({
+        success: false,
+        error: 'You are not the assigned provider for this visit',
+      });
     }
 
     // Verify PIN
@@ -6301,7 +6345,8 @@ app.post('/api/maintenance-visits/:id/checkin', async (req, res) => {
        SET status = 'checked_in', 
            check_in_time = NOW(), 
            gps_lat = $1, 
-           gps_lng = $2 
+           gps_lng = $2,
+           pin_used = TRUE 
        WHERE visit_id = $3`,
       [gps_lat || null, gps_lng || null, id],
     );
@@ -6476,6 +6521,7 @@ app.get('/api/maintenance-visits/single/:visitId', async (req, res) => {
         mv.scheduled_end,
         mv.status,
         mv.pin,
+        mv.pin_expires_at,
         mv.check_in_time,
         mv.renter_safety_confirmed,
         mv.provider_safety_confirmed,
@@ -6601,11 +6647,17 @@ app.post('/api/maintenance-visits/:id/generate-pin', async (req, res) => {
       return res.status(403).json({ success: false, error: 'Not your visit' });
     }
 
-    // Generate 6‑digit PIN
+    // Generate 6‑digit PIN with 24‑hour expiry
     const pin = Math.floor(100000 + Math.random() * 900000).toString();
+    const expiresAt = new Date(Date.now() + 24 * 60 * 60 * 1000); // 24 hours
+
     await pool.query(
-      `UPDATE maintenance_visits SET pin = $1 WHERE visit_id = $2`,
-      [pin, id],
+      `UPDATE maintenance_visits 
+   SET pin = $1, 
+       pin_expires_at = $2, 
+       pin_used = FALSE 
+   WHERE visit_id = $3`,
+      [pin, expiresAt, id],
     );
 
     // ✅ Send PIN to provider if provider exists
@@ -6626,7 +6678,7 @@ app.post('/api/maintenance-visits/:id/generate-pin', async (req, res) => {
       { screen: 'VisitManagement', visit_id: id },
     );
 
-    res.json({ success: true, pin });
+    res.json({ success: true, pin, pin_expires_at: expiresAt.toISOString() });
   } catch (err) {
     console.error('Generate PIN error:', err);
     res.status(500).json({ success: false, error: err.message });
