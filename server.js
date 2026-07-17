@@ -4307,7 +4307,7 @@ app.get('/api/provider/dashboard', async (req, res) => {
           p.address_city, 
           p.address_state,
           mv.visit_id,
-          mv.scheduled_start,
+          mv.scheduled_start as visit_scheduled_start,
           mv.status as visit_status
    FROM service_requests sr
    LEFT JOIN maintenance_requests mr ON sr.maintenance_request_id = mr.request_id
@@ -4360,6 +4360,7 @@ app.get('/api/provider/dashboard', async (req, res) => {
 
 // PUT /api/provider/availability – update availability status
 // PUT /api/provider/availability – update availability status (with guardrails)
+// PUT /api/provider/availability – update availability status (with guardrails)
 app.put('/api/provider/availability', async (req, res) => {
   try {
     const authHeader = req.headers.authorization;
@@ -4379,7 +4380,52 @@ app.put('/api/provider/availability', async (req, res) => {
       return res.status(400).json({ success: false, error: 'Invalid status' });
     }
 
-    // ✅ Prevent setting 'available' if provider has an active job
+    // ✅ Get current provider status
+    const providerResult = await pool.query(
+      `SELECT availability_status FROM service_providers WHERE provider_id = $1`,
+      [user.id],
+    );
+    if (providerResult.rows.length === 0) {
+      return res
+        .status(404)
+        .json({ success: false, error: 'Provider not found' });
+    }
+    const currentStatus = providerResult.rows[0].availability_status;
+
+    // ✅ NEW: If provider is at_work, block ALL manual changes
+    if (currentStatus === 'at_work') {
+      return res.status(400).json({
+        success: false,
+        error:
+          'You are currently working on a job. Complete it before changing your status.',
+      });
+    }
+
+    // ✅ Check for active work (guardrail) – only for 'available' transition
+    if (availability_status === 'available') {
+      const activeWork = await pool.query(
+        `SELECT 1
+         FROM maintenance_visits mv
+         JOIN service_requests sr ON mv.service_request_id = sr.service_id
+         WHERE sr.provider_id = $1
+           AND mv.status IN ('checked_in', 'in_progress')
+         UNION
+         SELECT 1
+         FROM service_requests
+         WHERE provider_id = $1 AND status = 'in_progress'
+         LIMIT 1`,
+        [user.id],
+      );
+      if (activeWork.rows.length > 0) {
+        return res.status(400).json({
+          success: false,
+          error:
+            'You have an active work session. Complete it before setting yourself as available.',
+        });
+      }
+    }
+
+    // ✅ Check capacity guardrail (existing)
     if (availability_status === 'available') {
       const activeJob = await pool.query(
         `SELECT current_job_id FROM service_providers WHERE provider_id = $1 AND current_job_id IS NOT NULL`,
@@ -4389,15 +4435,17 @@ app.put('/api/provider/availability', async (req, res) => {
         return res.status(400).json({
           success: false,
           error:
-            'You cannot set yourself as available while you have an active job. Please complete the job first.',
+            'You have an active job. Please complete it before setting yourself as available.',
         });
       }
     }
 
+    // ✅ Update the status
     await pool.query(
       `UPDATE service_providers SET availability_status = $1, last_status_update = NOW() WHERE provider_id = $2`,
       [availability_status, user.id],
     );
+
     res.json({ success: true, message: 'Availability updated' });
   } catch (err) {
     console.error('Update availability error:', err);
@@ -5303,7 +5351,8 @@ app.put('/api/service-requests/:id/complete', async (req, res) => {
         error: 'Service request not found or not in accepted state',
       });
     }
-    // Update provider availability back to available (trigger already does this, but safe)
+
+    // Check if there is any other active work
     const activeWorkForCompletion = await pool.query(
       `SELECT 1
        FROM maintenance_visits mv
@@ -5324,14 +5373,20 @@ app.put('/api/service-requests/:id/complete', async (req, res) => {
       activeWorkForCompletion.rows.length > 0 ||
       inProgressServiceForCompletion.rows.length > 0;
 
+    // ✅ Updated query with correct parameter order
+    const newAvailabilityStatus = hasActiveWorkForCompletion
+      ? 'at_work'
+      : 'available';
+
     await pool.query(
       `UPDATE service_providers 
-       SET availability_status = $2,
-           current_job_id = CASE WHEN $2 = 'available' THEN NULL ELSE current_job_id END,
+       SET availability_status = $1,
+           current_job_id = CASE WHEN $1 = 'available' THEN NULL ELSE current_job_id END,
            last_status_update = NOW()
-       WHERE provider_id = $1`,
-      [user.id, hasActiveWorkForCompletion ? 'at_work' : 'available'],
+       WHERE provider_id = $2`,
+      [newAvailabilityStatus, user.id],
     );
+
     res.json({
       success: true,
       message: 'Job marked as completed. Awaiting owner confirmation.',
