@@ -4105,6 +4105,29 @@ app.get('/api/provider/dashboard', async (req, res) => {
     }
     const provider = providerResult.rows[0];
 
+    const activeWorkResult = await pool.query(
+      `SELECT 1
+       FROM maintenance_visits mv
+       JOIN service_requests sr ON mv.service_request_id = sr.service_id
+       WHERE sr.provider_id = $1
+         AND mv.status IN ('checked_in', 'in_progress')
+       LIMIT 1`,
+      [user.id],
+    );
+    const inProgressServiceResult = await pool.query(
+      `SELECT 1
+       FROM service_requests
+       WHERE provider_id = $1 AND status = 'in_progress'
+       LIMIT 1`,
+      [user.id],
+    );
+    const hasActiveWork =
+      activeWorkResult.rows.length > 0 ||
+      inProgressServiceResult.rows.length > 0;
+    if (hasActiveWork) {
+      provider.availability_status = 'at_work';
+    }
+
     // Current job (accepted) – join to get full details
     let currentJob = null;
     // Current job (accepted or in_progress)
@@ -5114,14 +5137,31 @@ app.put('/api/service-requests/:id/accept', async (req, res) => {
       { screen: 'ProviderDashboard' },
     );
 
+    const activeWorkCheck = await client.query(
+      `SELECT 1
+       FROM maintenance_visits mv
+       JOIN service_requests sr ON mv.service_request_id = sr.service_id
+       WHERE sr.provider_id = $1
+         AND mv.status IN ('checked_in', 'in_progress')
+       LIMIT 1`,
+      [user.id],
+    );
+    if (activeWorkCheck.rows.length > 0) {
+      await client.query('ROLLBACK');
+      return res.status(400).json({
+        success: false,
+        error:
+          'You already have an active work session. Complete it before accepting another job.',
+      });
+    }
+
     // Update provider current_job_id and availability
     await client.query(
       `UPDATE service_providers 
-       SET current_job_id = $1, 
-           availability_status = 'available',
-           last_status_update = NOW()
-       WHERE provider_id = $2`,
-      [id, user.id],
+   SET availability_status = 'available',
+       last_status_update = NOW()
+   WHERE provider_id = $1`,
+      [user.id],
     );
 
     await client.query('COMMIT');
@@ -5264,9 +5304,33 @@ app.put('/api/service-requests/:id/complete', async (req, res) => {
       });
     }
     // Update provider availability back to available (trigger already does this, but safe)
-    await pool.query(
-      `UPDATE service_providers SET availability_status = 'available', current_job_id = NULL, last_status_update = NOW() WHERE provider_id = $1`,
+    const activeWorkForCompletion = await pool.query(
+      `SELECT 1
+       FROM maintenance_visits mv
+       JOIN service_requests sr ON mv.service_request_id = sr.service_id
+       WHERE sr.provider_id = $1
+         AND mv.status IN ('checked_in', 'in_progress')
+       LIMIT 1`,
       [user.id],
+    );
+    const inProgressServiceForCompletion = await pool.query(
+      `SELECT 1
+       FROM service_requests
+       WHERE provider_id = $1 AND status = 'in_progress'
+       LIMIT 1`,
+      [user.id],
+    );
+    const hasActiveWorkForCompletion =
+      activeWorkForCompletion.rows.length > 0 ||
+      inProgressServiceForCompletion.rows.length > 0;
+
+    await pool.query(
+      `UPDATE service_providers 
+       SET availability_status = $2,
+           current_job_id = CASE WHEN $2 = 'available' THEN NULL ELSE current_job_id END,
+           last_status_update = NOW()
+       WHERE provider_id = $1`,
+      [user.id, hasActiveWorkForCompletion ? 'at_work' : 'available'],
     );
     res.json({
       success: true,
@@ -5768,12 +5832,34 @@ app.put('/api/service-requests/:id/accept-price', async (req, res) => {
       [finalPrice, id],
     );
 
-    // ✅ Update provider availability to 'available'
+    const activeWorkForProvider = await client.query(
+      `SELECT 1
+       FROM maintenance_visits mv
+       JOIN service_requests sr ON mv.service_request_id = sr.service_id
+       WHERE sr.provider_id = $1
+         AND mv.status IN ('checked_in', 'in_progress')
+       LIMIT 1`,
+      [service.provider_id],
+    );
+    const inProgressServiceForProvider = await client.query(
+      `SELECT 1
+       FROM service_requests
+       WHERE provider_id = $1 AND status = 'in_progress'
+       LIMIT 1`,
+      [service.provider_id],
+    );
+    const hasActiveWorkForProvider =
+      activeWorkForProvider.rows.length > 0 ||
+      inProgressServiceForProvider.rows.length > 0;
+
+    // ✅ Update provider availability to 'available' only if no active work remains
     await client.query(
       `UPDATE service_providers 
-       SET availability_status = 'available'
+       SET availability_status = $2,
+           current_job_id = CASE WHEN $2 = 'available' THEN NULL ELSE current_job_id END,
+           last_status_update = NOW()
        WHERE provider_id = $1`,
-      [service.provider_id],
+      [service.provider_id, hasActiveWorkForProvider ? 'at_work' : 'available'],
     );
 
     await client.query('COMMIT');
@@ -5996,9 +6082,9 @@ app.put('/api/service-requests/:id/in-progress', async (req, res) => {
 
     await pool.query(
       `UPDATE service_providers 
-       SET availability_status = 'at_work' 
+       SET availability_status = 'at_work', current_job_id = $2
        WHERE provider_id = $1`,
-      [user.id],
+      [user.id, id],
     );
 
     // Notify owner
@@ -6406,8 +6492,10 @@ app.post('/api/maintenance-visits/:id/checkin', async (req, res) => {
 
     // After updating the visit, add this:
     await pool.query(
-      `UPDATE service_providers SET availability_status = 'at_work' WHERE provider_id = $1`,
-      [user.id],
+      `UPDATE service_providers 
+       SET availability_status = 'at_work', current_job_id = $2
+       WHERE provider_id = $1`,
+      [user.id, visit.service_request_id],
     );
 
     // Notify owner and renter
