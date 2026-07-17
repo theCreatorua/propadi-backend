@@ -4134,7 +4134,16 @@ app.get('/api/provider/dashboard', async (req, res) => {
    LEFT JOIN maintenance_requests mr ON sr.maintenance_request_id = mr.request_id
    JOIN properties p ON sr.property_id = p.property_id
    WHERE sr.provider_id = $1 AND sr.status IN ('accepted', 'in_progress')
-   ORDER BY sr.created_at DESC
+   ORDER BY 
+     CASE 
+       WHEN sr.status = 'in_progress' THEN 1
+       WHEN sr.status = 'accepted' AND EXISTS (
+         SELECT 1 FROM maintenance_visits mv 
+         WHERE mv.service_request_id = sr.service_id AND mv.status = 'checked_in'
+       ) THEN 2
+       ELSE 3
+     END,
+     sr.accepted_at ASC
    LIMIT 1`,
       [user.id],
     );
@@ -4274,6 +4283,7 @@ app.get('/api/provider/dashboard', async (req, res) => {
           p.title as property_title, 
           p.address_city, 
           p.address_state,
+          mv.visit_id,
           mv.scheduled_start,
           mv.status as visit_status
    FROM service_requests sr
@@ -4829,6 +4839,26 @@ app.post('/api/service-requests', async (req, res) => {
 
     await client.query('COMMIT');
 
+    // If no specific provider selected, notify all available providers with matching trade
+    if (!provider_id) {
+      const nearbyProviders = await client.query(
+        `SELECT sp.provider_id, u.name, u.address_city, u.address_state
+     FROM service_providers sp
+     JOIN users u ON sp.provider_id = u.user_id
+     WHERE sp.is_verified = true
+       AND sp.availability_status = 'available'
+       AND LOWER(sp.trade_type) = LOWER($1)`,
+        [trade_type],
+      );
+      for (const p of nearbyProviders.rows) {
+        await sendPushToUser(
+          p.provider_id,
+          '🔧 New Direct Service Request',
+          `A new direct request "${title}" is available in ${p.address_city || 'your area'}.`,
+          { screen: 'ProviderDashboard' },
+        );
+      }
+    }
     // After the insert is successful, notify providers
     if (provider_id) {
       // ✅ Specific provider selected – notify only them
@@ -5224,7 +5254,7 @@ app.put('/api/service-requests/:id/complete', async (req, res) => {
       return res.status(401).json({ success: false, error: 'Invalid token' });
 
     const result = await pool.query(
-      `UPDATE service_requests SET status = 'completed', completed_at = NOW() WHERE service_id = $1 AND provider_id = $2 AND status = 'accepted' RETURNING *`,
+      `UPDATE service_requests SET status = 'completed', completed_at = NOW() WHERE service_id = $1 AND provider_id = $2 AND status IN ('accepted', 'in_progress') RETURNING *`,
       [id, user.id],
     );
     if (result.rows.length === 0) {
@@ -5272,11 +5302,15 @@ app.get('/api/service-requests/owner/:userId', async (req, res) => {
               p.title as property_title, 
               u_provider.name as provider_name,
               mr.title as maintenance_title,
-              mr.request_id as maintenance_request_id
+              mr.request_id as maintenance_request_id,
+              mv.visit_id,
+              mv.status as visit_status,
+              mv.scheduled_start
        FROM service_requests sr
        JOIN properties p ON sr.property_id = p.property_id
        LEFT JOIN users u_provider ON sr.provider_id = u_provider.user_id
        LEFT JOIN maintenance_requests mr ON sr.maintenance_request_id = mr.request_id
+        LEFT JOIN maintenance_visits mv ON sr.service_id = mv.service_request_id
        WHERE sr.owner_id = $1
        ORDER BY sr.created_at DESC`,
       [userId],
@@ -6312,10 +6346,11 @@ app.post('/api/maintenance-visits/:id/checkin', async (req, res) => {
         .json({ success: false, error: 'PIN already used' });
     }
 
+    // ✅ Check if PIN has expired or has no expiry date
     if (!visit.pin_expires_at || new Date() > new Date(visit.pin_expires_at)) {
       return res.status(400).json({
         success: false,
-        error: 'PIN has expired. Please request a new one.',
+        error: 'PIN has expired or is invalid. Please request a new one.',
       });
     }
 
@@ -6339,6 +6374,22 @@ app.post('/api/maintenance-visits/:id/checkin', async (req, res) => {
         .json({ success: false, error: 'Already checked in' });
     }
 
+    // Check if provider already has a checked_in or in_progress job
+    const activeCheckin = await pool.query(
+      `SELECT mv.visit_id 
+   FROM maintenance_visits mv
+   JOIN service_requests sr ON mv.service_request_id = sr.service_id
+   WHERE sr.provider_id = $1 AND mv.status IN ('checked_in', 'in_progress')`,
+      [user.id],
+    );
+    if (activeCheckin.rows.length > 0) {
+      return res.status(400).json({
+        success: false,
+        error:
+          'You already have an active check-in. Please complete it before checking in to another job.',
+      });
+    }
+
     // Update check-in
     await pool.query(
       `UPDATE maintenance_visits 
@@ -6349,6 +6400,12 @@ app.post('/api/maintenance-visits/:id/checkin', async (req, res) => {
            pin_used = TRUE 
        WHERE visit_id = $3`,
       [gps_lat || null, gps_lng || null, id],
+    );
+
+    // After updating the visit, add this:
+    await pool.query(
+      `UPDATE service_providers SET availability_status = 'at_work' WHERE provider_id = $1`,
+      [user.id],
     );
 
     // Notify owner and renter
@@ -6375,6 +6432,7 @@ app.post('/api/maintenance-visits/:id/checkin', async (req, res) => {
     res.status(500).json({ success: false, error: err.message });
   }
 });
+
 // PUT /api/maintenance-visits/:id/safety – confirm safety (renter or provider)
 app.put('/api/maintenance-visits/:id/safety', async (req, res) => {
   try {
