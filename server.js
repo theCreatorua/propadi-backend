@@ -5839,6 +5839,7 @@ app.put('/api/service-requests/:id/decline-counter', async (req, res) => {
 
 // PUT /api/service-requests/:id/accept-price – owner accepts the final price
 // PUT /api/service-requests/:id/accept-price – owner accepts the final price
+// PUT /api/service-requests/:id/accept-price – owner accepts the final price
 app.put('/api/service-requests/:id/accept-price', async (req, res) => {
   const client = await pool.connect();
   try {
@@ -5856,7 +5857,7 @@ app.put('/api/service-requests/:id/accept-price', async (req, res) => {
 
     await client.query('BEGIN');
 
-    // ✅ Allow status = 'negotiating' as well
+    // Allow status = 'negotiating' as well
     const serviceResult = await client.query(
       `SELECT sr.*, sp.provider_id
        FROM service_requests sr
@@ -5872,10 +5873,19 @@ app.put('/api/service-requests/:id/accept-price', async (req, res) => {
       });
     }
     const service = serviceResult.rows[0];
+    const providerId = service.provider_id;
+
+    if (!providerId) {
+      await client.query('ROLLBACK');
+      return res.status(400).json({
+        success: false,
+        error: 'No provider assigned to this service request',
+      });
+    }
 
     const finalPrice = service.counter_price || service.estimated_cost;
 
-    // ✅ Update status to 'accepted'
+    // Update service request to 'accepted'
     await client.query(
       `UPDATE service_requests 
        SET final_price = $1, 
@@ -5895,37 +5905,48 @@ app.put('/api/service-requests/:id/accept-price', async (req, res) => {
        WHERE sr.provider_id = $1
          AND mv.status IN ('checked_in', 'in_progress')
        LIMIT 1`,
-      [service.provider_id],
+      [providerId],
     );
     const inProgressServiceForProvider = await client.query(
       `SELECT 1
        FROM service_requests
        WHERE provider_id = $1 AND status = 'in_progress'
        LIMIT 1`,
-      [service.provider_id],
+      [providerId],
     );
     const hasActiveWorkForProvider =
       activeWorkForProvider.rows.length > 0 ||
       inProgressServiceForProvider.rows.length > 0;
 
-    // ✅ FIXED: Use $1 for status, $2 for provider_id
+    // ✅ FIXED: Split update into two queries to avoid type inference errors
     const newAvailabilityStatus = hasActiveWorkForProvider
       ? 'at_work'
       : 'available';
 
+    // Step 1: Update availability_status and timestamp
     await client.query(
       `UPDATE service_providers 
        SET availability_status = $1,
-           current_job_id = CASE WHEN $1 = 'available' THEN NULL ELSE current_job_id END,
            last_status_update = NOW()
        WHERE provider_id = $2`,
-      [newAvailabilityStatus, service.provider_id],
+      [newAvailabilityStatus, providerId],
     );
+
+    // Step 2: Clear current_job_id only if becoming available
+    if (newAvailabilityStatus === 'available') {
+      await client.query(
+        `UPDATE service_providers 
+         SET current_job_id = NULL
+         WHERE provider_id = $1`,
+        [providerId],
+      );
+    }
 
     await client.query('COMMIT');
 
+    // Notify provider
     await sendPushToUser(
-      service.provider_id,
+      providerId,
       '✅ Price Accepted',
       `The owner has accepted your counter offer of ₦${parseFloat(Number(finalPrice)).toLocaleString()} for "${service.title}". You can now proceed.`,
       { screen: 'ProviderDashboard', service_id: id },
