@@ -5887,6 +5887,7 @@ app.put('/api/service-requests/:id/accept-price', async (req, res) => {
       [finalPrice, id],
     );
 
+    // Check active work for the provider
     const activeWorkForProvider = await client.query(
       `SELECT 1
        FROM maintenance_visits mv
@@ -5907,14 +5908,18 @@ app.put('/api/service-requests/:id/accept-price', async (req, res) => {
       activeWorkForProvider.rows.length > 0 ||
       inProgressServiceForProvider.rows.length > 0;
 
-    // ✅ Update provider availability to 'available' only if no active work remains
+    // ✅ FIXED: Use $1 for status, $2 for provider_id
+    const newAvailabilityStatus = hasActiveWorkForProvider
+      ? 'at_work'
+      : 'available';
+
     await client.query(
       `UPDATE service_providers 
-       SET availability_status = $2,
-           current_job_id = CASE WHEN $2 = 'available' THEN NULL ELSE current_job_id END,
+       SET availability_status = $1,
+           current_job_id = CASE WHEN $1 = 'available' THEN NULL ELSE current_job_id END,
            last_status_update = NOW()
-       WHERE provider_id = $1`,
-      [service.provider_id, hasActiveWorkForProvider ? 'at_work' : 'available'],
+       WHERE provider_id = $2`,
+      [newAvailabilityStatus, service.provider_id],
     );
 
     await client.query('COMMIT');
