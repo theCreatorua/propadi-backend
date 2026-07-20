@@ -6544,6 +6544,30 @@ app.post('/api/maintenance-visits/:id/checkin', async (req, res) => {
       return res.status(400).json({ success: false, error: 'Invalid PIN' });
     }
 
+    // ✅ Add Grace Window Check
+    const scheduledStart = new Date(visit.scheduled_start);
+    const now = new Date();
+
+    // Check if it's the same day
+    const isSameDay = scheduledStart.toDateString() === now.toDateString();
+    if (!isSameDay) {
+      return res.status(400).json({
+        success: false,
+        error: 'You can only check in on the scheduled day.',
+      });
+    }
+
+    // Check if within 2-hour grace window
+    const graceMinutes = 120; // 2 hours
+    const diffMinutes =
+      (now.getTime() - scheduledStart.getTime()) / (1000 * 60);
+    if (diffMinutes > graceMinutes || diffMinutes < -graceMinutes) {
+      return res.status(400).json({
+        success: false,
+        error: `You can only check in within 2 hours of the scheduled time.`,
+      });
+    }
+
     // Check if already checked in
     if (visit.check_in_time) {
       return res
@@ -6918,6 +6942,70 @@ app.post('/api/maintenance-visits/:id/generate-pin', async (req, res) => {
     res.json({ success: true, pin, pin_expires_at: expiresAt.toISOString() });
   } catch (err) {
     console.error('Generate PIN error:', err);
+    res.status(500).json({ success: false, error: err.message });
+  }
+});
+
+// ==========================================
+// CRON JOBS  - CHECK FOR MISSED CHECK-INS AND AUTO-CANCEL
+// ==========================================
+// POST /api/cron/check-missed-checkins – auto-cancel missed visits
+app.post('/api/cron/check-missed-checkins', async (req, res) => {
+  const secretKey = req.headers['x-cron-secret'];
+  if (secretKey !== process.env.CRON_SECRET) {
+    return res.status(401).json({ success: false, error: 'Unauthorized' });
+  }
+
+  try {
+    const now = new Date();
+    const fourHoursAgo = new Date(now.getTime() - 4 * 60 * 60 * 1000);
+
+    const missedVisits = await pool.query(
+      `SELECT mv.*, sr.owner_id, sr.provider_id, sr.title
+       FROM maintenance_visits mv
+       JOIN service_requests sr ON mv.service_request_id = sr.service_id
+       WHERE mv.status = 'scheduled'
+         AND mv.scheduled_start <= $1
+         AND mv.check_in_time IS NULL`,
+      [fourHoursAgo],
+    );
+
+    let processed = 0;
+    for (const visit of missedVisits.rows) {
+      // Auto-cancel the visit
+      await pool.query(
+        `UPDATE maintenance_visits SET status = 'cancelled' WHERE visit_id = $1`,
+        [visit.visit_id],
+      );
+
+      // Reset the service request status
+      await pool.query(
+        `UPDATE service_requests SET status = 'pending', provider_id = NULL WHERE service_id = $1`,
+        [visit.service_request_id],
+      );
+
+      // Notify owner
+      await sendPushToUser(
+        visit.owner_id,
+        '❌ Provider Missed Visit',
+        `The provider did not show up for "${visit.title}". The visit has been auto-cancelled. You can request service again.`,
+        { screen: 'Maintenance' },
+      );
+
+      // Notify provider
+      await sendPushToUser(
+        visit.provider_id,
+        '❌ You Missed a Visit',
+        `You did not check in for "${visit.title}". The visit has been auto-cancelled. Please manage your schedule better.`,
+        { screen: 'ProviderDashboard' },
+      );
+
+      processed++;
+    }
+
+    res.json({ success: true, processed });
+  } catch (err) {
+    console.error('Missed check-in cron error:', err);
     res.status(500).json({ success: false, error: err.message });
   }
 });
