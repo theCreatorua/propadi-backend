@@ -4156,7 +4156,13 @@ app.get('/api/provider/dashboard', async (req, res) => {
    FROM service_requests sr
    LEFT JOIN maintenance_requests mr ON sr.maintenance_request_id = mr.request_id
    JOIN properties p ON sr.property_id = p.property_id
-   WHERE sr.provider_id = $1 AND sr.status IN ('accepted', 'in_progress')
+   WHERE sr.provider_id = $1 
+     AND sr.status IN ('accepted', 'in_progress')
+     AND NOT EXISTS (
+       SELECT 1 FROM maintenance_visits mv 
+       WHERE mv.service_request_id = sr.service_id 
+         AND mv.status IN ('scheduled', 'checked_in', 'in_progress')
+     )
    ORDER BY 
      CASE 
        WHEN sr.status = 'in_progress' THEN 1
@@ -6211,6 +6217,7 @@ app.get('/api/maintenance-visits/:userId', async (req, res) => {
         mv.provider_safety_confirmed,
         sr.service_id,
         sr.trade_type,
+        sr.maintenance_request_id,
         COALESCE(sr.title, mr.title) as title,
         COALESCE(sr.description, mr.description) as description,
         p.property_id,
