@@ -4158,21 +4158,19 @@ app.get('/api/provider/dashboard', async (req, res) => {
    JOIN properties p ON sr.property_id = p.property_id
    WHERE sr.provider_id = $1 
      AND sr.status IN ('accepted', 'in_progress')
-     AND NOT EXISTS (
+     AND EXISTS (
        SELECT 1 FROM maintenance_visits mv 
        WHERE mv.service_request_id = sr.service_id 
-         AND mv.status IN ('scheduled', 'checked_in', 'in_progress')
+         AND mv.status IN ('checked_in', 'in_progress')
      )
    ORDER BY 
      CASE 
        WHEN sr.status = 'in_progress' THEN 1
-       WHEN sr.status = 'accepted' AND EXISTS (
+       WHEN EXISTS (
          SELECT 1 FROM maintenance_visits mv 
          WHERE mv.service_request_id = sr.service_id AND mv.status = 'checked_in'
        ) THEN 2
-       ELSE 3
-     END,
-     sr.accepted_at ASC
+     END
    LIMIT 1`,
       [user.id],
     );
