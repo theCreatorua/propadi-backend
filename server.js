@@ -4357,6 +4357,7 @@ app.get('/api/provider/dashboard', async (req, res) => {
         weeklyCapacity: provider.weekly_capacity,
         maxActiveJobs: provider.max_active_jobs,
       },
+      hasActiveWork,
     });
   } catch (err) {
     console.error('Provider dashboard error:', err);
