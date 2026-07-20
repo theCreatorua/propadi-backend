@@ -4319,7 +4319,7 @@ app.get('/api/provider/dashboard', async (req, res) => {
    JOIN maintenance_visits mv ON sr.service_id = mv.service_request_id
    WHERE sr.provider_id = $1 
      AND sr.status = 'accepted'
-     AND mv.status IN ('scheduled', 'checked_in')
+     AND mv.status = 'scheduled'
    ORDER BY mv.scheduled_start ASC`,
       [user.id],
     );
