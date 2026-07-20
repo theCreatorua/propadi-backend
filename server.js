@@ -6153,6 +6153,25 @@ app.put('/api/service-requests/:id/in-progress', async (req, res) => {
     if (error || !user)
       return res.status(401).json({ success: false, error: 'Invalid token' });
 
+    // ✅ Backend check: verify safety is confirmed
+    const safetyCheck = await pool.query(
+      `SELECT mv.renter_safety_confirmed
+       FROM maintenance_visits mv
+       JOIN service_requests sr ON mv.service_request_id = sr.service_id
+       WHERE sr.service_id = $1 AND sr.provider_id = $2`,
+      [id, user.id],
+    );
+    if (
+      safetyCheck.rows.length === 0 ||
+      !safetyCheck.rows[0].renter_safety_confirmed
+    ) {
+      return res.status(403).json({
+        success: false,
+        error:
+          'Cannot mark as in-progress until the renter has confirmed safety.',
+      });
+    }
+
     const result = await pool.query(
       `UPDATE service_requests SET status = 'in_progress' 
        WHERE service_id = $1 AND provider_id = $2 AND status = 'accepted' 
