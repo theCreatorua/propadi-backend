@@ -6682,10 +6682,17 @@ app.post('/api/maintenance-visits/:id/checkin', async (req, res) => {
 });
 
 // PUT /api/maintenance-visits/:id/safety – confirm safety (renter or provider)
+// PUT /api/maintenance-visits/:id/safety – confirm safety (renter or provider)
 app.put('/api/maintenance-visits/:id/safety', async (req, res) => {
   try {
     const { id } = req.params;
     const { role } = req.body; // 'renter' or 'provider'
+    if (!role || !['renter', 'provider'].includes(role)) {
+      return res
+        .status(400)
+        .json({ success: false, error: 'Role must be renter or provider' });
+    }
+
     const authHeader = req.headers.authorization;
     if (!authHeader)
       return res.status(401).json({ success: false, error: 'Unauthorized' });
@@ -6697,18 +6704,55 @@ app.put('/api/maintenance-visits/:id/safety', async (req, res) => {
     if (error || !user)
       return res.status(401).json({ success: false, error: 'Invalid token' });
 
-    const updateField =
+    // ✅ Get visit details and service request info for notifications
+    const visitResult = await pool.query(
+      `SELECT mv.*, 
+              sr.provider_id, 
+              sr.owner_id, 
+              sr.title,
+              sr.service_id
+       FROM maintenance_visits mv
+       JOIN service_requests sr ON mv.service_request_id = sr.service_id
+       WHERE mv.visit_id = $1`,
+      [id],
+    );
+    if (visitResult.rows.length === 0) {
+      return res.status(404).json({ success: false, error: 'Visit not found' });
+    }
+    const visit = visitResult.rows[0];
+
+    const column =
       role === 'renter'
         ? 'renter_safety_confirmed'
         : 'provider_safety_confirmed';
     await pool.query(
-      `UPDATE maintenance_visits SET ${updateField} = TRUE WHERE visit_id = $1`,
+      `UPDATE maintenance_visits SET ${column} = TRUE WHERE visit_id = $1`,
       [id],
     );
 
-    res.json({ success: true, message: 'Safety confirmed' });
+    // ✅ If renter confirmed safety, notify the provider
+    if (role === 'renter' && visit.provider_id) {
+      await sendPushToUser(
+        visit.provider_id,
+        '✅ Safety Confirmed',
+        `The renter has confirmed safety for "${visit.title}". You can now mark the job as in progress.`,
+        { screen: 'ProviderDashboard' },
+      );
+    }
+
+    // ✅ Also notify owner (optional)
+    if (visit.owner_id) {
+      await sendPushToUser(
+        visit.owner_id,
+        '✅ Safety Confirmed',
+        `Safety has been confirmed for the visit at "${visit.title}".`,
+        { screen: 'Maintenance' },
+      );
+    }
+
+    res.json({ success: true, message: `Safety confirmed by ${role}` });
   } catch (err) {
-    console.error('Safety confirmation error:', err);
+    console.error('Confirm safety error:', err);
     res.status(500).json({ success: false, error: err.message });
   }
 });
