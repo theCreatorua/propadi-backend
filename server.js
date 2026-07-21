@@ -5368,12 +5368,20 @@ app.put('/api/service-requests/:id/complete', async (req, res) => {
       });
     }
 
+    // ✅ Update linked maintenance visit status
+    await pool.query(
+      `UPDATE maintenance_visits 
+       SET status = 'completed', check_out_time = NOW() 
+       WHERE service_request_id = $1 AND status IN ('checked_in', 'in_progress')`,
+      [id],
+    );
+
     // ✅ Update linked maintenance request status
     if (result.rows[0].maintenance_request_id) {
       await pool.query(
         `UPDATE maintenance_requests 
-     SET status = 'Resolved', date_resolved = NOW() 
-     WHERE request_id = $1`,
+         SET status = 'Resolved', date_resolved = NOW() 
+         WHERE request_id = $1`,
         [result.rows[0].maintenance_request_id],
       );
     }
@@ -5399,12 +5407,11 @@ app.put('/api/service-requests/:id/complete', async (req, res) => {
       activeWorkForCompletion.rows.length > 0 ||
       inProgressServiceForCompletion.rows.length > 0;
 
-    // ✅ FIXED: Split update into two queries
     const newAvailabilityStatus = hasActiveWorkForCompletion
       ? 'at_work'
       : 'available';
 
-    // Step 1: Update availability_status
+    // Update provider availability
     await pool.query(
       `UPDATE service_providers 
        SET availability_status = $1,
@@ -5413,7 +5420,6 @@ app.put('/api/service-requests/:id/complete', async (req, res) => {
       [newAvailabilityStatus, user.id],
     );
 
-    // Step 2: Clear current_job_id if becoming available
     if (newAvailabilityStatus === 'available') {
       await pool.query(
         `UPDATE service_providers 
@@ -5423,35 +5429,29 @@ app.put('/api/service-requests/:id/complete', async (req, res) => {
       );
     }
 
-    // ✅ Get service details for notifications
+    // ✅ Notifications
     const serviceDetails = await pool.query(
       `SELECT sr.owner_id, sr.provider_id, sr.title, mr.renter_id
-   FROM service_requests sr
-   LEFT JOIN maintenance_requests mr ON sr.maintenance_request_id = mr.request_id
-   WHERE sr.service_id = $1`,
+       FROM service_requests sr
+       LEFT JOIN maintenance_requests mr ON sr.maintenance_request_id = mr.request_id
+       WHERE sr.service_id = $1`,
       [id],
     );
     if (serviceDetails.rows.length > 0) {
       const { owner_id, provider_id, title, renter_id } =
         serviceDetails.rows[0];
-
-      // Notify owner
       await sendPushToUser(
         owner_id,
         '✅ Job Completed',
         `The provider has completed "${title}". Please confirm and release payment.`,
         { screen: 'ServiceRequest', service_id: id, type: 'job_completed' },
       );
-
-      // Notify provider
       await sendPushToUser(
         provider_id,
         '✅ Job Completed',
         `You have completed "${title}". Awaiting owner confirmation and payment.`,
         { screen: 'ProviderDashboard', type: 'job_completed' },
       );
-
-      // Notify renter (if exists)
       if (renter_id) {
         await sendPushToUser(
           renter_id,
