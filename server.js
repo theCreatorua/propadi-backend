@@ -4156,7 +4156,9 @@ app.get('/api/provider/dashboard', async (req, res) => {
           p.title as property_title, 
           p.address_street, 
           p.address_city, 
-          p.address_state
+          p.address_state,
+          mv.renter_safety_confirmed,
+          mv.provider_safety_confirmed
    FROM service_requests sr
    LEFT JOIN maintenance_requests mr ON sr.maintenance_request_id = mr.request_id
    JOIN properties p ON sr.property_id = p.property_id
