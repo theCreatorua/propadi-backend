@@ -4185,7 +4185,7 @@ app.get('/api/provider/dashboard', async (req, res) => {
 
       // Fetch associated visit (if any)
       const visitResult = await pool.query(
-        `SELECT visit_id, scheduled_start, scheduled_end, status, check_in_time, check_out_time
+        `SELECT visit_id, scheduled_start, scheduled_end, status, check_in_time, check_out_time,renter_safety_confirmed, provider_safety_confirmed
          FROM maintenance_visits
          WHERE service_request_id = $1
          ORDER BY created_at DESC
