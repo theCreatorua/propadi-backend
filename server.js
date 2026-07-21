@@ -5376,6 +5376,17 @@ app.put('/api/service-requests/:id/complete', async (req, res) => {
       [id],
     );
 
+    // ✅ DEBUG LOG – ADD THESE LINES HERE
+    console.log('🔵 Updating visit for service_id:', id);
+    const visitUpdateResult = await pool.query(
+      `UPDATE maintenance_visits 
+       SET status = 'completed', check_out_time = NOW() 
+       WHERE service_request_id = $1 AND status IN ('checked_in', 'in_progress')
+       RETURNING visit_id`,
+      [id],
+    );
+    console.log('🔵 Updated visit count:', visitUpdateResult.rowCount);
+
     // ✅ Update linked maintenance request status (if applicable)
     if (result.rows[0].maintenance_request_id) {
       await pool.query(
