@@ -5376,7 +5376,7 @@ app.put('/api/service-requests/:id/complete', async (req, res) => {
       [id],
     );
 
-    // ✅ Update linked maintenance request status
+    // ✅ Update linked maintenance request status (if applicable)
     if (result.rows[0].maintenance_request_id) {
       await pool.query(
         `UPDATE maintenance_requests 
@@ -5429,7 +5429,7 @@ app.put('/api/service-requests/:id/complete', async (req, res) => {
       );
     }
 
-    // ✅ Notifications
+    // ✅ Send notifications
     const serviceDetails = await pool.query(
       `SELECT sr.owner_id, sr.provider_id, sr.title, mr.renter_id
        FROM service_requests sr
