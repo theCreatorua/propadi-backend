@@ -5353,7 +5353,7 @@ app.put('/api/service-requests/:id/complete', async (req, res) => {
     if (result.rows.length === 0) {
       return res.status(404).json({
         success: false,
-        error: 'Service request not found or not in accepted state',
+        error: 'Service request not found or not in accepted/in-progress state',
       });
     }
 
@@ -5378,19 +5378,29 @@ app.put('/api/service-requests/:id/complete', async (req, res) => {
       activeWorkForCompletion.rows.length > 0 ||
       inProgressServiceForCompletion.rows.length > 0;
 
-    // ✅ Updated query with correct parameter order
+    // ✅ FIXED: Split update into two queries
     const newAvailabilityStatus = hasActiveWorkForCompletion
       ? 'at_work'
       : 'available';
 
+    // Step 1: Update availability_status
     await pool.query(
       `UPDATE service_providers 
        SET availability_status = $1,
-           current_job_id = CASE WHEN $1 = 'available' THEN NULL ELSE current_job_id END,
            last_status_update = NOW()
        WHERE provider_id = $2`,
       [newAvailabilityStatus, user.id],
     );
+
+    // Step 2: Clear current_job_id if becoming available
+    if (newAvailabilityStatus === 'available') {
+      await pool.query(
+        `UPDATE service_providers 
+         SET current_job_id = NULL
+         WHERE provider_id = $1`,
+        [user.id],
+      );
+    }
 
     res.json({
       success: true,
