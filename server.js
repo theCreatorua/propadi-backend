@@ -5386,6 +5386,7 @@ app.put('/api/service-requests/:id/complete', async (req, res) => {
       [id],
     );
     console.log('🔵 Updated visit count:', visitUpdateResult.rowCount);
+    console.log('🔵 Visit IDs updated:', visitUpdateResult.rows);
 
     // ✅ Update linked maintenance request status (if applicable)
     if (result.rows[0].maintenance_request_id) {
@@ -5417,6 +5418,9 @@ app.put('/api/service-requests/:id/complete', async (req, res) => {
     const hasActiveWorkForCompletion =
       activeWorkForCompletion.rows.length > 0 ||
       inProgressServiceForCompletion.rows.length > 0;
+
+    console.log('🔵 hasActiveWorkForCompletion:', hasActiveWorkForCompletion);
+    console.log('🔵 New provider status:', newAvailabilityStatus);
 
     const newAvailabilityStatus = hasActiveWorkForCompletion
       ? 'at_work'
