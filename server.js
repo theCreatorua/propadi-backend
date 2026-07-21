@@ -5898,7 +5898,19 @@ app.put('/api/service-requests/:id/accept-price', async (req, res) => {
       });
     }
 
-    const finalPrice = service.counter_price || service.estimated_cost;
+    // ✅ If a counter price exists, use it exactly. Otherwise, use estimated_cost.
+    const finalPrice = service.counter_price
+      ? parseFloat(service.counter_price)
+      : parseFloat(service.estimated_cost);
+
+    // Add validation to prevent impossible values
+    if (finalPrice <= 0) {
+      await client.query('ROLLBACK');
+      return res.status(400).json({
+        success: false,
+        error: 'Invalid final price',
+      });
+    }
 
     // Update service request to 'accepted'
     await client.query(
