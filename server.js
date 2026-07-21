@@ -6731,12 +6731,17 @@ app.put('/api/maintenance-visits/:id/safety', async (req, res) => {
     );
 
     // ✅ If renter confirmed safety, notify the provider
+    // If renter confirmed safety, notify the provider
     if (role === 'renter' && visit.provider_id) {
       await sendPushToUser(
         visit.provider_id,
         '✅ Safety Confirmed',
         `The renter has confirmed safety for "${visit.title}". You can now mark the job as in progress.`,
-        { screen: 'ProviderDashboard' },
+        {
+          screen: 'ProviderDashboard',
+          type: 'safety_confirmed',
+          service_id: visit.service_id,
+        },
       );
     }
 
