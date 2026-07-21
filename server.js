@@ -5368,6 +5368,16 @@ app.put('/api/service-requests/:id/complete', async (req, res) => {
       });
     }
 
+    // ✅ Update linked maintenance request status
+    if (result.rows[0].maintenance_request_id) {
+      await pool.query(
+        `UPDATE maintenance_requests 
+     SET status = 'Resolved', date_resolved = NOW() 
+     WHERE request_id = $1`,
+        [result.rows[0].maintenance_request_id],
+      );
+    }
+
     // Check if there is any other active work
     const activeWorkForCompletion = await pool.query(
       `SELECT 1
@@ -5411,6 +5421,45 @@ app.put('/api/service-requests/:id/complete', async (req, res) => {
          WHERE provider_id = $1`,
         [user.id],
       );
+    }
+
+    // ✅ Get service details for notifications
+    const serviceDetails = await pool.query(
+      `SELECT sr.owner_id, sr.provider_id, sr.title, mr.renter_id
+   FROM service_requests sr
+   LEFT JOIN maintenance_requests mr ON sr.maintenance_request_id = mr.request_id
+   WHERE sr.service_id = $1`,
+      [id],
+    );
+    if (serviceDetails.rows.length > 0) {
+      const { owner_id, provider_id, title, renter_id } =
+        serviceDetails.rows[0];
+
+      // Notify owner
+      await sendPushToUser(
+        owner_id,
+        '✅ Job Completed',
+        `The provider has completed "${title}". Please confirm and release payment.`,
+        { screen: 'ServiceRequest', service_id: id, type: 'job_completed' },
+      );
+
+      // Notify provider
+      await sendPushToUser(
+        provider_id,
+        '✅ Job Completed',
+        `You have completed "${title}". Awaiting owner confirmation and payment.`,
+        { screen: 'ProviderDashboard', type: 'job_completed' },
+      );
+
+      // Notify renter (if exists)
+      if (renter_id) {
+        await sendPushToUser(
+          renter_id,
+          '✅ Job Completed',
+          `The maintenance work for "${title}" has been completed.`,
+          { screen: 'Maintenance', type: 'job_completed' },
+        );
+      }
     }
 
     res.json({
