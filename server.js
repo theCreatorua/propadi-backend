@@ -1,3 +1,5 @@
+// Set server timezone to West Africa Time (Lagos)
+process.env.TZ = 'Africa/Lagos';
 require('dotenv').config();
 const { createClient } = require('@supabase/supabase-js');
 const crypto = require('crypto');
