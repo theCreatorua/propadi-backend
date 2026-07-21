@@ -4162,6 +4162,7 @@ app.get('/api/provider/dashboard', async (req, res) => {
    FROM service_requests sr
    LEFT JOIN maintenance_requests mr ON sr.maintenance_request_id = mr.request_id
    JOIN properties p ON sr.property_id = p.property_id
+   LEFT JOIN maintenance_visits mv ON sr.service_id = mv.service_request_id 
    WHERE sr.provider_id = $1 
      AND sr.status IN ('accepted', 'in_progress')
      AND EXISTS (
