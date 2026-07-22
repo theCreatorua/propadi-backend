@@ -5177,7 +5177,10 @@ app.put('/api/service-requests/:id/accept', async (req, res) => {
     }
 
     // ✅ DEFINE finalPrice AND priceStatus HERE
-    const finalPrice = parseFloat(service.estimated_cost);
+    // When accepting without counter, final price should be labour + materials
+    const finalPrice =
+      parseFloat(service.estimated_cost) +
+      parseFloat(service.materials_cost || 0);
     const priceStatus = 'accepted';
 
     // ✅ Update: status = 'accepted', price_status = 'accepted', final_price = estimated_cost
