@@ -6362,6 +6362,7 @@ app.get('/api/maintenance-visits/:userId', async (req, res) => {
 });
 
 // POST /api/maintenance-visits – owner schedules a visit (generates QR/PIN)
+// POST /api/maintenance-visits – owner schedules a visit (generates QR/PIN)
 app.post('/api/maintenance-visits', async (req, res) => {
   const client = await pool.connect();
   try {
@@ -6417,7 +6418,7 @@ app.post('/api/maintenance-visits', async (req, res) => {
       });
     }
 
-    // ✅ If reschedule_visit_id is provided, update existing visit
+    // ✅ If reschedule_visit_id is provided, handle rescheduling
     if (reschedule_visit_id) {
       // Verify the visit exists and belongs to this service request
       const visitCheck = await client.query(
@@ -6431,52 +6432,99 @@ app.post('/api/maintenance-visits', async (req, res) => {
           error: 'Visit not found or does not belong to this service request',
         });
       }
-      if (visitCheck.rows[0].status !== 'scheduled') {
-        await client.query('ROLLBACK');
-        return res.status(400).json({
-          success: false,
-          error:
-            'Cannot reschedule a visit that is already in progress or completed.',
-        });
-      }
 
-      // Update the visit
-      await client.query(
-        `UPDATE maintenance_visits 
-         SET scheduled_start = $1, scheduled_end = $2, status = 'scheduled'
-         WHERE visit_id = $3`,
-        [scheduled_start, scheduled_end || null, reschedule_visit_id],
-      );
+      const visitStatus = visitCheck.rows[0].status;
 
-      // Get updated visit
-      const updated = await client.query(
-        `SELECT * FROM maintenance_visits WHERE visit_id = $1`,
-        [reschedule_visit_id],
-      );
-      const visit = updated.rows[0];
+      // ✅ If the visit is CANCELLED, create a new visit instead of updating
+      if (visitStatus === 'cancelled') {
+        // Generate new PIN and QR code
+        const newPin = Math.floor(100000 + Math.random() * 900000).toString();
+        const newQrCode = `VISIT_${Date.now()}_${Math.random().toString(36).substring(2, 8)}`;
 
-      await client.query('COMMIT');
-
-      // Notify provider and renter of reschedule
-      const newTimeLabel = new Date(scheduled_start).toLocaleString();
-      const providerMessage = `The visit for ${service_title || 'your service request'} has been rescheduled to ${newTimeLabel}.`;
-      const renterMessage = `Your visit has been rescheduled to ${newTimeLabel}.`;
-
-      if (provider_id) {
-        await sendPushToUser(
-          provider_id,
-          '📅 Visit Rescheduled',
-          providerMessage,
-          { screen: 'ProviderDashboard' },
+        const insertResult = await client.query(
+          `INSERT INTO maintenance_visits 
+           (service_request_id, scheduled_start, scheduled_end, qr_code, pin, status)
+           VALUES ($1, $2, $3, $4, $5, 'scheduled')
+           RETURNING *`,
+          [
+            service_request_id,
+            scheduled_start,
+            scheduled_end || null,
+            newQrCode,
+            newPin,
+          ],
         );
-      }
-      if (renter_id) {
-        await sendPushToUser(renter_id, '📅 Visit Rescheduled', renterMessage, {
-          screen: 'Maintenance',
-        });
+        const visit = insertResult.rows[0];
+
+        await client.query('COMMIT');
+
+        // Notify provider and renter of new visit
+        const newTimeLabel = new Date(scheduled_start).toLocaleString();
+        if (provider_id) {
+          await sendPushToUser(
+            provider_id,
+            '📅 New Visit Scheduled',
+            `A new visit has been scheduled for ${service_title || 'your service request'} at ${newTimeLabel}.`,
+            { screen: 'ProviderDashboard', visit_id: visit.visit_id },
+          );
+        }
+        if (renter_id) {
+          await sendPushToUser(
+            renter_id,
+            '📅 New Visit Scheduled',
+            `A new visit has been scheduled at ${newTimeLabel}.`,
+            { screen: 'Maintenance', visit_id: visit.visit_id },
+          );
+        }
+
+        return res.json({ success: true, visit });
       }
 
-      return res.json({ success: true, visit });
+      // ✅ If the visit is still 'scheduled', update it normally
+      if (visitStatus === 'scheduled') {
+        await client.query(
+          `UPDATE maintenance_visits 
+           SET scheduled_start = $1, scheduled_end = $2, status = 'scheduled'
+           WHERE visit_id = $3`,
+          [scheduled_start, scheduled_end || null, reschedule_visit_id],
+        );
+
+        const updated = await client.query(
+          `SELECT * FROM maintenance_visits WHERE visit_id = $1`,
+          [reschedule_visit_id],
+        );
+        const visit = updated.rows[0];
+
+        await client.query('COMMIT');
+
+        const newTimeLabel = new Date(scheduled_start).toLocaleString();
+        if (provider_id) {
+          await sendPushToUser(
+            provider_id,
+            '📅 Visit Rescheduled',
+            `The visit for ${service_title || 'your service request'} has been rescheduled to ${newTimeLabel}.`,
+            { screen: 'ProviderDashboard', visit_id: visit.visit_id },
+          );
+        }
+        if (renter_id) {
+          await sendPushToUser(
+            renter_id,
+            '📅 Visit Rescheduled',
+            `Your visit has been rescheduled to ${newTimeLabel}.`,
+            { screen: 'Maintenance', visit_id: visit.visit_id },
+          );
+        }
+
+        return res.json({ success: true, visit });
+      }
+
+      // ✅ If the visit is in progress or completed, prevent rescheduling
+      await client.query('ROLLBACK');
+      return res.status(400).json({
+        success: false,
+        error:
+          'Cannot reschedule a visit that is already in progress or completed.',
+      });
     }
 
     // Otherwise, create a new visit (existing logic)
