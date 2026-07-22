@@ -5443,6 +5443,7 @@ app.put('/api/service-requests/:id/complete', async (req, res) => {
     );
     if (serviceDetails.rows.length > 0) {
       const { owner_id, provider_id, title, renter_id } = serviceDetails.rows[0];
+      console.log('🔵 Sending completion notifications to:', { owner_id, provider_id, renter_id });
       await sendPushToUser(
         owner_id,
         '✅ Job Completed',
