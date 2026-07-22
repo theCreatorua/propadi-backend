@@ -5142,7 +5142,7 @@ app.put('/api/service-requests/:id/accept', async (req, res) => {
 
     // Get service request – check status = 'pending' and provider_id = current user
     const serviceResult = await client.query(
-      `SELECT estimated_cost, owner_id, property_id, title, status, provider_id
+      `SELECT estimated_cost, materials_cost, owner_id, property_id, title, status, provider_id
        FROM service_requests 
        WHERE service_id = $1`,
       [id],
