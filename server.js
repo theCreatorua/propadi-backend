@@ -2896,7 +2896,7 @@ app.post('/api/cron/check-rent-reminders', async (req, res) => {
           subject: title,
           html: `<p>Hello ${tenancy.tenant_name},</p><p>${body}</p><p>You can make payment securely through the Propadi app.</p>`,
         });
-      } catch (e) {}
+      } catch (e) { }
       await pool.query(
         'UPDATE tenancies SET last_rent_reminder_sent = $1 WHERE tenancy_id = $2',
         [today, tenancy.tenancy_id],
@@ -4717,7 +4717,7 @@ app.put(
         providerId,
         '❌ Provider Application Rejected',
         reason ||
-          'Your application did not meet our verification criteria. You can reapply after addressing the issues.',
+        'Your application did not meet our verification criteria. You can reapply after addressing the issues.',
       );
       res.json({ success: true, message: 'Provider rejected and removed' });
     } catch (err) {
@@ -5360,6 +5360,7 @@ app.put('/api/service-requests/:id/complete', async (req, res) => {
     if (error || !user)
       return res.status(401).json({ success: false, error: 'Invalid token' });
 
+    // 1️⃣ Update service request
     const result = await pool.query(
       `UPDATE service_requests SET status = 'completed', completed_at = NOW() WHERE service_id = $1 AND provider_id = $2 AND status IN ('accepted', 'in_progress') RETURNING *`,
       [id, user.id],
@@ -5371,27 +5372,15 @@ app.put('/api/service-requests/:id/complete', async (req, res) => {
       });
     }
 
-    // ✅ Update linked maintenance visit status
+    // 2️⃣ Update linked maintenance visit
     await pool.query(
       `UPDATE maintenance_visits 
        SET status = 'completed', check_out_time = NOW() 
        WHERE service_request_id = $1 AND status IN ('checked_in', 'in_progress')`,
-      [id],
+      [id]
     );
 
-    // ✅ DEBUG LOG – ADD THESE LINES HERE
-    console.log('🔵 Updating visit for service_id:', id);
-    const visitUpdateResult = await pool.query(
-      `UPDATE maintenance_visits 
-       SET status = 'completed', check_out_time = NOW() 
-       WHERE service_request_id = $1 AND status IN ('checked_in', 'in_progress')
-       RETURNING visit_id`,
-      [id],
-    );
-    console.log('🔵 Updated visit count:', visitUpdateResult.rowCount);
-    console.log('🔵 Visit IDs updated:', visitUpdateResult.rows);
-
-    // ✅ Update linked maintenance request status (if applicable)
+    // 3️⃣ Update linked maintenance request (if any)
     if (result.rows[0].maintenance_request_id) {
       await pool.query(
         `UPDATE maintenance_requests 
@@ -5401,7 +5390,7 @@ app.put('/api/service-requests/:id/complete', async (req, res) => {
       );
     }
 
-    // Check if there is any other active work
+    // 4️⃣ Check if there is any other active work
     const activeWorkForCompletion = await pool.query(
       `SELECT 1
        FROM maintenance_visits mv
@@ -5422,14 +5411,10 @@ app.put('/api/service-requests/:id/complete', async (req, res) => {
       activeWorkForCompletion.rows.length > 0 ||
       inProgressServiceForCompletion.rows.length > 0;
 
-    console.log('🔵 hasActiveWorkForCompletion:', hasActiveWorkForCompletion);
-    console.log('🔵 New provider status:', newAvailabilityStatus);
+    // ✅ DECLARE newAvailabilityStatus HERE (before using it)
+    const newAvailabilityStatus = hasActiveWorkForCompletion ? 'at_work' : 'available';
 
-    const newAvailabilityStatus = hasActiveWorkForCompletion
-      ? 'at_work'
-      : 'available';
-
-    // Update provider availability
+    // 5️⃣ Update provider availability
     await pool.query(
       `UPDATE service_providers 
        SET availability_status = $1,
@@ -5438,6 +5423,7 @@ app.put('/api/service-requests/:id/complete', async (req, res) => {
       [newAvailabilityStatus, user.id],
     );
 
+    // 6️⃣ Clear current_job_id if becoming available
     if (newAvailabilityStatus === 'available') {
       await pool.query(
         `UPDATE service_providers 
@@ -5447,35 +5433,34 @@ app.put('/api/service-requests/:id/complete', async (req, res) => {
       );
     }
 
-    // ✅ Send notifications
+    // 7️⃣ Notifications
     const serviceDetails = await pool.query(
       `SELECT sr.owner_id, sr.provider_id, sr.title, mr.renter_id
        FROM service_requests sr
        LEFT JOIN maintenance_requests mr ON sr.maintenance_request_id = mr.request_id
        WHERE sr.service_id = $1`,
-      [id],
+      [id]
     );
     if (serviceDetails.rows.length > 0) {
-      const { owner_id, provider_id, title, renter_id } =
-        serviceDetails.rows[0];
+      const { owner_id, provider_id, title, renter_id } = serviceDetails.rows[0];
       await sendPushToUser(
         owner_id,
         '✅ Job Completed',
         `The provider has completed "${title}". Please confirm and release payment.`,
-        { screen: 'ServiceRequest', service_id: id, type: 'job_completed' },
+        { screen: 'ServiceRequest', service_id: id, type: 'job_completed' }
       );
       await sendPushToUser(
         provider_id,
         '✅ Job Completed',
         `You have completed "${title}". Awaiting owner confirmation and payment.`,
-        { screen: 'ProviderDashboard', type: 'job_completed' },
+        { screen: 'ProviderDashboard', type: 'job_completed' }
       );
       if (renter_id) {
         await sendPushToUser(
           renter_id,
           '✅ Job Completed',
           `The maintenance work for "${title}" has been completed.`,
-          { screen: 'Maintenance', type: 'job_completed' },
+          { screen: 'Maintenance', type: 'job_completed' }
         );
       }
     }
@@ -5630,15 +5615,15 @@ app.get('/api/service-requests/:id', async (req, res) => {
     // Build visit object if exists
     const visit = service.visit_id
       ? {
-          visit_id: service.visit_id,
-          scheduled_start: service.scheduled_start,
-          scheduled_end: service.scheduled_end,
-          status: service.visit_status,
-          check_in_time: service.check_in_time,
-          check_out_time: service.check_out_time,
-          renter_safety_confirmed: service.renter_safety_confirmed,
-          provider_safety_confirmed: service.provider_safety_confirmed,
-        }
+        visit_id: service.visit_id,
+        scheduled_start: service.scheduled_start,
+        scheduled_end: service.scheduled_end,
+        status: service.visit_status,
+        check_in_time: service.check_in_time,
+        check_out_time: service.check_out_time,
+        renter_safety_confirmed: service.renter_safety_confirmed,
+        provider_safety_confirmed: service.provider_safety_confirmed,
+      }
       : null;
 
     const responseData = {
@@ -6537,7 +6522,7 @@ app.post('/api/maintenance-visits', async (req, res) => {
         provider_id,
         scheduled_start,
         scheduled_end ||
-          new Date(new Date(scheduled_start).getTime() + 3600000),
+        new Date(new Date(scheduled_start).getTime() + 3600000),
       );
       if (hasConflict) {
         await client.query('ROLLBACK');
