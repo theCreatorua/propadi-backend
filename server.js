@@ -5537,8 +5537,12 @@ app.get('/api/service-requests/owner/:userId', async (req, res) => {
     const result = await pool.query(
       `SELECT sr.*, 
               COALESCE(sr.title, mr.title) as title,
+              COALESCE(sr.description, mr.description) as description,
               p.title as property_title, 
+              p.address_street,
+              p.address_city,
               u_provider.name as provider_name,
+              u_renter.name as renter_name,
               mr.title as maintenance_title,
               mr.request_id as maintenance_request_id,
               mv.visit_id,
@@ -5548,7 +5552,8 @@ app.get('/api/service-requests/owner/:userId', async (req, res) => {
        JOIN properties p ON sr.property_id = p.property_id
        LEFT JOIN users u_provider ON sr.provider_id = u_provider.user_id
        LEFT JOIN maintenance_requests mr ON sr.maintenance_request_id = mr.request_id
-        LEFT JOIN maintenance_visits mv ON sr.service_id = mv.service_request_id
+       LEFT JOIN users u_renter ON mr.renter_id = u_renter.user_id
+       LEFT JOIN maintenance_visits mv ON sr.service_id = mv.service_request_id
        WHERE sr.owner_id = $1
        ORDER BY sr.created_at DESC`,
       [userId],
