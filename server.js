@@ -4187,14 +4187,15 @@ app.get('/api/provider/dashboard', async (req, res) => {
     );
     if (currentJobResult.rows.length > 0) {
       currentJob = currentJobResult.rows[0];
-
-      // Fetch associated visit (if any)
+      // Fetch associated visit (if any) – include stage columns
       const visitResult = await pool.query(
-        `SELECT visit_id, scheduled_start, scheduled_end, status, check_in_time, check_out_time,renter_safety_confirmed, provider_safety_confirmed
-         FROM maintenance_visits
-         WHERE service_request_id = $1
-         ORDER BY created_at DESC
-         LIMIT 1`,
+        `SELECT visit_id, scheduled_start, scheduled_end, status, check_in_time, check_out_time,
+            renter_safety_confirmed, provider_safety_confirmed,
+            stage1_verified, stage2_verified, qr_code, qr_expires_at
+     FROM maintenance_visits
+     WHERE service_request_id = $1
+     ORDER BY created_at DESC
+     LIMIT 1`,
         [currentJob.service_id],
       );
       if (visitResult.rows.length > 0) {
