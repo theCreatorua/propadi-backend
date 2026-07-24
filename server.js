@@ -870,7 +870,7 @@ app.get('/api/viewings/renter/:renterId', async (req, res) => {
     const { rows } = await pool.query(
       `SELECT v.viewing_id, v.property_id, v.renter_id, v.owner_id, 
               v.scheduled_start_time, v.scheduled_end_time, v.status, 
-              v.secure_handshake_pin, v.created_at,
+              v.secure_handshake_pin, v.updated_at,
               p.title as property_title, p.address_street, p.address_city, p.address_state,
               u.name as owner_name, u.email as owner_email
        FROM viewings v
