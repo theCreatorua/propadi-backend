@@ -4148,7 +4148,7 @@ app.get('/api/provider/dashboard', async (req, res) => {
           mv.qr_code, 
           mv.qr_expires_at,
           mv.renter_safety_confirmed,
-          mv.provider_safety_confirmed
+          mv.provider_safety_confirmed,
           sr.final_price,
           sr.status,
           sr.price_status,
@@ -4162,9 +4162,7 @@ app.get('/api/provider/dashboard', async (req, res) => {
           p.title as property_title, 
           p.address_street, 
           p.address_city, 
-          p.address_state,
-          mv.renter_safety_confirmed,
-          mv.provider_safety_confirmed
+          p.address_state
    FROM service_requests sr
    LEFT JOIN maintenance_requests mr ON sr.maintenance_request_id = mr.request_id
    JOIN properties p ON sr.property_id = p.property_id
@@ -4204,7 +4202,6 @@ app.get('/api/provider/dashboard', async (req, res) => {
       }
     }
 
-    // Awaiting schedule: accepted jobs without a visit
     // Awaiting schedule: accepted jobs without a visit (only status = 'accepted')
     const awaitingSchedule = await pool.query(
       `SELECT sr.service_id, 
@@ -4220,7 +4217,7 @@ app.get('/api/provider/dashboard', async (req, res) => {
           mv.qr_code, 
           mv.qr_expires_at,
           mv.renter_safety_confirmed,
-          mv.provider_safety_confirmed
+          mv.provider_safety_confirmed,
           sr.final_price,
           sr.trade_type,
           sr.status,
