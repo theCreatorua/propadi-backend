@@ -6390,9 +6390,8 @@ app.get('/api/maintenance-visits/:userId', async (req, res) => {
   }
 });
 
-// POST /api/maintenance-visits – owner schedules a visit (generates QR/PIN)
-// POST /api/maintenance-visits – owner schedules a visit (generates QR/PIN)
-app.post('/api/maintenance-visits', async (req, res) => {
+// POST /api/maintenance-visits (or /api/maintenance-visits/schedule) – owner schedules a visit
+app.post(['/api/maintenance-visits', '/api/maintenance-visits/schedule'], async (req, res) => {
   const client = await pool.connect();
   try {
     const authHeader = req.headers.authorization;
