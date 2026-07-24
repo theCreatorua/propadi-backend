@@ -4143,6 +4143,12 @@ app.get('/api/provider/dashboard', async (req, res) => {
           sr.materials_cost,
           sr.counter_price,
           sr.counter_reason,
+          mv.stage1_verified, 
+          mv.stage2_verified, 
+          mv.qr_code, 
+          mv.qr_expires_at,
+          mv.renter_safety_confirmed,
+          mv.provider_safety_confirmed
           sr.final_price,
           sr.status,
           sr.price_status,
@@ -4209,6 +4215,12 @@ app.get('/api/provider/dashboard', async (req, res) => {
           sr.materials_cost,
           sr.counter_price,
           sr.counter_reason,
+          mv.stage1_verified, 
+          mv.stage2_verified, 
+          mv.qr_code, 
+          mv.qr_expires_at,
+          mv.renter_safety_confirmed,
+          mv.provider_safety_confirmed
           sr.final_price,
           sr.trade_type,
           sr.status,
@@ -4312,6 +4324,12 @@ app.get('/api/provider/dashboard', async (req, res) => {
           sr.counter_price,
           sr.counter_reason,
           sr.final_price,
+          mv.stage1_verified, 
+          mv.stage2_verified, 
+          mv.qr_code, 
+          mv.qr_expires_at,
+          mv.renter_safety_confirmed,
+          mv.provider_safety_confirmed,
           sr.trade_type,
           sr.status,
           sr.price_status,
@@ -6742,14 +6760,15 @@ app.post('/api/maintenance-visits/:id/checkin', async (req, res) => {
       });
     }
 
-    // Update check-in
+    // 🛑 MODIFIED: Set stage1_verified = TRUE along with other updates
     await pool.query(
       `UPDATE maintenance_visits 
        SET status = 'checked_in', 
            check_in_time = NOW(), 
            gps_lat = $1, 
            gps_lng = $2,
-           pin_used = TRUE 
+           pin_used = TRUE,
+           stage1_verified = TRUE   -- Stage 1 completed
        WHERE visit_id = $3`,
       [gps_lat || null, gps_lng || null, id],
     );
@@ -6762,27 +6781,227 @@ app.post('/api/maintenance-visits/:id/checkin', async (req, res) => {
       [user.id, visit.service_request_id],
     );
 
-    // Notify owner and renter
+    // Notify owner and renter – updated to clarify Stage 1 completion
     if (visit.owner_id) {
       await sendPushToUser(
         visit.owner_id,
-        '🔧 Provider Checked In',
-        `The provider has arrived for the scheduled visit "${visit.title}".`,
+        '🔐 Stage 1 Complete',
+        `The provider has verified the PIN for "${visit.title}". Stage 2 (renter verification) is pending.`,
         { screen: 'Maintenance', visit_id: id },
       );
     }
     if (visit.renter_id) {
       await sendPushToUser(
         visit.renter_id,
-        '🔧 Provider Checked In',
-        `The provider has arrived. Please ensure safety.`,
+        '🔐 Provider Checked In (Stage 1)',
+        `The provider has entered the owner's PIN for "${visit.title}". Please prepare to verify their identity via QR scan (Stage 2).`,
         { screen: 'Maintenance', visit_id: id },
       );
     }
 
-    res.json({ success: true, message: 'Check‑in successful' });
+    res.json({ success: true, message: 'Stage 1 complete. Please proceed to Stage 2 (renter QR verification).' });
   } catch (err) {
     console.error('Check‑in error:', err);
+    res.status(500).json({ success: false, error: err.message });
+  }
+});
+
+// POST /api/maintenance-visits/:id/initiate-renter-verification – provider initiates Stage 2 QR
+app.post('/api/maintenance-visits/:id/initiate-renter-verification', async (req, res) => {
+  try {
+    const { id } = req.params;
+    const authHeader = req.headers.authorization;
+    if (!authHeader)
+      return res.status(401).json({ success: false, error: 'Unauthorized' });
+    const token = authHeader.split(' ')[1];
+    const {
+      data: { user },
+      error,
+    } = await supabase.auth.getUser(token);
+    if (error || !user)
+      return res.status(401).json({ success: false, error: 'Invalid token' });
+
+    // Get visit and verify provider
+    const visitResult = await pool.query(
+      `SELECT mv.*, sr.provider_id, sr.owner_id, mr.renter_id, sr.title,
+              p.title as property_title,
+              sp.trade_type,
+              u.name as provider_name,
+              u.profile_picture_url
+       FROM maintenance_visits mv
+       JOIN service_requests sr ON mv.service_request_id = sr.service_id
+       LEFT JOIN maintenance_requests mr ON sr.maintenance_request_id = mr.request_id
+       JOIN properties p ON sr.property_id = p.property_id
+       JOIN service_providers sp ON sr.provider_id = sp.provider_id
+       JOIN users u ON sp.provider_id = u.user_id
+       WHERE mv.visit_id = $1`,
+      [id],
+    );
+    if (visitResult.rows.length === 0) {
+      return res.status(404).json({ success: false, error: 'Visit not found' });
+    }
+    const visit = visitResult.rows[0];
+
+    if (visit.provider_id !== user.id) {
+      return res.status(403).json({ success: false, error: 'Not your visit' });
+    }
+
+    // Must have Stage 1 complete, not Stage 2, and status = 'checked_in'
+    if (!visit.stage1_verified) {
+      return res.status(400).json({
+        success: false,
+        error: 'Stage 1 (Owner PIN) not completed yet.',
+      });
+    }
+    if (visit.stage2_verified) {
+      return res.status(400).json({
+        success: false,
+        error: 'Stage 2 already completed.',
+      });
+    }
+    if (visit.status !== 'checked_in') {
+      return res.status(400).json({
+        success: false,
+        error: 'Visit must be in checked_in state.',
+      });
+    }
+
+    // Build QR data with security tips
+    const securityTips = [
+      'Verify the provider matches the photo shown on this screen.',
+      'Ensure the provider is wearing appropriate identification.',
+      'Do not share your PIN or personal information.',
+      'If you feel unsafe, contact Propadi support immediately.',
+    ];
+
+    const qrData = JSON.stringify({
+      visitId: id,
+      providerId: user.id,
+      providerName: visit.provider_name,
+      providerTrade: visit.trade_type,
+      providerPhoto: visit.profile_picture_url,
+      propertyTitle: visit.property_title,
+      jobTitle: visit.title,
+      securityTips,
+      nonce: Date.now().toString(36) + Math.random().toString(36).substring(2, 6),
+      exp: new Date(Date.now() + 10 * 60 * 1000).toISOString(),
+    });
+
+    const expiresAt = new Date(Date.now() + 10 * 60 * 1000);
+    await pool.query(
+      `UPDATE maintenance_visits 
+       SET qr_code = $1, qr_expires_at = $2
+       WHERE visit_id = $3`,
+      [qrData, expiresAt, id],
+    );
+
+    // Notify renter that QR is ready
+    if (visit.renter_id) {
+      await sendPushToUser(
+        visit.renter_id,
+        '📱 Renter Verification Ready',
+        `The provider is ready for your identity verification. Please scan the QR code in the app.`,
+        { screen: 'Maintenance', visit_id: id },
+      );
+    }
+
+    res.json({
+      success: true,
+      qrData,
+      expiresAt: expiresAt.toISOString(),
+      providerName: visit.provider_name,
+      providerTrade: visit.trade_type,
+      providerPhoto: visit.profile_picture_url,
+      propertyTitle: visit.property_title,
+      jobTitle: visit.title,
+    });
+  } catch (err) {
+    console.error('Initiate renter verification error:', err);
+    res.status(500).json({ success: false, error: err.message });
+  }
+});
+
+// POST /api/maintenance-visits/:id/renter-verify-identity – renter scans QR (Stage 2)
+app.post('/api/maintenance-visits/:id/renter-verify-identity', async (req, res) => {
+  try {
+    const { id } = req.params;
+    const authHeader = req.headers.authorization;
+    if (!authHeader)
+      return res.status(401).json({ success: false, error: 'Unauthorized' });
+    const token = authHeader.split(' ')[1];
+    const {
+      data: { user },
+      error,
+    } = await supabase.auth.getUser(token);
+    if (error || !user)
+      return res.status(401).json({ success: false, error: 'Invalid token' });
+
+    // Get visit and verify renter
+    const visitResult = await pool.query(
+      `SELECT mv.*, sr.provider_id, mr.renter_id, sr.title
+       FROM maintenance_visits mv
+       JOIN service_requests sr ON mv.service_request_id = sr.service_id
+       LEFT JOIN maintenance_requests mr ON sr.maintenance_request_id = mr.request_id
+       WHERE mv.visit_id = $1`,
+      [id],
+    );
+    if (visitResult.rows.length === 0) {
+      return res.status(404).json({ success: false, error: 'Visit not found' });
+    }
+    const visit = visitResult.rows[0];
+
+    if (visit.renter_id !== user.id) {
+      return res.status(403).json({
+        success: false,
+        error: 'Only the renter can verify identity.',
+      });
+    }
+
+    // Check state
+    if (!visit.stage1_verified) {
+      return res.status(400).json({
+        success: false,
+        error: 'Stage 1 (Owner PIN) not completed yet.',
+      });
+    }
+    if (visit.stage2_verified) {
+      return res.status(400).json({
+        success: false,
+        error: 'Stage 2 already completed.',
+      });
+    }
+    if (!visit.qr_code || new Date() > new Date(visit.qr_expires_at)) {
+      return res.status(400).json({
+        success: false,
+        error: 'QR code expired. Provider must re-initiate.',
+      });
+    }
+
+    // Mark Stage 2 complete
+    await pool.query(
+      `UPDATE maintenance_visits 
+       SET stage2_verified = TRUE
+       WHERE visit_id = $1`,
+      [id],
+    );
+
+    // Notify provider and owner
+    await sendPushToUser(
+      visit.provider_id,
+      '✅ Stage 2 Complete',
+      `The renter has verified your identity for "${visit.title}". Awaiting renter safety confirmation.`,
+      { screen: 'ProviderDashboard', service_id: visit.service_id },
+    );
+    await sendPushToUser(
+      visit.owner_id,
+      '✅ Stage 2 Complete',
+      `The renter has verified the provider's identity for "${visit.title}".`,
+      { screen: 'VisitManagement', visit_id: id },
+    );
+
+    res.json({ success: true, message: 'Identity verified. Check-in is now fully complete.' });
+  } catch (err) {
+    console.error('Renter verify identity error:', err);
     res.status(500).json({ success: false, error: err.message });
   }
 });
@@ -6826,6 +7045,14 @@ app.put('/api/maintenance-visits/:id/safety', async (req, res) => {
       return res.status(404).json({ success: false, error: 'Visit not found' });
     }
     const visit = visitResult.rows[0];
+
+    // 🛑 NEW: Require both Stage 1 and Stage 2 to be complete before allowing safety confirmation
+    if (!visit.stage1_verified || !visit.stage2_verified) {
+      return res.status(403).json({
+        success: false,
+        error: 'Cannot confirm safety until both Stage 1 (Owner PIN) and Stage 2 (Renter QR) are complete.',
+      });
+    }
 
     const column =
       role === 'renter'
@@ -7072,8 +7299,6 @@ app.post('/api/maintenance-visits/:id/request-pin', async (req, res) => {
 });
 
 // POST /api/maintenance-visits/:id/generate-pin – owner generates a new PIN for the visit
-// POST /api/maintenance-visits/:id/generate-pin – owner generates a new PIN
-// POST /api/maintenance-visits/:id/generate-pin – owner generates a new PIN
 app.post('/api/maintenance-visits/:id/generate-pin', async (req, res) => {
   try {
     const { id } = req.params;
@@ -7108,16 +7333,16 @@ app.post('/api/maintenance-visits/:id/generate-pin', async (req, res) => {
       return res.status(403).json({ success: false, error: 'Not your visit' });
     }
 
-    // Generate 6‑digit PIN with 24‑hour expiry
+    // ✅ Generate 6‑digit PIN with 10‑minute expiry (aligned with Stage 1 security protocol)
     const pin = Math.floor(100000 + Math.random() * 900000).toString();
-    const expiresAt = new Date(Date.now() + 24 * 60 * 60 * 1000); // 24 hours
+    const expiresAt = new Date(Date.now() + 10 * 60 * 1000); // 10 minutes
 
     await pool.query(
       `UPDATE maintenance_visits 
-   SET pin = $1, 
-       pin_expires_at = $2, 
-       pin_used = FALSE 
-   WHERE visit_id = $3`,
+       SET pin = $1, 
+           pin_expires_at = $2, 
+           pin_used = FALSE 
+       WHERE visit_id = $3`,
       [pin, expiresAt, id],
     );
 
@@ -7126,7 +7351,7 @@ app.post('/api/maintenance-visits/:id/generate-pin', async (req, res) => {
       await sendPushToUser(
         provider_id,
         '🔑 PIN Generated',
-        `The owner has generated the PIN for "${title}". Your PIN: ${pin}. Use this to check in.`,
+        `The owner has generated the PIN for "${title}". Your PIN: ${pin}. This expires in 10 minutes. Use this to check in (Stage 1).`,
         { screen: 'ProviderDashboard' },
       );
     }
@@ -7135,7 +7360,7 @@ app.post('/api/maintenance-visits/:id/generate-pin', async (req, res) => {
     await sendPushToUser(
       owner_id,
       '📤 PIN Generated',
-      `The PIN has been generated and ${provider_id ? 'sent to the provider' : 'is ready to share'} for "${title}".`,
+      `The PIN has been generated and ${provider_id ? 'sent to the provider' : 'is ready to share'} for "${title}". This PIN expires in 10 minutes.`,
       { screen: 'VisitManagement', visit_id: id },
     );
 
@@ -7145,6 +7370,7 @@ app.post('/api/maintenance-visits/:id/generate-pin', async (req, res) => {
     res.status(500).json({ success: false, error: err.message });
   }
 });
+
 
 // ==========================================
 // CRON JOBS  - CHECK FOR MISSED CHECK-INS AND AUTO-CANCEL
