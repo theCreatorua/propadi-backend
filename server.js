@@ -863,6 +863,30 @@ app.post('/api/viewings/:id/audit', async (req, res) => {
   }
 });
 
+// GET /api/viewings/renter/:renterId – get booked property tours for renter
+app.get('/api/viewings/renter/:renterId', async (req, res) => {
+  try {
+    const { renterId } = req.params;
+    const { rows } = await pool.query(
+      `SELECT v.viewing_id, v.property_id, v.renter_id, v.owner_id, 
+              v.scheduled_start_time, v.scheduled_end_time, v.status, 
+              v.secure_handshake_pin, v.created_at,
+              p.title as property_title, p.address_street, p.address_city, p.address_state,
+              u.name as owner_name, u.email as owner_email
+       FROM viewings v
+       JOIN properties p ON v.property_id = p.property_id
+       LEFT JOIN users u ON v.owner_id = u.user_id
+       WHERE v.renter_id = $1
+       ORDER BY v.scheduled_start_time DESC`,
+      [renterId],
+    );
+    res.json({ success: true, viewings: rows });
+  } catch (err) {
+    console.error('Error fetching renter viewings:', err);
+    res.status(500).json({ success: false, error: 'Failed to load booked tours' });
+  }
+});
+
 // ==========================================
 // FORMAL APPLICATION ROUTES
 // ==========================================
