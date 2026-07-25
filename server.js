@@ -25,6 +25,20 @@ const pool = new Pool({
   ssl: { rejectUnauthorized: false },
 });
 
+// Migration: Ensure stage1_verified_at and stage2_verified_at exist on maintenance_visits
+(async () => {
+  try {
+    await pool.query(`
+      ALTER TABLE maintenance_visits 
+      ADD COLUMN IF NOT EXISTS stage1_verified_at TIMESTAMPTZ,
+      ADD COLUMN IF NOT EXISTS stage2_verified_at TIMESTAMPTZ;
+    `);
+    console.log('✅ maintenance_visits stage timestamp columns verified.');
+  } catch (err) {
+    console.error('Error adding stage timestamp columns:', err);
+  }
+})();
+
 // Helper: Count active jobs for a provider (accepted + in_progress + negotiating)
 async function countActiveJobs(providerId) {
   const result = await pool.query(
@@ -4168,7 +4182,10 @@ app.get('/api/provider/dashboard', async (req, res) => {
           sr.counter_price,
           sr.counter_reason,
           mv.stage1_verified, 
+          mv.stage1_verified_at,
           mv.stage2_verified, 
+          mv.stage2_verified_at,
+          mv.check_in_time,
           mv.qr_code, 
           mv.qr_expires_at,
           mv.renter_safety_confirmed,
@@ -4215,7 +4232,7 @@ app.get('/api/provider/dashboard', async (req, res) => {
       const visitResult = await pool.query(
         `SELECT visit_id, scheduled_start, scheduled_end, status, check_in_time, check_out_time,
             renter_safety_confirmed, provider_safety_confirmed,
-            stage1_verified, stage2_verified, qr_code, qr_expires_at
+            stage1_verified, stage1_verified_at, stage2_verified, stage2_verified_at, qr_code, qr_expires_at
      FROM maintenance_visits
      WHERE service_request_id = $1
      ORDER BY created_at DESC
@@ -4238,7 +4255,10 @@ app.get('/api/provider/dashboard', async (req, res) => {
           sr.counter_price,
           sr.counter_reason,
           mv.stage1_verified, 
+          mv.stage1_verified_at,
           mv.stage2_verified, 
+          mv.stage2_verified_at,
+          mv.check_in_time,
           mv.qr_code, 
           mv.qr_expires_at,
           mv.renter_safety_confirmed,
@@ -4347,7 +4367,10 @@ app.get('/api/provider/dashboard', async (req, res) => {
           sr.counter_reason,
           sr.final_price,
           mv.stage1_verified, 
+          mv.stage1_verified_at,
           mv.stage2_verified, 
+          mv.stage2_verified_at,
+          mv.check_in_time,
           mv.qr_code, 
           mv.qr_expires_at,
           mv.renter_safety_confirmed,
@@ -6786,11 +6809,12 @@ app.post('/api/maintenance-visits/:id/checkin', async (req, res) => {
       });
     }
 
-    // 🛑 MODIFIED: Set stage1_verified = TRUE along with other updates
+    // 🛑 MODIFIED: Set stage1_verified = TRUE and stage1_verified_at along with other updates
     await pool.query(
       `UPDATE maintenance_visits 
        SET status = 'checked_in', 
-           check_in_time = NOW(), 
+           check_in_time = COALESCE(check_in_time, NOW()), 
+           stage1_verified_at = COALESCE(stage1_verified_at, NOW()),
            gps_lat = $1, 
            gps_lng = $2,
            pin_used = TRUE,
@@ -7003,10 +7027,11 @@ app.post('/api/maintenance-visits/:id/renter-verify-identity', async (req, res) 
       });
     }
 
-    // Mark Stage 2 complete
+    // Mark Stage 2 complete with timestamp
     await pool.query(
       `UPDATE maintenance_visits 
-       SET stage2_verified = TRUE
+       SET stage2_verified = TRUE,
+           stage2_verified_at = NOW()
        WHERE visit_id = $1`,
       [id],
     );
