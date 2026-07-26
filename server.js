@@ -89,6 +89,118 @@ async function hasScheduleConflict(providerId, proposedStart, proposedEnd) {
 }
 
 // ==========================================
+// SAFETY PULSE INTERNAL HELPER
+// ==========================================
+
+/**
+ * Internal helper to trigger a safety alert for a maintenance visit.
+ * Used by both the manual trigger endpoint and the safety-pulse cron.
+ *
+ * @param {string} visitId - UUID of the maintenance visit
+ * @param {boolean} manual - true if triggered by renter, false if auto-escalated by cron
+ * @returns {Promise<{success: boolean, message: string, error?: string}>}
+ */
+async function triggerAlertInternal(visitId, manual = false) {
+  const client = await pool.connect();
+  try {
+    await client.query('BEGIN');
+
+    // 1. Fetch visit details
+    const visitResult = await client.query(
+      `SELECT mv.*, mr.renter_id, sr.owner_id, sr.title
+       FROM maintenance_visits mv
+       JOIN service_requests sr ON mv.service_request_id = sr.service_id
+       LEFT JOIN maintenance_requests mr ON sr.maintenance_request_id = mr.request_id
+       WHERE mv.visit_id = $1
+       FOR UPDATE`,
+      [visitId]
+    );
+    if (visitResult.rows.length === 0) {
+      await client.query('ROLLBACK');
+      return { success: false, error: 'Visit not found' };
+    }
+    const visit = visitResult.rows[0];
+
+    // 2. If manual trigger by renter, check abuse limits
+    if (manual && visit.renter_id) {
+      const userResult = await client.query(
+        `SELECT safety_alert_count, last_safety_alert_date FROM users WHERE user_id = $1`,
+        [visit.renter_id]
+      );
+      const user = userResult.rows[0];
+      if (user) {
+        const now = new Date();
+        const lastDate = user.last_safety_alert_date ? new Date(user.last_safety_alert_date) : null;
+        let daysSinceLast = null;
+        if (lastDate) {
+          daysSinceLast = (now.getTime() - lastDate.getTime()) / (1000 * 3600 * 24);
+        }
+
+        // Abuse rule: if user has already triggered 2 alerts in the last 30 days, block further manual alerts
+        if (user.safety_alert_count >= 2 && (daysSinceLast === null || daysSinceLast < 30)) {
+          await client.query('ROLLBACK');
+          return {
+            success: false,
+            error: 'You have exceeded the limit of emergency alerts. Please contact support if you are in real danger.'
+          };
+        }
+      }
+    }
+
+    // 3. Update visit status to 'alert'
+    await client.query(
+      `UPDATE maintenance_visits
+       SET safety_pulse_status = 'alert'
+       WHERE visit_id = $1`,
+      [visitId]
+    );
+
+    // 4. Increment renter's safety_alert_count (if manual) and record last date
+    if (manual && visit.renter_id) {
+      await client.query(
+        `UPDATE users
+         SET safety_alert_count = safety_alert_count + 1,
+             last_safety_alert_date = NOW()
+         WHERE user_id = $1`,
+        [visit.renter_id]
+      );
+    }
+
+    // 5. Notify owner
+    if (visit.owner_id) {
+      await sendPushToUser(
+        visit.owner_id,
+        '🚨 Safety Alert',
+        `An emergency alert has been triggered for "${visit.title}". Please check on the renter immediately.`,
+        { screen: 'VisitManagement', visit_id: visitId }
+      );
+    }
+
+    // 6. Notify all admins
+    const adminUsers = await client.query(
+      'SELECT user_id FROM users WHERE is_admin = TRUE'
+    );
+    for (const admin of adminUsers.rows) {
+      await sendPushToUser(
+        admin.user_id,
+        '🚨 Safety Alert - Renter',
+        `Renter has triggered an alert for job "${visit.title}". Action required.`,
+        { screen: 'AdminDashboard', visit_id: visitId }
+      );
+    }
+
+    await client.query('COMMIT');
+    return { success: true, message: 'Alert triggered. Help is on the way.' };
+  } catch (err) {
+    await client.query('ROLLBACK');
+    console.error('triggerAlertInternal error:', err);
+    return { success: false, error: err.message };
+  } finally {
+    client.release();
+  }
+}
+
+// ==========================================
 // ADMIN MIDDLEWARE (must be defined before any admin routes)
 // ==========================================
 const requireAdmin = async (req, res, next) => {
@@ -7732,6 +7844,97 @@ app.post('/api/maintenance-visits/:id/generate-pin', async (req, res) => {
   }
 });
 
+// POST /api/maintenance-visits/:id/safety-pulse – renter confirms they are safe
+app.post('/api/maintenance-visits/:id/safety-pulse', async (req, res) => {
+  try {
+    const { id } = req.params;
+    const authHeader = req.headers.authorization;
+    if (!authHeader) return res.status(401).json({ success: false, error: 'Unauthorized' });
+    const token = authHeader.split(' ')[1];
+    const { data: { user }, error } = await supabase.auth.getUser(token);
+    if (error || !user) return res.status(401).json({ success: false, error: 'Invalid token' });
+
+    const visitResult = await pool.query(
+      `SELECT mv.*, mr.renter_id, sr.title
+       FROM maintenance_visits mv
+       JOIN service_requests sr ON mv.service_request_id = sr.service_id
+       LEFT JOIN maintenance_requests mr ON sr.maintenance_request_id = mr.request_id
+       WHERE mv.visit_id = $1`,
+      [id]
+    );
+    if (visitResult.rows.length === 0) {
+      return res.status(404).json({ success: false, error: 'Visit not found' });
+    }
+    const visit = visitResult.rows[0];
+
+    if (visit.renter_id !== user.id) {
+      return res.status(403).json({ success: false, error: 'Only the renter can confirm safety.' });
+    }
+
+    if (visit.status !== 'in_progress') {
+      return res.status(400).json({ success: false, error: 'Safety pulse is only required while work is in progress.' });
+    }
+
+    // Update pulse
+    await pool.query(
+      `UPDATE maintenance_visits
+       SET last_safety_pulse = NOW(),
+           missed_pulse_count = 0,
+           safety_pulse_status = 'ok'
+       WHERE visit_id = $1`,
+      [id]
+    );
+
+    // Optional: reward renter with +1 trust point for prompt response (if they responded within 5 minutes of notification)
+    // We'll implement that in the cron later.
+
+    res.json({ success: true, message: 'Safety confirmed.' });
+  } catch (err) {
+    console.error('Safety pulse error:', err);
+    res.status(500).json({ success: false, error: err.message });
+  }
+});
+
+// POST /api/maintenance-visits/:id/trigger-alert – emergency alert
+// POST /api/maintenance-visits/:id/trigger-alert – manual emergency alert (renter)
+app.post('/api/maintenance-visits/:id/trigger-alert', async (req, res) => {
+  try {
+    const { id } = req.params;
+    const authHeader = req.headers.authorization;
+    if (!authHeader) return res.status(401).json({ success: false, error: 'Unauthorized' });
+    const token = authHeader.split(' ')[1];
+    const { data: { user }, error } = await supabase.auth.getUser(token);
+    if (error || !user) return res.status(401).json({ success: false, error: 'Invalid token' });
+
+    // Verify user is the renter for this visit
+    const checkVisit = await pool.query(
+      `SELECT mr.renter_id FROM maintenance_visits mv
+       JOIN service_requests sr ON mv.service_request_id = sr.service_id
+       LEFT JOIN maintenance_requests mr ON sr.maintenance_request_id = mr.request_id
+       WHERE mv.visit_id = $1`,
+      [id]
+    );
+    if (checkVisit.rows.length === 0) {
+      return res.status(404).json({ success: false, error: 'Visit not found' });
+    }
+    if (checkVisit.rows[0].renter_id !== user.id) {
+      return res.status(403).json({ success: false, error: 'Only the renter can trigger an alert.' });
+    }
+
+    // Call the internal helper (manual = true)
+    const result = await triggerAlertInternal(id, true);
+    if (result.success) {
+      res.json({ success: true, message: result.message });
+    } else {
+      res.status(400).json({ success: false, error: result.error });
+    }
+  } catch (err) {
+    console.error('Trigger alert endpoint error:', err);
+    res.status(500).json({ success: false, error: err.message });
+  }
+});
+
+
 
 // ==========================================
 // CRON JOBS  - CHECK FOR MISSED CHECK-INS AND AUTO-CANCEL
@@ -7796,6 +7999,92 @@ app.post('/api/cron/check-missed-checkins', async (req, res) => {
     res.status(500).json({ success: false, error: err.message });
   }
 });
+
+
+// ==========================================
+// CRON JOBS  - CHECK FOR SAFETY PULSES
+// ==========================================
+// POST /api/cron/check-safety-pulses – auto‑check on renter safety
+// POST /api/cron/check-safety-pulses – auto‑check on renter safety (runs every 15 min)
+app.post('/api/cron/check-safety-pulses', async (req, res) => {
+  const secretKey = req.headers['x-cron-secret'];
+  if (secretKey !== process.env.CRON_SECRET) {
+    return res.status(401).json({ success: false, error: 'Unauthorized' });
+  }
+
+  try {
+    const now = new Date();
+    const thirtyMinutesAgo = new Date(now.getTime() - 30 * 60 * 1000);
+
+    // Find visits in 'in_progress' with no recent pulse or stale pulse
+    const visits = await pool.query(
+      `SELECT mv.visit_id, mv.service_request_id, mr.renter_id, mv.missed_pulse_count,
+              mv.last_safety_pulse, sr.title
+       FROM maintenance_visits mv
+       JOIN service_requests sr ON mv.service_request_id = sr.service_id
+       LEFT JOIN maintenance_requests mr ON sr.maintenance_request_id = mr.request_id
+       WHERE mv.status = 'in_progress'
+         AND (mv.last_safety_pulse IS NULL OR mv.last_safety_pulse < $1)
+         AND mv.safety_pulse_status != 'alert'
+         AND mv.renter_departure_confirmed = FALSE  -- not already completed
+         AND mv.stage1_verified = TRUE              -- already passed Stage 1 & 2
+         AND mv.stage2_verified = TRUE
+         AND mv.renter_safety_confirmed = TRUE
+      ORDER BY mv.last_safety_pulse ASC NULLS FIRST`,
+      [thirtyMinutesAgo]
+    );
+
+    let processed = 0;
+    for (const visit of visits.rows) {
+      // Increment missed count
+      const newCount = (visit.missed_pulse_count || 0) + 1;
+      await pool.query(
+        `UPDATE maintenance_visits
+         SET missed_pulse_count = $1,
+             safety_pulse_status = CASE WHEN $1 >= 3 THEN 'missed' ELSE 'ok' END
+         WHERE visit_id = $2`,
+        [newCount, visit.visit_id]
+      );
+
+      // Send push notification to renter
+      if (visit.renter_id) {
+        await sendPushToUser(
+          visit.renter_id,
+          '🔒 Safety Check‑in',
+          `We haven't heard from you in a while. Tap 'I'm Safe' or 'Need Help'.`,
+          { screen: 'Maintenance', visit_id: visit.visit_id, type: 'safety_pulse' }
+        );
+        // If missed count reaches 3, auto‑escalate
+        if (newCount >= 3) {
+          // Call the internal helper to trigger alert
+          const alertResult = await triggerAlertInternal(visit.visit_id, false);
+          if (alertResult.success) {
+            // Also penalise renter's trust score for ignoring pulses
+            await pool.query(
+              `UPDATE users SET renter_score = renter_score - 3 WHERE user_id = $1`,
+              [visit.renter_id]
+            );
+            // Notify owner again (the helper already did, but we can add a specific note)
+            await sendPushToUser(
+              visit.owner_id,
+              '⚠️ Renter Unresponsive',
+              `The renter has missed ${newCount} safety check‑ins. An alert has been escalated. Please follow up.`,
+              { screen: 'VisitManagement', visit_id: visit.visit_id }
+            );
+          }
+        }
+      }
+      processed++;
+    }
+
+    res.json({ success: true, processed });
+  } catch (err) {
+    console.error('Safety pulse cron error:', err);
+    res.status(500).json({ success: false, error: err.message });
+  }
+});
+
+
 
 // ==========================================
 // START SERVER
