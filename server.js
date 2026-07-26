@@ -88,6 +88,30 @@ async function hasScheduleConflict(providerId, proposedStart, proposedEnd) {
   return parseInt(result.rows[0].count, 0) > 0;
 }
 
+// Helper: Send SMS Notification (Twilio integration with fallback logging)
+async function sendSMSNotification(toPhoneNumber, messageText) {
+  if (!toPhoneNumber) return;
+  try {
+    const accountSid = process.env.TWILIO_ACCOUNT_SID;
+    const authToken = process.env.TWILIO_AUTH_TOKEN;
+    const fromPhone = process.env.TWILIO_PHONE_NUMBER;
+
+    if (accountSid && authToken && fromPhone) {
+      const twilio = require('twilio')(accountSid, authToken);
+      await twilio.messages.create({
+        body: messageText,
+        from: fromPhone,
+        to: toPhoneNumber,
+      });
+      console.log(`📱 SMS sent successfully to ${toPhoneNumber}`);
+    } else {
+      console.log(`📱 [SMS FALLBACK LOG] To: ${toPhoneNumber} | Message: ${messageText}`);
+    }
+  } catch (err) {
+    console.error(`❌ Failed to send SMS to ${toPhoneNumber}:`, err.message);
+  }
+}
+
 // ==========================================
 // SAFETY PULSE INTERNAL HELPER
 // ==========================================
@@ -105,12 +129,17 @@ async function triggerAlertInternal(visitId, manual = false) {
   try {
     await client.query('BEGIN');
 
-    // 1. Fetch visit details
+    // 1. Fetch visit details including renter & landlord Next of Kin contacts
     const visitResult = await client.query(
-      `SELECT mv.*, mr.renter_id, sr.owner_id, sr.title
+      `SELECT mv.*, mr.renter_id, sr.owner_id, sr.title,
+              u_renter.name as renter_name, u_renter.phone_number as renter_phone,
+              u_renter.nok_full_name, u_renter.nok_phone, u_renter.nok_relationship,
+              u_owner.name as owner_name, u_owner.phone_number as owner_phone
        FROM maintenance_visits mv
        JOIN service_requests sr ON mv.service_request_id = sr.service_id
        LEFT JOIN maintenance_requests mr ON sr.maintenance_request_id = mr.request_id
+       LEFT JOIN users u_renter ON mr.renter_id = u_renter.user_id
+       LEFT JOIN users u_owner ON sr.owner_id = u_owner.user_id
        WHERE mv.visit_id = $1
        FOR UPDATE`,
       [visitId]
@@ -166,7 +195,7 @@ async function triggerAlertInternal(visitId, manual = false) {
       );
     }
 
-    // 5. Notify owner
+    // 5. Notify owner via Push & SMS Fallback
     if (visit.owner_id) {
       await sendPushToUser(
         visit.owner_id,
@@ -174,9 +203,32 @@ async function triggerAlertInternal(visitId, manual = false) {
         `An emergency alert has been triggered for "${visit.title}". Please check on the renter immediately.`,
         { screen: 'VisitManagement', visit_id: visitId }
       );
+
+      if (visit.owner_phone) {
+        await sendSMSNotification(
+          visit.owner_phone,
+          `PROPADI EMERGENCY: Renter ${visit.renter_name || 'Tenant'} triggered an emergency safety alert for job "${visit.title}". Please check on them immediately.`
+        );
+      }
     }
 
-    // 6. Notify all admins
+    // 6. Send SMS Fallback to Renter
+    if (visit.renter_phone) {
+      await sendSMSNotification(
+        visit.renter_phone,
+        `PROPADI SAFETY ALERT: Your emergency alert for "${visit.title}" has been dispatched to Property Management and Security.`
+      );
+    }
+
+    // 7. Send SMS Fallback to Next of Kin / Emergency Contact
+    if (visit.nok_phone) {
+      await sendSMSNotification(
+        visit.nok_phone,
+        `PROPADI EMERGENCY ALERT: Your contact ${visit.renter_name || 'Renter'} triggered an emergency safety alert during a maintenance visit for "${visit.title}". Please attempt to reach them.`
+      );
+    }
+
+    // 8. Notify all admins
     const adminUsers = await client.query(
       'SELECT user_id FROM users WHERE is_admin = TRUE'
     );
@@ -8000,6 +8052,170 @@ app.post('/api/cron/check-missed-checkins', async (req, res) => {
   }
 });
 
+
+// PUT /api/users/:userId/emergency-contact – Update Next of Kin / Emergency Contact
+app.put('/api/users/:userId/emergency-contact', async (req, res) => {
+  try {
+    const { userId } = req.params;
+    const { nok_full_name, nok_phone, nok_relationship, nok_address } = req.body;
+    const authHeader = req.headers.authorization;
+    if (!authHeader) return res.status(401).json({ success: false, error: 'Unauthorized' });
+    const token = authHeader.split(' ')[1];
+    const { data: { user }, error } = await supabase.auth.getUser(token);
+    if (error || !user || user.id !== userId) {
+      return res.status(401).json({ success: false, error: 'Unauthorized user action' });
+    }
+
+    await pool.query(
+      `UPDATE users
+       SET nok_full_name = $1,
+           nok_phone = $2,
+           nok_relationship = $3,
+           nok_address = $4
+       WHERE user_id = $5`,
+      [nok_full_name || null, nok_phone || null, nok_relationship || null, nok_address || null, userId]
+    );
+
+    res.json({ success: true, message: 'Emergency Contact (Next of Kin) updated successfully.' });
+  } catch (err) {
+    console.error('Update emergency contact error:', err);
+    res.status(500).json({ success: false, error: err.message });
+  }
+});
+
+// GET /api/admin/safety-alerts – fetch all active safety alerts and missed pulses
+app.get('/api/admin/safety-alerts', async (req, res) => {
+  try {
+    const authHeader = req.headers.authorization;
+    if (!authHeader) return res.status(401).json({ success: false, error: 'Unauthorized' });
+    const token = authHeader.split(' ')[1];
+    const { data: { user }, error } = await supabase.auth.getUser(token);
+    if (error || !user) return res.status(401).json({ success: false, error: 'Invalid token' });
+
+    // Check admin status
+    const adminCheck = await pool.query('SELECT is_admin FROM users WHERE user_id = $1', [user.id]);
+    if (!adminCheck.rows[0]?.is_admin) {
+      return res.status(403).json({ success: false, error: 'Admin access required' });
+    }
+
+    const query = `
+      SELECT 
+        mv.visit_id,
+        mv.scheduled_start,
+        mv.status as visit_status,
+        mv.safety_pulse_status,
+        mv.last_safety_pulse,
+        mv.missed_pulse_count,
+        mv.stage1_verified,
+        mv.stage2_verified,
+        sr.service_id,
+        sr.title as job_title,
+        p.title as property_title,
+        p.address_street,
+        p.address_city,
+        u_renter.user_id as renter_id,
+        u_renter.name as renter_name,
+        u_renter.phone_number as renter_phone,
+        u_renter.renter_score,
+        u_renter.nok_full_name,
+        u_renter.nok_phone,
+        u_renter.nok_relationship,
+        u_renter.nok_address,
+        u_owner.user_id as owner_id,
+        u_owner.name as owner_name,
+        u_owner.phone_number as owner_phone,
+        u_provider.name as provider_name,
+        u_provider.phone_number as provider_phone
+      FROM maintenance_visits mv
+      JOIN service_requests sr ON mv.service_request_id = sr.service_id
+      LEFT JOIN maintenance_requests mr ON sr.maintenance_request_id = mr.request_id
+      JOIN properties p ON sr.property_id = p.property_id
+      LEFT JOIN users u_renter ON mr.renter_id = u_renter.user_id
+      LEFT JOIN users u_owner ON sr.owner_id = u_owner.user_id
+      LEFT JOIN users u_provider ON sr.provider_id = u_provider.user_id
+      WHERE mv.safety_pulse_status IN ('alert', 'missed') OR mv.missed_pulse_count >= 2
+      ORDER BY 
+        CASE WHEN mv.safety_pulse_status = 'alert' THEN 1 ELSE 2 END,
+        mv.last_safety_pulse ASC NULLS FIRST
+    `;
+
+    const result = await pool.query(query);
+    res.json({ success: true, alerts: result.rows });
+  } catch (err) {
+    console.error('Fetch admin safety alerts error:', err);
+    res.status(500).json({ success: false, error: err.message });
+  }
+});
+
+// POST /api/admin/safety-alerts/:visitId/intervene – Admin intervention handler
+app.post('/api/admin/safety-alerts/:visitId/intervene', async (req, res) => {
+  try {
+    const { visitId } = req.params;
+    const { action, penaltyPoints } = req.body;
+    const authHeader = req.headers.authorization;
+    if (!authHeader) return res.status(401).json({ success: false, error: 'Unauthorized' });
+    const token = authHeader.split(' ')[1];
+    const { data: { user }, error } = await supabase.auth.getUser(token);
+    if (error || !user) return res.status(401).json({ success: false, error: 'Invalid token' });
+
+    const adminCheck = await pool.query('SELECT is_admin FROM users WHERE user_id = $1', [user.id]);
+    if (!adminCheck.rows[0]?.is_admin) {
+      return res.status(403).json({ success: false, error: 'Admin access required' });
+    }
+
+    const visitRes = await pool.query(
+      `SELECT mv.*, mr.renter_id, sr.owner_id, sr.title 
+       FROM maintenance_visits mv
+       JOIN service_requests sr ON mv.service_request_id = sr.service_id
+       LEFT JOIN maintenance_requests mr ON sr.maintenance_request_id = mr.request_id
+       WHERE mv.visit_id = $1`,
+      [visitId]
+    );
+    if (visitRes.rows.length === 0) {
+      return res.status(404).json({ success: false, error: 'Visit not found' });
+    }
+    const visit = visitRes.rows[0];
+
+    if (action === 'resolve') {
+      await pool.query(
+        `UPDATE maintenance_visits
+         SET safety_pulse_status = 'ok',
+             missed_pulse_count = 0,
+             last_safety_pulse = NOW()
+         WHERE visit_id = $1`,
+        [visitId]
+      );
+      if (visit.renter_id) {
+        await sendPushToUser(
+          visit.renter_id,
+          '✅ Safety Alert Resolved',
+          `Propadi Admin has reviewed and resolved the safety alert for "${visit.title}".`,
+          { screen: 'Maintenance', visit_id: visitId }
+        );
+      }
+    } else if (action === 'penalize' && visit.renter_id) {
+      const pts = parseInt(penaltyPoints, 10) || 5;
+      await pool.query(
+        `UPDATE users SET renter_score = GREATEST(0, renter_score - $1) WHERE user_id = $2`,
+        [pts, visit.renter_id]
+      );
+    } else if (action === 'dispatch') {
+      if (visit.owner_id) {
+        await sendPushToUser(
+          visit.owner_id,
+          '🚨 Security Dispatched',
+          `Propadi Security / Emergency response has been dispatched for "${visit.title}".`,
+          { screen: 'VisitManagement', visit_id: visitId }
+        );
+      }
+    }
+
+    res.json({ success: true, message: `Intervention '${action}' completed.` });
+  } catch (err) {
+    console.error('Admin intervention error:', err);
+    res.status(500).json({ success: false, error: err.message });
+  }
+});
 
 // ==========================================
 // CRON JOBS  - CHECK FOR SAFETY PULSES
