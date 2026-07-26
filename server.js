@@ -6711,6 +6711,8 @@ app.get('/api/maintenance-visits/:userId', async (req, res) => {
         mv.stage1_verified_at,
         mv.stage2_verified,
         mv.stage2_verified_at,
+        mv.involves_renter,
+        COALESCE(mv.renter_id, mr.renter_id) as renter_id,
         sr.service_id,
         sr.trade_type,
         sr.maintenance_request_id,
@@ -6723,7 +6725,7 @@ app.get('/api/maintenance-visits/:userId', async (req, res) => {
         p.address_state,
         u_owner.name as owner_name,
         u_provider.name as provider_name,
-        u_renter.name as renter_name
+        COALESCE(u_renter.name, u_visit_renter.name) as renter_name
       FROM maintenance_visits mv
       JOIN service_requests sr ON mv.service_request_id = sr.service_id
       LEFT JOIN maintenance_requests mr ON sr.maintenance_request_id = mr.request_id
@@ -6731,7 +6733,8 @@ app.get('/api/maintenance-visits/:userId', async (req, res) => {
       LEFT JOIN users u_owner ON sr.owner_id = u_owner.user_id
       LEFT JOIN users u_provider ON sr.provider_id = u_provider.user_id
       LEFT JOIN users u_renter ON mr.renter_id = u_renter.user_id
-      WHERE sr.owner_id = $1 OR sr.provider_id = $1 OR mr.renter_id = $1
+      LEFT JOIN users u_visit_renter ON mv.renter_id = u_visit_renter.user_id
+      WHERE sr.owner_id = $1 OR sr.provider_id = $1 OR mr.renter_id = $1 OR mv.renter_id = $1
       ORDER BY mv.scheduled_start DESC
     `;
     const result = await pool.query(query, [userId]);
@@ -6762,6 +6765,8 @@ app.post(['/api/maintenance-visits', '/api/maintenance-visits/schedule'], async 
       scheduled_start,
       scheduled_end,
       reschedule_visit_id,
+      is_occupied,
+      involves_renter,
     } = req.body;
     if (!service_request_id || !scheduled_start) {
       return res.status(400).json({
@@ -6772,9 +6777,9 @@ app.post(['/api/maintenance-visits', '/api/maintenance-visits/schedule'], async 
 
     await client.query('BEGIN');
 
-    // Verify ownership and get provider + renter info
+    // Verify ownership and get provider + property + renter info
     const serviceCheck = await client.query(
-      `SELECT sr.owner_id, sr.provider_id, mr.renter_id, sr.title AS service_title
+      `SELECT sr.owner_id, sr.provider_id, sr.property_id, mr.renter_id, sr.title AS service_title
        FROM service_requests sr
        LEFT JOIN maintenance_requests mr ON sr.maintenance_request_id = mr.request_id
        WHERE sr.service_id = $1`,
@@ -6787,7 +6792,7 @@ app.post(['/api/maintenance-visits', '/api/maintenance-visits/schedule'], async 
         error: 'Service request not found',
       });
     }
-    const { owner_id, provider_id, renter_id, service_title } =
+    const { owner_id, provider_id, property_id, renter_id, service_title } =
       serviceCheck.rows[0];
 
     if (owner_id !== user.id) {
@@ -6796,6 +6801,26 @@ app.post(['/api/maintenance-visits', '/api/maintenance-visits/schedule'], async 
         success: false,
         error: 'You are not the owner of this service request',
       });
+    }
+
+    // Determine target renter ID and involves_renter flag
+    let targetRenterId = renter_id || null;
+    let isInvolvingRenter = Boolean(involves_renter || renter_id);
+
+    if (isInvolvingRenter && !targetRenterId && property_id) {
+      // Fetch active tenancy for property to get renter_id
+      const tenancyRes = await client.query(
+        `SELECT renter_id FROM tenancies 
+         WHERE property_id = $1 
+           AND (status IN ('Active', 'Signed') OR payment_status = 'Paid')
+           AND lease_end_date >= NOW()
+         ORDER BY lease_end_date DESC 
+         LIMIT 1`,
+        [property_id],
+      );
+      if (tenancyRes.rows.length > 0) {
+        targetRenterId = tenancyRes.rows[0].renter_id;
+      }
     }
 
     // ✅ If reschedule_visit_id is provided, handle rescheduling
@@ -6817,14 +6842,13 @@ app.post(['/api/maintenance-visits', '/api/maintenance-visits/schedule'], async 
 
       // ✅ If the visit is CANCELLED, create a new visit instead of updating
       if (visitStatus === 'cancelled') {
-        // Generate new PIN and QR code
         const newPin = Math.floor(100000 + Math.random() * 900000).toString();
         const newQrCode = `VISIT_${Date.now()}_${Math.random().toString(36).substring(2, 8)}`;
 
         const insertResult = await client.query(
           `INSERT INTO maintenance_visits 
-           (service_request_id, scheduled_start, scheduled_end, qr_code, pin, status)
-           VALUES ($1, $2, $3, $4, $5, 'scheduled')
+           (service_request_id, scheduled_start, scheduled_end, qr_code, pin, status, involves_renter, renter_id)
+           VALUES ($1, $2, $3, $4, $5, 'scheduled', $6, $7)
            RETURNING *`,
           [
             service_request_id,
@@ -6832,6 +6856,8 @@ app.post(['/api/maintenance-visits', '/api/maintenance-visits/schedule'], async 
             scheduled_end || null,
             newQrCode,
             newPin,
+            isInvolvingRenter,
+            targetRenterId,
           ],
         );
         const visit = insertResult.rows[0];
@@ -6848,11 +6874,11 @@ app.post(['/api/maintenance-visits', '/api/maintenance-visits/schedule'], async 
             { screen: 'ProviderDashboard', visit_id: visit.visit_id },
           );
         }
-        if (renter_id) {
+        if (targetRenterId) {
           await sendPushToUser(
-            renter_id,
-            '📅 New Visit Scheduled',
-            `A new visit has been scheduled at ${newTimeLabel}.`,
+            targetRenterId,
+            '📅 Maintenance Visit Scheduled',
+            `A maintenance visit has been scheduled at your residence for ${service_title || 'a maintenance service'} at ${newTimeLabel}.`,
             { screen: 'Maintenance', visit_id: visit.visit_id },
           );
         }
@@ -6864,9 +6890,15 @@ app.post(['/api/maintenance-visits', '/api/maintenance-visits/schedule'], async 
       if (visitStatus === 'scheduled') {
         await client.query(
           `UPDATE maintenance_visits 
-           SET scheduled_start = $1, scheduled_end = $2, status = 'scheduled'
-           WHERE visit_id = $3`,
-          [scheduled_start, scheduled_end || null, reschedule_visit_id],
+           SET scheduled_start = $1, scheduled_end = $2, status = 'scheduled', involves_renter = $3, renter_id = $4
+           WHERE visit_id = $5`,
+          [
+            scheduled_start,
+            scheduled_end || null,
+            isInvolvingRenter,
+            targetRenterId,
+            reschedule_visit_id,
+          ],
         );
 
         const updated = await client.query(
@@ -6886,11 +6918,11 @@ app.post(['/api/maintenance-visits', '/api/maintenance-visits/schedule'], async 
             { screen: 'ProviderDashboard', visit_id: visit.visit_id },
           );
         }
-        if (renter_id) {
+        if (targetRenterId) {
           await sendPushToUser(
-            renter_id,
+            targetRenterId,
             '📅 Visit Rescheduled',
-            `Your visit has been rescheduled to ${newTimeLabel}.`,
+            `Your maintenance visit at your residence has been rescheduled to ${newTimeLabel}.`,
             { screen: 'Maintenance', visit_id: visit.visit_id },
           );
         }
@@ -6907,8 +6939,7 @@ app.post(['/api/maintenance-visits', '/api/maintenance-visits/schedule'], async 
       });
     }
 
-    // Otherwise, create a new visit (existing logic)
-    // ✅ Conflict check
+    // Otherwise, create a new visit
     if (provider_id) {
       const hasConflict = await hasScheduleConflict(
         provider_id,
@@ -6932,10 +6963,18 @@ app.post(['/api/maintenance-visits', '/api/maintenance-visits/schedule'], async 
 
     const insertResult = await client.query(
       `INSERT INTO maintenance_visits 
-       (service_request_id, scheduled_start, scheduled_end, qr_code, pin, status)
-       VALUES ($1, $2, $3, $4, $5, 'scheduled')
+       (service_request_id, scheduled_start, scheduled_end, qr_code, pin, status, involves_renter, renter_id)
+       VALUES ($1, $2, $3, $4, $5, 'scheduled', $6, $7)
        RETURNING *`,
-      [service_request_id, scheduled_start, scheduled_end || null, qrCode, pin],
+      [
+        service_request_id,
+        scheduled_start,
+        scheduled_end || null,
+        qrCode,
+        pin,
+        isInvolvingRenter,
+        targetRenterId,
+      ],
     );
     const visit = insertResult.rows[0];
 
@@ -6950,11 +6989,11 @@ app.post(['/api/maintenance-visits', '/api/maintenance-visits/schedule'], async 
         { screen: 'Maintenance', visit_id: visit.visit_id },
       );
     }
-    if (renter_id) {
+    if (targetRenterId) {
       await sendPushToUser(
-        renter_id,
+        targetRenterId,
         '📅 Maintenance Visit Scheduled',
-        `A maintenance visit has been scheduled for ${new Date(scheduled_start).toLocaleString()}. Please confirm your availability.`,
+        `A maintenance visit has been scheduled at your residence for ${new Date(scheduled_start).toLocaleString()}.`,
         { screen: 'Maintenance', visit_id: visit.visit_id },
       );
     }
@@ -8108,6 +8147,7 @@ app.get('/api/admin/safety-alerts', async (req, res) => {
         mv.missed_pulse_count,
         mv.stage1_verified,
         mv.stage2_verified,
+        mv.involves_renter,
         sr.service_id,
         sr.title as job_title,
         p.title as property_title,
@@ -8130,7 +8170,7 @@ app.get('/api/admin/safety-alerts', async (req, res) => {
       JOIN service_requests sr ON mv.service_request_id = sr.service_id
       LEFT JOIN maintenance_requests mr ON sr.maintenance_request_id = mr.request_id
       JOIN properties p ON sr.property_id = p.property_id
-      LEFT JOIN users u_renter ON mr.renter_id = u_renter.user_id
+      LEFT JOIN users u_renter ON COALESCE(mv.renter_id, mr.renter_id) = u_renter.user_id
       LEFT JOIN users u_owner ON sr.owner_id = u_owner.user_id
       LEFT JOIN users u_provider ON sr.provider_id = u_provider.user_id
       WHERE mv.safety_pulse_status IN ('alert', 'missed') OR mv.missed_pulse_count >= 2
