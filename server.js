@@ -5571,21 +5571,13 @@ app.put('/api/service-requests/:id/complete', async (req, res) => {
       });
     }
 
-    // 2️⃣ Update linked maintenance visit
-    await pool.query(
-      `UPDATE maintenance_visits 
-       SET status = 'completed', check_out_time = NOW() 
-       WHERE service_request_id = $1 AND status IN ('checked_in', 'in_progress')`,
-      [id]
-    );
-
-    // Update linked maintenance visit -> set to 'awaiting_departure'
+    // 2️⃣ Update linked maintenance visit -> set to 'awaiting_departure'
     const visitUpdateResult = await pool.query(
       `UPDATE maintenance_visits 
-   SET status = 'awaiting_departure', 
-       check_out_time = NOW() 
-   WHERE service_request_id = $1 AND status IN ('checked_in', 'in_progress')
-   RETURNING visit_id, service_request_id`,
+       SET status = 'awaiting_departure', 
+           check_out_time = NOW() 
+       WHERE service_request_id = $1 AND status IN ('checked_in', 'in_progress')
+       RETURNING visit_id, service_request_id`,
       [id]
     );
 
@@ -6551,6 +6543,10 @@ app.get('/api/maintenance-visits/:userId', async (req, res) => {
         mv.check_out_time,
         mv.renter_safety_confirmed,
         mv.provider_safety_confirmed,
+        mv.stage1_verified,
+        mv.stage1_verified_at,
+        mv.stage2_verified,
+        mv.stage2_verified_at,
         sr.service_id,
         sr.trade_type,
         sr.maintenance_request_id,
@@ -7221,9 +7217,9 @@ app.post('/api/maintenance-visits/:id/renter-verify-identity', async (req, res) 
   }
 });
 
-// PUT /api/maintenance-visits/:id/safety – confirm safety (renter or provider)
-// PUT /api/maintenance-visits/:id/safety – confirm safety (renter or provider)
-app.put('/api/maintenance-visits/:id/safety', async (req, res) => {
+// PUT/POST /api/maintenance-visits/:id/safety & confirm-safety – confirm safety (renter or provider)
+app.all(['/api/maintenance-visits/:id/safety', '/api/maintenance-visits/:id/confirm-safety'], async (req, res) => {
+  if (req.method !== 'PUT' && req.method !== 'POST') return res.status(405).json({ success: false, error: 'Method not allowed' });
   try {
     const { id } = req.params;
     const { role } = req.body; // 'renter' or 'provider'
@@ -7432,7 +7428,7 @@ app.post('/api/maintenance-visits/:id/provider-departure', async (req, res) => {
        SET provider_departure_gps_lat = $1,
            provider_departure_gps_lng = $2,
            renter_uncooperative = TRUE,
-           uncooperative_evidence_url = $3
+           uncooperative_evidence_url = $3,
            updated_at = NOW()
        WHERE visit_id = $4`,
       [gps_lat, gps_lng, evidence_url, id]
@@ -7574,6 +7570,10 @@ app.get('/api/maintenance-visits/single/:visitId', async (req, res) => {
         mv.check_in_time,
         mv.renter_safety_confirmed,
         mv.provider_safety_confirmed,
+        mv.stage1_verified,
+        mv.stage1_verified_at,
+        mv.stage2_verified,
+        mv.stage2_verified_at,
         sr.service_id,
         sr.trade_type,
         sr.title,
