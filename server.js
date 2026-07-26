@@ -7433,6 +7433,7 @@ app.post('/api/maintenance-visits/:id/provider-departure', async (req, res) => {
            provider_departure_gps_lng = $2,
            renter_uncooperative = TRUE,
            uncooperative_evidence_url = $3
+           updated_at = NOW()
        WHERE visit_id = $4`,
       [gps_lat, gps_lng, evidence_url, id]
     );
