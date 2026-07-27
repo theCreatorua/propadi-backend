@@ -86,8 +86,39 @@ const pool = new Pool({
         assigned_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
         UNIQUE(agent_id, property_id)
       );
+
+      CREATE TABLE IF NOT EXISTS property_views (
+        view_id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+        property_id UUID NOT NULL REFERENCES properties(property_id) ON DELETE CASCADE,
+        viewer_user_id UUID REFERENCES users(user_id) ON DELETE SET NULL,
+        viewed_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
+      );
+
+      CREATE TABLE IF NOT EXISTS rent_subscriptions (
+        subscription_id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+        tenancy_id UUID NOT NULL REFERENCES tenancies(tenancy_id) ON DELETE CASCADE,
+        user_id UUID NOT NULL REFERENCES users(user_id) ON DELETE CASCADE,
+        paystack_subscription_code VARCHAR(100),
+        paystack_email_token VARCHAR(100),
+        interval VARCHAR(20) DEFAULT 'annually',
+        amount NUMERIC(12,2) NOT NULL,
+        status VARCHAR(50) DEFAULT 'active',
+        next_payment_date TIMESTAMP WITH TIME ZONE,
+        created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
+      );
+
+      CREATE TABLE IF NOT EXISTS provider_calendar_events (
+        event_id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+        provider_id UUID NOT NULL REFERENCES service_providers(provider_id) ON DELETE CASCADE,
+        event_type VARCHAR(50) DEFAULT 'blackout',
+        title VARCHAR(255),
+        start_time TIMESTAMP WITH TIME ZONE NOT NULL,
+        end_time TIMESTAMP WITH TIME ZONE NOT NULL,
+        notes TEXT,
+        created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
+      );
     `);
-    console.log('✅ Paystack subaccount, agents, agent_assignments, and saved_properties schema migration verified.');
+    console.log('✅ Paystack subaccount, agents, analytics, subscriptions & calendar schema migration verified.');
   } catch (err) {
     console.error('Error in startup schema migration:', err);
   }
@@ -9005,14 +9036,237 @@ app.post('/api/admin/agents/:agentId/verify', async (req, res) => {
       if (status === 'approved') {
         await pool.query(`UPDATE users SET role = 'agent' WHERE user_id = $1`, [agent.user_id]);
         await sendPushToUser(agent.user_id, '🎉 Agency Approved!', 'Your real estate agency account has been verified. You can now access your Agent Dashboard and manage property portfolios.');
-      } else {
-        await sendPushToUser(agent.user_id, '⚠️ Agency Verification Update', `Your agency application status: Rejected. Reason: ${rejectionReason || 'Documents could not be verified.'}`);
+      } else if (status === 'rejected') {
+        await sendPushToUser(agent.user_id, 'Agency Verification Update', `Your real estate agency verification was rejected.${rejectionReason ? ` Reason: ${rejectionReason}` : ''}`);
       }
     }
 
     res.json({ success: true, agent: agentRes.rows[0] });
   } catch (err) {
     console.error('Admin verify agent error:', err);
+    res.status(500).json({ success: false, error: err.message });
+  }
+});
+
+// ==========================================
+// PHASE 3.3: ANALYTICS, RECURRING RENT AUTOPAY & PROVIDER CALENDAR
+// ==========================================
+
+// 1. Track Property Detail View
+app.post('/api/properties/:id/track-view', async (req, res) => {
+  try {
+    const { id } = req.params;
+    const { userId } = req.body;
+    await pool.query(
+      `INSERT INTO property_views (property_id, viewer_user_id) VALUES ($1, $2)`,
+      [id, userId || null]
+    );
+    res.json({ success: true });
+  } catch (err) {
+    console.error('Track view error:', err);
+    res.status(500).json({ success: false, error: err.message });
+  }
+});
+
+// 2. Property Owner Portfolio Analytics
+app.get('/api/analytics/owner/:ownerId', async (req, res) => {
+  try {
+    const { ownerId } = req.params;
+
+    // Total Properties Listed & Active
+    const propsRes = await pool.query(
+      `SELECT COUNT(*) as total_properties, 
+              COUNT(CASE WHEN status = 'Available' THEN 1 END) as available_properties,
+              COUNT(CASE WHEN status = 'Rented' THEN 1 END) as rented_properties
+       FROM properties WHERE owner_id = $1`,
+      [ownerId]
+    );
+
+    // Total Views Across Owner Properties
+    const viewsRes = await pool.query(
+      `SELECT COUNT(pv.view_id) as total_views
+       FROM property_views pv
+       JOIN properties p ON pv.property_id = p.property_id
+       WHERE p.owner_id = $1`,
+      [ownerId]
+    );
+
+    // Total Applications Received
+    const appsRes = await pool.query(
+      `SELECT COUNT(ra.application_id) as total_applications
+       FROM rental_applications ra
+       JOIN properties p ON ra.property_id = p.property_id
+       WHERE p.owner_id = $1`,
+      [ownerId]
+    );
+
+    // Total Annual Revenue
+    const revRes = await pool.query(
+      `SELECT COALESCE(SUM(amount), 0) as total_revenue
+       FROM transactions
+       WHERE user_id = $1 AND status = 'Completed'`,
+      [ownerId]
+    );
+
+    const totalProps = parseInt(propsRes.rows[0].total_properties, 10) || 0;
+    const totalViews = parseInt(viewsRes.rows[0].total_views, 10) || 0;
+    const totalApps = parseInt(appsRes.rows[0].total_applications, 10) || 0;
+    const conversionRate = totalViews > 0 ? ((totalApps / totalViews) * 100).toFixed(1) : '0.0';
+
+    res.json({
+      success: true,
+      analytics: {
+        totalProperties: totalProps,
+        availableProperties: parseInt(propsRes.rows[0].available_properties, 10) || 0,
+        rentedProperties: parseInt(propsRes.rows[0].rented_properties, 10) || 0,
+        totalViews,
+        totalApplications: totalApps,
+        conversionRate: parseFloat(conversionRate),
+        totalRevenue: parseFloat(revRes.rows[0].total_revenue || 0),
+      },
+    });
+  } catch (err) {
+    console.error('Fetch owner analytics error:', err);
+    res.status(500).json({ success: false, error: err.message });
+  }
+});
+
+// 3. Service Provider Analytics
+app.get('/api/analytics/provider/:providerId', async (req, res) => {
+  try {
+    const { providerId } = req.params;
+
+    // Completed & Active Service Requests
+    const jobsRes = await pool.query(
+      `SELECT 
+         COUNT(CASE WHEN status = 'completed' THEN 1 END) as completed_jobs,
+         COUNT(CASE WHEN status IN ('accepted', 'in_progress', 'negotiating') THEN 1 END) as active_jobs
+       FROM service_requests
+       WHERE provider_id = $1`,
+      [providerId]
+    );
+
+    // Total Earnings
+    const earningsRes = await pool.query(
+      `SELECT COALESCE(SUM(estimated_cost), 0) as total_earnings
+       FROM service_requests
+       WHERE provider_id = $1 AND status = 'completed'`,
+      [providerId]
+    );
+
+    // Provider Rating
+    const providerRes = await pool.query(
+      `SELECT avg_rating, total_reviews FROM service_providers WHERE provider_id = $1`,
+      [providerId]
+    );
+
+    const providerInfo = providerRes.rows[0] || {};
+
+    res.json({
+      success: true,
+      analytics: {
+        completedJobs: parseInt(jobsRes.rows[0].completed_jobs, 10) || 0,
+        activeJobs: parseInt(jobsRes.rows[0].active_jobs, 10) || 0,
+        totalEarnings: parseFloat(earningsRes.rows[0].total_earnings || 0),
+        rating: parseFloat(providerInfo.avg_rating || 5.0),
+        totalReviews: parseInt(providerInfo.total_reviews, 10) || 0,
+      },
+    });
+  } catch (err) {
+    console.error('Fetch provider analytics error:', err);
+    res.status(500).json({ success: false, error: err.message });
+  }
+});
+
+// 4. Rent Auto-Pay: Initialize Recurring Subscription
+app.post('/api/subscriptions/initialize-autopay', async (req, res) => {
+  try {
+    const { tenancyId, userId, amount, interval } = req.body;
+    if (!tenancyId || !userId || !amount) {
+      return res.status(400).json({ success: false, error: 'Tenancy ID, User ID, and Amount are required' });
+    }
+
+    const result = await pool.query(
+      `INSERT INTO rent_subscriptions (tenancy_id, user_id, amount, interval, status, next_payment_date)
+       VALUES ($1, $2, $3, $4, 'active', CURRENT_TIMESTAMP + INTERVAL '1 year')
+       RETURNING *`,
+      [tenancyId, userId, amount, interval || 'annually']
+    );
+
+    res.json({ success: true, subscription: result.rows[0], message: 'Recurring rent auto-pay initialized.' });
+  } catch (err) {
+    console.error('Initialize autopay error:', err);
+    res.status(500).json({ success: false, error: err.message });
+  }
+});
+
+// 5. Get User Rent Auto-Pay Subscriptions
+app.get('/api/subscriptions/user/:userId', async (req, res) => {
+  try {
+    const { userId } = req.params;
+    const result = await pool.query(
+      `SELECT rs.*, p.title as property_title, p.main_image_url
+       FROM rent_subscriptions rs
+       JOIN tenancies t ON rs.tenancy_id = t.tenancy_id
+       JOIN properties p ON t.property_id = p.property_id
+       WHERE rs.user_id = $1 AND rs.status = 'active'`,
+      [userId]
+    );
+    res.json({ success: true, subscriptions: result.rows });
+  } catch (err) {
+    console.error('Fetch user subscriptions error:', err);
+    res.status(500).json({ success: false, error: err.message });
+  }
+});
+
+// 6. Cancel or Pause Rent Auto-Pay
+app.post('/api/subscriptions/:id/cancel', async (req, res) => {
+  try {
+    const { id } = req.params;
+    const result = await pool.query(
+      `UPDATE rent_subscriptions SET status = 'cancelled' WHERE subscription_id = $1 RETURNING *`,
+      [id]
+    );
+    res.json({ success: true, subscription: result.rows[0] });
+  } catch (err) {
+    console.error('Cancel subscription error:', err);
+    res.status(500).json({ success: false, error: err.message });
+  }
+});
+
+// 7. Provider Availability Calendar: Get Events
+app.get('/api/provider/calendar/:providerId', async (req, res) => {
+  try {
+    const { providerId } = req.params;
+    const eventsRes = await pool.query(
+      `SELECT * FROM provider_calendar_events WHERE provider_id = $1 ORDER BY start_time ASC`,
+      [providerId]
+    );
+    res.json({ success: true, events: eventsRes.rows });
+  } catch (err) {
+    console.error('Fetch provider calendar error:', err);
+    res.status(500).json({ success: false, error: err.message });
+  }
+});
+
+// 8. Provider Availability Calendar: Add Blackout Date
+app.post('/api/provider/calendar/blackout', async (req, res) => {
+  try {
+    const { providerId, title, startTime, endTime, notes } = req.body;
+    if (!providerId || !startTime || !endTime) {
+      return res.status(400).json({ success: false, error: 'Provider ID, Start Time, and End Time are required' });
+    }
+
+    const result = await pool.query(
+      `INSERT INTO provider_calendar_events (provider_id, event_type, title, start_time, end_time, notes)
+       VALUES ($1, 'blackout', $2, $3, $4, $5)
+       RETURNING *`,
+      [providerId, title || 'Blackout Date', startTime, endTime, notes || null]
+    );
+
+    res.json({ success: true, event: result.rows[0] });
+  } catch (err) {
+    console.error('Add blackout date error:', err);
     res.status(500).json({ success: false, error: err.message });
   }
 });
