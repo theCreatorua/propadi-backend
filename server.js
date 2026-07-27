@@ -62,8 +62,32 @@ const pool = new Pool({
         created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
         UNIQUE(user_id, property_id)
       );
+
+      CREATE TABLE IF NOT EXISTS agents (
+        agent_id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+        user_id UUID NOT NULL REFERENCES users(user_id) ON DELETE CASCADE UNIQUE,
+        agency_name VARCHAR(255) NOT NULL,
+        cac_registration_number VARCHAR(100),
+        license_number VARCHAR(100),
+        operating_state VARCHAR(100) DEFAULT 'Lagos',
+        commission_rate NUMERIC(5,2) DEFAULT 5.00,
+        verification_status VARCHAR(50) DEFAULT 'pending',
+        rejection_reason TEXT,
+        created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
+      );
+
+      CREATE TABLE IF NOT EXISTS agent_assignments (
+        assignment_id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+        agent_id UUID NOT NULL REFERENCES agents(agent_id) ON DELETE CASCADE,
+        property_id UUID NOT NULL REFERENCES properties(property_id) ON DELETE CASCADE,
+        owner_id UUID NOT NULL REFERENCES users(user_id) ON DELETE CASCADE,
+        commission_override NUMERIC(5,2),
+        status VARCHAR(50) DEFAULT 'pending_acceptance',
+        assigned_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
+        UNIQUE(agent_id, property_id)
+      );
     `);
-    console.log('✅ Paystack subaccount, maintenance_visits, and saved_properties schema migration verified.');
+    console.log('✅ Paystack subaccount, agents, agent_assignments, and saved_properties schema migration verified.');
   } catch (err) {
     console.error('Error in startup schema migration:', err);
   }
@@ -6055,6 +6079,7 @@ app.get('/api/service-requests/:id', async (req, res) => {
     const query = `
       SELECT 
         sr.service_id,
+        sr.property_id,
         sr.status,
         sr.trade_type,
         sr.description,
@@ -8784,6 +8809,211 @@ app.post('/api/paystack/webhook', async (req, res) => {
   } catch (err) {
     console.error('Paystack webhook error:', err);
     res.status(500).send('Webhook Error');
+  }
+});
+
+// ==========================================
+// PHASE 3.2: AGENT & AGENCY PORTAL API ENDPOINTS
+// ==========================================
+
+// 1. Register as Agent / Agency
+app.post('/api/agents/register', async (req, res) => {
+  try {
+    const { userId, agencyName, cacNumber, licenseNumber, operatingState, commissionRate } = req.body;
+    if (!userId || !agencyName) {
+      return res.status(400).json({ success: false, error: 'User ID and Agency Name are required' });
+    }
+
+    const result = await pool.query(
+      `INSERT INTO agents (user_id, agency_name, cac_registration_number, license_number, operating_state, commission_rate, verification_status)
+       VALUES ($1, $2, $3, $4, $5, $6, 'pending')
+       ON CONFLICT (user_id) 
+       DO UPDATE SET 
+         agency_name = EXCLUDED.agency_name,
+         cac_registration_number = EXCLUDED.cac_registration_number,
+         license_number = EXCLUDED.license_number,
+         operating_state = EXCLUDED.operating_state,
+         commission_rate = EXCLUDED.commission_rate,
+         verification_status = 'pending'
+       RETURNING *`,
+      [userId, agencyName, cacNumber || null, licenseNumber || null, operatingState || 'Lagos', commissionRate || 5.00]
+    );
+
+    res.json({ success: true, agent: result.rows[0], message: 'Agent registration submitted for admin approval.' });
+  } catch (err) {
+    console.error('Register agent error:', err);
+    res.status(500).json({ success: false, error: err.message });
+  }
+});
+
+// 2. Get Agent profile by User ID
+app.get('/api/agents/me/:userId', async (req, res) => {
+  try {
+    const { userId } = req.params;
+    const result = await pool.query(
+      `SELECT a.*, u.name as user_name, u.email as user_email, u.phone_number
+       FROM agents a
+       JOIN users u ON a.user_id = u.user_id
+       WHERE a.user_id = $1`,
+      [userId]
+    );
+    if (result.rows.length === 0) {
+      return res.json({ success: true, agent: null });
+    }
+    res.json({ success: true, agent: result.rows[0] });
+  } catch (err) {
+    console.error('Fetch agent error:', err);
+    res.status(500).json({ success: false, error: err.message });
+  }
+});
+
+// 3. List verified agents for Property Owners
+app.get('/api/agents/list', async (req, res) => {
+  try {
+    const result = await pool.query(
+      `SELECT a.*, u.name as user_name, u.email as user_email, u.phone_number, u.profile_picture_url
+       FROM agents a
+       JOIN users u ON a.user_id = u.user_id
+       WHERE a.verification_status = 'approved'
+       ORDER BY a.agency_name ASC`
+    );
+    res.json({ success: true, agents: result.rows });
+  } catch (err) {
+    console.error('Fetch agents list error:', err);
+    res.status(500).json({ success: false, error: err.message });
+  }
+});
+
+// 4. Assign property to an agent
+app.post('/api/agents/assign-property', async (req, res) => {
+  try {
+    const { agentId, propertyId, ownerId, commissionOverride } = req.body;
+    if (!agentId || !propertyId || !ownerId) {
+      return res.status(400).json({ success: false, error: 'Agent ID, Property ID, and Owner ID are required' });
+    }
+
+    const result = await pool.query(
+      `INSERT INTO agent_assignments (agent_id, property_id, owner_id, commission_override, status)
+       VALUES ($1, $2, $3, $4, 'active')
+       ON CONFLICT (agent_id, property_id)
+       DO UPDATE SET status = 'active', commission_override = EXCLUDED.commission_override, assigned_at = CURRENT_TIMESTAMP
+       RETURNING *`,
+      [agentId, propertyId, ownerId, commissionOverride || null]
+    );
+
+    const agentRes = await pool.query(`SELECT user_id FROM agents WHERE agent_id = $1`, [agentId]);
+    if (agentRes.rows.length > 0) {
+      await sendPushToUser(agentRes.rows[0].user_id, '💼 Property Assigned', 'A property owner has assigned a property to your agency for management.');
+    }
+
+    res.json({ success: true, assignment: result.rows[0] });
+  } catch (err) {
+    console.error('Assign property error:', err);
+    res.status(500).json({ success: false, error: err.message });
+  }
+});
+
+// 5. Get assignments for Owner
+app.get('/api/agents/assignments/owner/:ownerId', async (req, res) => {
+  try {
+    const { ownerId } = req.params;
+    const result = await pool.query(
+      `SELECT aa.*, a.agency_name, a.commission_rate as default_commission, u.name as agent_user_name, p.title as property_title, p.address_city, p.address_state, p.rent_price, p.main_image_url
+       FROM agent_assignments aa
+       JOIN agents a ON aa.agent_id = a.agent_id
+       JOIN users u ON a.user_id = u.user_id
+       JOIN properties p ON aa.property_id = p.property_id
+       WHERE aa.owner_id = $1
+       ORDER BY aa.assigned_at DESC`,
+      [ownerId]
+    );
+    res.json({ success: true, assignments: result.rows });
+  } catch (err) {
+    console.error('Fetch owner assignments error:', err);
+    res.status(500).json({ success: false, error: err.message });
+  }
+});
+
+// 6. Get assignments for Agent
+app.get('/api/agents/assignments/agent/:agentId', async (req, res) => {
+  try {
+    const { agentId } = req.params;
+    const result = await pool.query(
+      `SELECT aa.*, p.title as property_title, p.address_city, p.address_state, p.rent_price, p.main_image_url, p.category, p.status as property_status, u.name as owner_name, u.phone_number as owner_phone
+       FROM agent_assignments aa
+       JOIN properties p ON aa.property_id = p.property_id
+       JOIN users u ON aa.owner_id = u.user_id
+       WHERE aa.agent_id = $1 AND aa.status = 'active'
+       ORDER BY aa.assigned_at DESC`,
+      [agentId]
+    );
+    res.json({ success: true, assignments: result.rows });
+  } catch (err) {
+    console.error('Fetch agent assignments error:', err);
+    res.status(500).json({ success: false, error: err.message });
+  }
+});
+
+// 7. Update assignment status (accept/revoke)
+app.post('/api/agents/assignments/:id/status', async (req, res) => {
+  try {
+    const { id } = req.params;
+    const { status } = req.body;
+    const result = await pool.query(
+      `UPDATE agent_assignments SET status = $1 WHERE assignment_id = $2 RETURNING *`,
+      [status, id]
+    );
+    res.json({ success: true, assignment: result.rows[0] });
+  } catch (err) {
+    console.error('Update assignment status error:', err);
+    res.status(500).json({ success: false, error: err.message });
+  }
+});
+
+// 8. Admin: Get all agents (pending, approved, rejected)
+app.get('/api/admin/agents', async (req, res) => {
+  try {
+    const result = await pool.query(
+      `SELECT a.*, u.name as user_name, u.email as user_email, u.phone_number
+       FROM agents a
+       JOIN users u ON a.user_id = u.user_id
+       ORDER BY a.created_at DESC`
+    );
+    res.json({ success: true, agents: result.rows });
+  } catch (err) {
+    console.error('Admin fetch agents error:', err);
+    res.status(500).json({ success: false, error: err.message });
+  }
+});
+
+// 9. Admin: Approve or Reject Agent Verification
+app.post('/api/admin/agents/:agentId/verify', async (req, res) => {
+  try {
+    const { agentId } = req.params;
+    const { status, rejectionReason } = req.body;
+
+    const agentRes = await pool.query(
+      `UPDATE agents 
+       SET verification_status = $1, rejection_reason = $2 
+       WHERE agent_id = $3 
+       RETURNING *`,
+      [status, rejectionReason || null, agentId]
+    );
+
+    if (agentRes.rows.length > 0) {
+      const agent = agentRes.rows[0];
+      if (status === 'approved') {
+        await pool.query(`UPDATE users SET role = 'agent' WHERE user_id = $1`, [agent.user_id]);
+        await sendPushToUser(agent.user_id, '🎉 Agency Approved!', 'Your real estate agency account has been verified. You can now access your Agent Dashboard and manage property portfolios.');
+      } else {
+        await sendPushToUser(agent.user_id, '⚠️ Agency Verification Update', `Your agency application status: Rejected. Reason: ${rejectionReason || 'Documents could not be verified.'}`);
+      }
+    }
+
+    res.json({ success: true, agent: agentRes.rows[0] });
+  } catch (err) {
+    console.error('Admin verify agent error:', err);
+    res.status(500).json({ success: false, error: err.message });
   }
 });
 
