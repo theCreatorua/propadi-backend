@@ -54,8 +54,16 @@ const pool = new Pool({
       ADD COLUMN IF NOT EXISTS paystack_fee NUMERIC(12,2) DEFAULT 0.00,
       ADD COLUMN IF NOT EXISTS split_code VARCHAR(100),
       ADD COLUMN IF NOT EXISTS reference VARCHAR(100);
+
+      CREATE TABLE IF NOT EXISTS saved_properties (
+        saved_id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+        user_id UUID NOT NULL REFERENCES users(user_id) ON DELETE CASCADE,
+        property_id UUID NOT NULL REFERENCES properties(property_id) ON DELETE CASCADE,
+        created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
+        UNIQUE(user_id, property_id)
+      );
     `);
-    console.log('✅ Paystack subaccount and maintenance_visits schema migration verified.');
+    console.log('✅ Paystack subaccount, maintenance_visits, and saved_properties schema migration verified.');
   } catch (err) {
     console.error('Error in startup schema migration:', err);
   }
@@ -581,7 +589,7 @@ app.get('/api/properties', async (req, res) => {
 
 app.get('/api/properties/search', async (req, res) => {
   try {
-    const { state, lga, city, minPrice, maxPrice, bedrooms, amenities, query } =
+    const { state, lga, city, minPrice, maxPrice, bedrooms, furnishing_status, amenities, query } =
       req.query;
     let sql = `
       SELECT p.*, array_agg(DISTINCT pa.amenity_name) as amenities_list
@@ -591,14 +599,15 @@ app.get('/api/properties/search', async (req, res) => {
     `;
     const values = [];
     let paramIndex = 1;
+
     if (state) {
-      sql += ` AND p.address_state = $${paramIndex}`;
-      values.push(state);
+      sql += ` AND p.address_state ILIKE $${paramIndex}`;
+      values.push(`%${state}%`);
       paramIndex++;
     }
     if (lga) {
-      sql += ` AND p.address_lga = $${paramIndex}`;
-      values.push(lga);
+      sql += ` AND p.address_lga ILIKE $${paramIndex}`;
+      values.push(`%${lga}%`);
       paramIndex++;
     }
     if (city) {
@@ -624,12 +633,17 @@ app.get('/api/properties/search', async (req, res) => {
         paramIndex++;
       }
     }
+    if (furnishing_status && furnishing_status !== 'Any') {
+      sql += ` AND p.furnishing_status ILIKE $${paramIndex}`;
+      values.push(`%${furnishing_status}%`);
+      paramIndex++;
+    }
     if (query) {
-      sql += ` AND (p.title ILIKE $${paramIndex} OR p.address_city ILIKE $${paramIndex} OR p.address_street ILIKE $${paramIndex})`;
+      sql += ` AND (p.title ILIKE $${paramIndex} OR p.address_city ILIKE $${paramIndex} OR p.address_street ILIKE $${paramIndex} OR p.address_state ILIKE $${paramIndex})`;
       values.push(`%${query}%`);
       paramIndex++;
     }
-    sql += ` GROUP BY p.property_id ORDER BY p.rent_price ASC`;
+    sql += ` GROUP BY p.property_id ORDER BY p.is_featured DESC, p.date_listed DESC`;
     const result = await pool.query(sql, values);
     res.json({ success: true, properties: result.rows });
   } catch (err) {
@@ -1114,6 +1128,21 @@ app.post('/api/applications', async (req, res) => {
         is_sight_unseen || false,
       ],
     );
+
+    // Send push notification to Owner
+    try {
+      const propRes = await pool.query('SELECT title FROM properties WHERE property_id = $1', [property_id]);
+      const propTitle = propRes.rows[0]?.title || 'your listing';
+      await sendPushToUser(
+        owner_id,
+        '📩 New Rental Application',
+        `A renter has submitted an application for "${propTitle}".`,
+        { screen: 'Applications', property_id }
+      );
+    } catch (pushErr) {
+      console.error('Application submission push error:', pushErr);
+    }
+
     res.json({ success: true, application: result.rows[0] });
   } catch (err) {
     console.error('Error submitting application:', err);
@@ -1178,6 +1207,23 @@ app.put('/api/applications/:id', async (req, res) => {
         ],
       );
     }
+
+    // Send push notification to Renter
+    if (application) {
+      try {
+        const propRes = await pool.query('SELECT title FROM properties WHERE property_id = $1', [application.property_id]);
+        const propTitle = propRes.rows[0]?.title || 'the property';
+        await sendPushToUser(
+          application.renter_id,
+          '📋 Application Status Update',
+          `Your application for "${propTitle}" is now ${status}.`,
+          { screen: 'MyApplications', application_id: id }
+        );
+      } catch (pushErr) {
+        console.error('Application status update push error:', pushErr);
+      }
+    }
+
     res.json({ success: true, application });
   } catch (err) {
     console.error('Error updating application:', err);
@@ -2411,6 +2457,66 @@ app.put('/api/admin/withdrawals/:id', requireAdmin, async (req, res) => {
   } catch (err) {
     console.error('Update Status Error:', err);
     res.status(500).json({ success: false, error: err.message });
+  }
+});
+
+// FAVORITE / SAVED PROPERTIES ENDPOINTS
+app.post('/api/properties/:id/favorite', async (req, res) => {
+  try {
+    const { id } = req.params;
+    const { userId } = req.body;
+    if (!userId) return res.status(400).json({ success: false, error: 'User ID is required' });
+
+    const existing = await pool.query(
+      'SELECT * FROM saved_properties WHERE user_id = $1 AND property_id = $2',
+      [userId, id]
+    );
+
+    if (existing.rows.length > 0) {
+      await pool.query('DELETE FROM saved_properties WHERE user_id = $1 AND property_id = $2', [userId, id]);
+      return res.json({ success: true, isSaved: false, message: 'Removed from saved properties' });
+    } else {
+      await pool.query('INSERT INTO saved_properties (user_id, property_id) VALUES ($1, $2)', [userId, id]);
+      return res.json({ success: true, isSaved: true, message: 'Property saved to favorites!' });
+    }
+  } catch (err) {
+    console.error('Favorite toggle error:', err);
+    res.status(500).json({ success: false, error: 'Failed to toggle favorite' });
+  }
+});
+
+app.get('/api/properties/:id/favorite/status', async (req, res) => {
+  try {
+    const { id } = req.params;
+    const { userId } = req.query;
+    if (!userId) return res.json({ success: true, isSaved: false });
+
+    const existing = await pool.query(
+      'SELECT * FROM saved_properties WHERE user_id = $1 AND property_id = $2',
+      [userId, id]
+    );
+    res.json({ success: true, isSaved: existing.rows.length > 0 });
+  } catch (err) {
+    console.error('Favorite status check error:', err);
+    res.status(500).json({ success: false, error: 'Failed to check favorite status' });
+  }
+});
+
+app.get('/api/properties/saved/user/:userId', async (req, res) => {
+  try {
+    const { userId } = req.params;
+    const result = await pool.query(
+      `SELECT p.*, sp.created_at as saved_at 
+       FROM saved_properties sp
+       JOIN properties p ON sp.property_id = p.property_id
+       WHERE sp.user_id = $1
+       ORDER BY sp.created_at DESC`,
+      [userId]
+    );
+    res.json({ success: true, properties: result.rows });
+  } catch (err) {
+    console.error('Fetch saved properties error:', err);
+    res.status(500).json({ success: false, error: 'Failed to fetch saved properties' });
   }
 });
 
