@@ -25,17 +25,39 @@ const pool = new Pool({
   ssl: { rejectUnauthorized: false },
 });
 
-// Migration: Ensure stage1_verified_at and stage2_verified_at exist on maintenance_visits
+// Migration: Ensure stage1_verified_at, stage2_verified_at, and Paystack subaccount columns exist
 (async () => {
   try {
     await pool.query(`
       ALTER TABLE maintenance_visits 
       ADD COLUMN IF NOT EXISTS stage1_verified_at TIMESTAMPTZ,
       ADD COLUMN IF NOT EXISTS stage2_verified_at TIMESTAMPTZ;
+
+      ALTER TABLE users 
+      ADD COLUMN IF NOT EXISTS bank_name VARCHAR(100),
+      ADD COLUMN IF NOT EXISTS bank_code VARCHAR(20),
+      ADD COLUMN IF NOT EXISTS account_number VARCHAR(20),
+      ADD COLUMN IF NOT EXISTS account_name VARCHAR(255),
+      ADD COLUMN IF NOT EXISTS paystack_subaccount_code VARCHAR(100),
+      ADD COLUMN IF NOT EXISTS is_bank_verified BOOLEAN DEFAULT FALSE;
+
+      ALTER TABLE service_providers 
+      ADD COLUMN IF NOT EXISTS bank_name VARCHAR(100),
+      ADD COLUMN IF NOT EXISTS bank_code VARCHAR(20),
+      ADD COLUMN IF NOT EXISTS account_number VARCHAR(20),
+      ADD COLUMN IF NOT EXISTS account_name VARCHAR(255),
+      ADD COLUMN IF NOT EXISTS paystack_subaccount_code VARCHAR(100);
+
+      ALTER TABLE transactions
+      ADD COLUMN IF NOT EXISTS subaccount_code VARCHAR(100),
+      ADD COLUMN IF NOT EXISTS platform_commission NUMERIC(12,2) DEFAULT 0.00,
+      ADD COLUMN IF NOT EXISTS paystack_fee NUMERIC(12,2) DEFAULT 0.00,
+      ADD COLUMN IF NOT EXISTS split_code VARCHAR(100),
+      ADD COLUMN IF NOT EXISTS reference VARCHAR(100);
     `);
-    console.log('✅ maintenance_visits stage timestamp columns verified.');
+    console.log('✅ Paystack subaccount and maintenance_visits schema migration verified.');
   } catch (err) {
-    console.error('Error adding stage timestamp columns:', err);
+    console.error('Error in startup schema migration:', err);
   }
 })();
 
@@ -8341,6 +8363,323 @@ app.post('/api/cron/check-safety-pulses', async (req, res) => {
 });
 
 
+
+// ==========================================
+// PAYSTACK SUBACCOUNTS & SPLIT PAYMENTS API
+// ==========================================
+
+// 1. Fetch Nigerian Banks List
+app.get('/api/paystack/banks', async (req, res) => {
+  try {
+    const paystackRes = await fetch('https://api.paystack.co/bank?country=nigeria', {
+      headers: {
+        Authorization: `Bearer ${process.env.PAYSTACK_SECRET_KEY}`,
+      },
+    });
+    const data = await paystackRes.json();
+    if (data.status) {
+      const banks = data.data.map((b) => ({
+        name: b.name,
+        code: b.code,
+      }));
+      return res.json({ success: true, banks });
+    }
+    return res.status(400).json({ success: false, error: 'Could not fetch banks from Paystack' });
+  } catch (err) {
+    console.error('Fetch banks error:', err);
+    res.status(500).json({ success: false, error: err.message });
+  }
+});
+
+// 2. Resolve NUBAN Bank Account
+app.post('/api/paystack/resolve-bank', async (req, res) => {
+  try {
+    const { account_number, bank_code } = req.body;
+    if (!account_number || !bank_code) {
+      return res.status(400).json({ success: false, error: 'Account number and bank code are required' });
+    }
+
+    const url = `https://api.paystack.co/bank/resolve?account_number=${encodeURIComponent(account_number)}&bank_code=${encodeURIComponent(bank_code)}`;
+    const paystackRes = await fetch(url, {
+      headers: {
+        Authorization: `Bearer ${process.env.PAYSTACK_SECRET_KEY}`,
+      },
+    });
+    const data = await paystackRes.json();
+
+    if (data.status) {
+      return res.json({
+        success: true,
+        account_name: data.data.account_name,
+        account_number: data.data.account_number,
+        bank_code,
+      });
+    } else {
+      return res.status(400).json({ success: false, error: data.message || 'Could not resolve bank account details' });
+    }
+  } catch (err) {
+    console.error('Resolve bank error:', err);
+    res.status(500).json({ success: false, error: err.message });
+  }
+});
+
+// 3. Create Paystack Subaccount & Save Bank Details
+app.post('/api/paystack/create-subaccount', async (req, res) => {
+  try {
+    const authHeader = req.headers.authorization;
+    if (!authHeader) return res.status(401).json({ success: false, error: 'Unauthorized' });
+    const token = authHeader.split(' ')[1];
+    const { data: { user }, error } = await supabase.auth.getUser(token);
+    if (error || !user) return res.status(401).json({ success: false, error: 'Invalid token' });
+
+    const { bank_code, bank_name, account_number, account_name, role } = req.body;
+    if (!bank_code || !bank_name || !account_number || !account_name) {
+      return res.status(400).json({ success: false, error: 'Missing required bank details' });
+    }
+
+    // Call Paystack Subaccount API
+    const paystackRes = await fetch('https://api.paystack.co/subaccount', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        Authorization: `Bearer ${process.env.PAYSTACK_SECRET_KEY}`,
+      },
+      body: JSON.stringify({
+        business_name: account_name,
+        settlement_bank: bank_code,
+        account_number,
+        percentage_charge: 0, // Fee dynamically calculated at checkout
+        description: `Propadi Subaccount for ${account_name}`,
+      }),
+    });
+
+    const data = await paystackRes.json();
+    if (!data.status) {
+      return res.status(400).json({ success: false, error: data.message || 'Failed to create Paystack subaccount' });
+    }
+
+    const subaccountCode = data.data.subaccount_code;
+
+    // Update Users table
+    await pool.query(
+      `UPDATE users 
+       SET bank_name = $1, bank_code = $2, account_number = $3, account_name = $4, 
+           paystack_subaccount_code = $5, is_bank_verified = TRUE 
+       WHERE user_id = $6`,
+      [bank_name, bank_code, account_number, account_name, subaccountCode, user.id]
+    );
+
+    // If provider role, also update service_providers table
+    if (role === 'provider') {
+      await pool.query(
+        `UPDATE service_providers 
+         SET bank_name = $1, bank_code = $2, account_number = $3, account_name = $4, 
+             paystack_subaccount_code = $5 
+         WHERE provider_id = $6`,
+        [bank_name, bank_code, account_number, account_name, subaccountCode, user.id]
+      );
+    }
+
+    res.json({
+      success: true,
+      message: 'Bank account verified and Paystack subaccount linked successfully',
+      subaccount_code: subaccountCode,
+      account_name,
+      bank_name,
+    });
+  } catch (err) {
+    console.error('Create subaccount error:', err);
+    res.status(500).json({ success: false, error: err.message });
+  }
+});
+
+// 4. Fetch Bank Details & Subaccount Info for User
+app.get('/api/paystack/subaccount/:userId', async (req, res) => {
+  try {
+    const { userId } = req.params;
+    const userRes = await pool.query(
+      `SELECT bank_name, bank_code, account_number, account_name, paystack_subaccount_code, is_bank_verified 
+       FROM users WHERE user_id = $1`,
+      [userId]
+    );
+    if (userRes.rows.length === 0) {
+      return res.status(404).json({ success: false, error: 'User not found' });
+    }
+
+    res.json({
+      success: true,
+      subaccount: userRes.rows[0],
+    });
+  } catch (err) {
+    console.error('Fetch subaccount error:', err);
+    res.status(500).json({ success: false, error: err.message });
+  }
+});
+
+// 5. Initialize Paystack Split Payment
+app.post('/api/payments/initialize-split', async (req, res) => {
+  try {
+    const authHeader = req.headers.authorization;
+    if (!authHeader) return res.status(401).json({ success: false, error: 'Unauthorized' });
+    const token = authHeader.split(' ')[1];
+    const { data: { user }, error } = await supabase.auth.getUser(token);
+    if (error || !user) return res.status(401).json({ success: false, error: 'Invalid token' });
+
+    const { type, amount, recipient_id, tenancy_id, service_id, property_id, title } = req.body;
+    if (!type || !amount || !recipient_id) {
+      return res.status(400).json({ success: false, error: 'Type, amount, and recipient_id are required' });
+    }
+
+    // Lookup Recipient's Subaccount Code
+    const recipientRes = await pool.query(
+      `SELECT paystack_subaccount_code, bank_name, account_name FROM users WHERE user_id = $1`,
+      [recipient_id]
+    );
+    let subaccountCode = recipientRes.rows[0]?.paystack_subaccount_code;
+
+    // Fallback to service_providers table if not in users
+    if (!subaccountCode) {
+      const spRes = await pool.query(
+        `SELECT paystack_subaccount_code FROM service_providers WHERE provider_id = $1`,
+        [recipient_id]
+      );
+      subaccountCode = spRes.rows[0]?.paystack_subaccount_code;
+    }
+
+    if (!subaccountCode) {
+      return res.status(400).json({
+        success: false,
+        error: 'The recipient (Landlord / Provider) has not setup their verified bank payout account yet.',
+      });
+    }
+
+    // Calculate Propadi Platform Commission
+    let platformCommission = 0;
+    if (type === 'rent') {
+      platformCommission = amount * 0.02; // 2.0% platform fee for rent
+    } else if (type === 'service_request') {
+      platformCommission = amount * 0.10; // 10% commission for maintenance/service jobs
+    } else if (type === 'legal_fee') {
+      platformCommission = 3500; // Flat N3,500 legal binding fee
+    }
+
+    const totalKobo = Math.round(parseFloat(amount) * 100);
+    const commissionKobo = Math.round(platformCommission * 100);
+    const reference = `PROPADI_${Date.now()}_${Math.floor(Math.random() * 1000)}`;
+
+    const paystackPayload = {
+      email: user.email,
+      amount: totalKobo,
+      subaccount: subaccountCode,
+      transaction_charge: commissionKobo,
+      bearer: 'subaccount',
+      reference,
+      metadata: {
+        type,
+        tenancy_id: tenancy_id || null,
+        service_id: service_id || null,
+        property_id: property_id || null,
+        recipient_id,
+        payer_id: user.id,
+        platform_commission: platformCommission,
+      },
+    };
+
+    const paystackRes = await fetch('https://api.paystack.co/transaction/initialize', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        Authorization: `Bearer ${process.env.PAYSTACK_SECRET_KEY}`,
+      },
+      body: JSON.stringify(paystackPayload),
+    });
+
+    const data = await paystackRes.json();
+    if (!data.status) {
+      return res.status(400).json({ success: false, error: data.message || 'Failed to initialize payment' });
+    }
+
+    // Insert pending transaction log
+    await pool.query(
+      `INSERT INTO transactions 
+       (user_id, type, title, amount, status, subaccount_code, platform_commission, reference, property_ref, created_at)
+       VALUES ($1, $2, $3, $4, 'Pending', $5, $6, $7, $8, NOW())`,
+      [user.id, type, title || `Payment for ${type}`, amount, subaccountCode, platformCommission, reference, property_id || null]
+    );
+
+    res.json({
+      success: true,
+      authorization_url: data.data.authorization_url,
+      access_code: data.data.access_code,
+      reference,
+      platform_commission: platformCommission,
+    });
+  } catch (err) {
+    console.error('Initialize split payment error:', err);
+    res.status(500).json({ success: false, error: err.message });
+  }
+});
+
+// 6. Paystack Webhook Handler
+app.post('/api/paystack/webhook', async (req, res) => {
+  try {
+    const signature = req.headers['x-paystack-signature'];
+    const secret = process.env.PAYSTACK_SECRET_KEY;
+    if (secret) {
+      const hash = crypto.createHmac('sha512', secret).update(JSON.stringify(req.body)).digest('hex');
+      if (hash !== signature) {
+        return res.status(400).send('Invalid signature');
+      }
+    }
+
+    const event = req.body;
+    if (event.event === 'charge.success') {
+      const { reference, metadata, amount } = event.data;
+      const paidAmount = amount / 100;
+      const paystackFee = (event.data.fees || 0) / 100;
+
+      // Update Transaction status
+      await pool.query(
+        `UPDATE transactions 
+         SET status = 'Completed', paystack_fee = $1 
+         WHERE reference = $2 OR (user_id = $3 AND amount = $4 AND status = 'Pending')`,
+        [paystackFee, reference, metadata?.payer_id, paidAmount]
+      );
+
+      // Handle Rent Payment
+      if (metadata?.type === 'rent' && metadata?.tenancy_id) {
+        await pool.query(
+          `UPDATE tenancies 
+           SET status = 'Active', payment_status = 'Completed', payment_reference = $1 
+           WHERE tenancy_id = $2`,
+          [reference, metadata.tenancy_id]
+        );
+        // Push notification to Landlord & Renter
+        if (metadata?.recipient_id) {
+          await sendPushToUser(metadata.recipient_id, '💰 Rent Received', `Rent payment of ₦${paidAmount.toLocaleString()} has been processed to your bank account via Paystack.`);
+        }
+      }
+
+      // Handle Service Request Payment
+      if (metadata?.type === 'service_request' && metadata?.service_id) {
+        await pool.query(
+          `UPDATE service_requests 
+           SET price_status = 'funded', status = 'accepted' 
+           WHERE service_id = $1`,
+          [metadata.service_id]
+        );
+        if (metadata?.recipient_id) {
+          await sendPushToUser(metadata.recipient_id, '🔧 Service Request Funded', `Service request has been funded. You may proceed with the job.`);
+        }
+      }
+    }
+
+    res.sendStatus(200);
+  } catch (err) {
+    console.error('Paystack webhook error:', err);
+    res.status(500).send('Webhook Error');
+  }
+});
 
 // ==========================================
 // START SERVER
