@@ -4117,6 +4117,8 @@ app.get('/api/tenancies/user/:userId', async (req, res) => {
     const query = `
       SELECT 
         t.tenancy_id,
+        t.propadi_tenancy_id,
+        t.status,
         t.lease_start_date,
         t.lease_end_date,
         t.payment_status,
