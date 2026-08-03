@@ -3769,11 +3769,53 @@ app.post('/api/users/upload-kyc', async (req, res) => {
     } = await supabase.auth.getUser(token);
     if (error || !user)
       return res.status(401).json({ success: false, error: 'Invalid token' });
-    const { base64, fileType } = req.body;
+
+    const { docType, propadiTenancyId, base64, fileType } = req.body;
+
+    // Fast-track Instant Verification via Propadi Tenancy ID
+    if (docType === 'propadi_tenancy' && propadiTenancyId) {
+      const cleanTenancyId = propadiTenancyId.trim().toUpperCase();
+      const tenancyRes = await pool.query(
+        'SELECT tenancy_id, renter_id, owner_id, status FROM tenancies WHERE UPPER(propadi_tenancy_id) = $1',
+        [cleanTenancyId]
+      );
+
+      if (tenancyRes.rows.length === 0) {
+        return res.status(400).json({
+          success: false,
+          error: 'Propadi Tenancy ID not found in database. Please verify code from your digital lease receipt.',
+        });
+      }
+
+      const tenancy = tenancyRes.rows[0];
+      const isOwnerOrRenter =
+        tenancy.renter_id === user.id || tenancy.owner_id === user.id;
+
+      if (!isOwnerOrRenter) {
+        return res.status(403).json({
+          success: false,
+          error: 'This Propadi Tenancy ID belongs to another user account.',
+        });
+      }
+
+      // Mark address as verified and approve Tier 4
+      await pool.query(
+        'UPDATE users SET address_verified = true, kyc_document_status = $1, kyc_tier = GREATEST(COALESCE(kyc_tier, 1), 4) WHERE user_id = $2',
+        ['approved', user.id]
+      );
+
+      return res.json({
+        success: true,
+        verified: true,
+        message: 'Propadi Tenancy verified instantly!',
+      });
+    }
+
     if (!base64)
       return res
         .status(400)
         .json({ success: false, error: 'No image provided' });
+
     const fileName = `${user.id}/${Date.now()}_kyc.${fileType || 'jpg'}`;
     const buffer = Buffer.from(base64, 'base64');
     const { error: uploadError } = await supabase.storage
