@@ -627,7 +627,7 @@ app.get('/api/properties', async (req, res) => {
       SELECT p.*,
              (SELECT COUNT(*) FROM properties_amenities WHERE property_id = p.property_id) as verified_amenities_count
       FROM properties p
-      WHERE p.status = 'Available'
+      WHERE p.status IN ('Available', 'Pending Admin Oversight', 'Pending Verification')
       ORDER BY p.date_listed DESC
     `;
     const result = await pool.query(query);
@@ -650,7 +650,7 @@ app.get('/api/properties/search', async (req, res) => {
       SELECT p.*, array_agg(DISTINCT pa.amenity_name) as amenities_list
       FROM properties p
       LEFT JOIN properties_amenities pa ON p.property_id = pa.property_id
-      WHERE p.status = 'Available'
+      WHERE p.status IN ('Available', 'Pending Admin Oversight', 'Pending Verification')
     `;
     const values = [];
     let paramIndex = 1;
