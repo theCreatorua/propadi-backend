@@ -4158,6 +4158,60 @@ app.get('/api/tenancies/user/:userId', async (req, res) => {
   }
 });
 
+// GET /api/tenancies/verify-ptn/:code – verify Propadi Tenancy ID code
+app.get('/api/tenancies/verify-ptn/:code', async (req, res) => {
+  try {
+    let { code } = req.params;
+    code = code.trim().toUpperCase();
+    if (!code.startsWith('PTN-')) {
+      code = `PTN-${code}`;
+    }
+    const authHeader = req.headers.authorization;
+    let userId = null;
+    if (authHeader && authHeader.startsWith('Bearer ')) {
+      const token = authHeader.split(' ')[1];
+      try {
+        const {
+          data: { user },
+        } = await supabase.auth.getUser(token);
+        if (user) userId = user.id;
+      } catch (e) { }
+    }
+
+    const result = await pool.query(
+      `SELECT tenancy_id, propadi_tenancy_id, renter_id, owner_id, status FROM tenancies WHERE UPPER(propadi_tenancy_id) = UPPER($1)`,
+      [code]
+    );
+
+    if (result.rows.length === 0) {
+      return res.json({
+        success: false,
+        error: `Propadi Tenancy ID ${code} not found in database.`,
+      });
+    }
+
+    const tenancy = result.rows[0];
+    const isBelongsToUser =
+      userId && (tenancy.renter_id === userId || tenancy.owner_id === userId);
+
+    if (!isBelongsToUser) {
+      return res.json({
+        success: false,
+        belongsToOther: true,
+        error: 'This Propadi Tenancy ID belongs to another user account.',
+      });
+    }
+
+    return res.json({
+      success: true,
+      tenancy,
+    });
+  } catch (err) {
+    console.error('Verify PTN error:', err);
+    res.status(500).json({ success: false, error: 'Failed to verify Tenancy ID' });
+  }
+});
+
 // POST /api/feedback – submit user feedback (with email notification to admins)
 app.post('/api/feedback', async (req, res) => {
   try {
