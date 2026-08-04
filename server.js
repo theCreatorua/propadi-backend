@@ -55,6 +55,13 @@ const pool = new Pool({
       ADD COLUMN IF NOT EXISTS split_code VARCHAR(100),
       ADD COLUMN IF NOT EXISTS reference VARCHAR(100);
 
+      ALTER TABLE properties
+      ADD COLUMN IF NOT EXISTS finishing_state VARCHAR(50) DEFAULT 'Completely Finished',
+      ADD COLUMN IF NOT EXISTS brand_name VARCHAR(255),
+      ADD COLUMN IF NOT EXISTS total_units INTEGER DEFAULT 1,
+      ADD COLUMN IF NOT EXISTS agent_involvement VARCHAR(50) DEFAULT 'Self-Managed',
+      ADD COLUMN IF NOT EXISTS proof_of_ownership_docs TEXT[];
+
       CREATE TABLE IF NOT EXISTS saved_properties (
         saved_id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
         user_id UUID NOT NULL REFERENCES users(user_id) ON DELETE CASCADE,
@@ -86,6 +93,15 @@ const pool = new Pool({
         assigned_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
         UNIQUE(agent_id, property_id)
       );
+
+      ALTER TABLE agent_assignments
+      ADD COLUMN IF NOT EXISTS owner_id UUID REFERENCES users(user_id) ON DELETE CASCADE,
+      ADD COLUMN IF NOT EXISTS accepted_at TIMESTAMPTZ,
+      ADD COLUMN IF NOT EXISTS declined_at TIMESTAMPTZ,
+      ADD COLUMN IF NOT EXISTS owner_signed_at TIMESTAMPTZ,
+      ADD COLUMN IF NOT EXISTS agent_signed_at TIMESTAMPTZ,
+      ADD COLUMN IF NOT EXISTS decline_reason TEXT,
+      ADD COLUMN IF NOT EXISTS contract_terms JSONB;
 
       CREATE TABLE IF NOT EXISTS property_views (
         view_id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
@@ -737,78 +753,128 @@ app.post('/api/properties', async (req, res) => {
       owner_id,
       status,
       category,
+      finishing_state,
+      brand_name,
+      total_units,
+      sector_tag,
+      agent_involvement,
       furnishing_status,
       title,
       description,
       rent_price,
       rent_period,
+      service_charge,
+      caution_fee,
+      legal_fee_percent,
+      agency_fee_percent,
+      early_bird_discount_percent,
+      is_caution_waived,
       total_beds,
       total_baths,
+      total_kitchens,
+      total_stores,
       address_street,
       address_city,
       address_lga,
       address_state,
-      main_image_url,
-      total_kitchens,
-      total_stores,
-      gallery_urls,
-      visually_verified_amenities,
       landmark_name,
       landmark_type,
+      main_image_url,
+      gallery_urls,
+      visually_verified_amenities,
       size_sqm,
       parking_spaces,
       year_built,
       floor_number,
+      meter_type,
+      meter_debt_amount,
+      meter_receipt_url,
+      proof_of_ownership_type,
+      proof_of_ownership_url,
+      proof_of_ownership_docs,
+      video_url,
+      has_video,
     } = req.body;
 
     const propQuery = `
       INSERT INTO properties (
-        owner_id, status, category, furnishing_status, title, description,
-        rent_price, rent_period, total_beds, total_baths, address_street,
+        owner_id, status, category, finishing_state, brand_name, total_units,
+        sector_tag, agent_involvement, furnishing_status, title, description,
+        rent_price, rent_period, service_charge, caution_fee, legal_fee_percent,
+        agency_fee_percent, early_bird_discount_percent, is_caution_waived,
+        total_beds, total_baths, total_kitchens, total_stores, address_street,
         address_city, address_lga, address_state, map_coordinates, main_image_url,
-        gallery_urls, total_kitchens, total_stores, landmark_name, landmark_type,
-        size_sqm, parking_spaces, year_built, floor_number
-      ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, NULL, $15, $16, $17, $18, $19, $20, $21, $22, $23, $24)
+        gallery_urls, landmark_name, landmark_type, size_sqm, parking_spaces,
+        year_built, floor_number, meter_type, meter_debt_amount, meter_receipt_url,
+        proof_of_ownership_type, proof_of_ownership_url, proof_of_ownership_docs,
+        video_url, has_video
+      ) VALUES (
+        $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16,
+        $17, $18, $19, $20, $21, $22, $23, $24, $25, $26, $27, NULL, $28, $29,
+        $30, $31, $32, $33, $34, $35, $36, $37, $38, $39, $40, $41, $42, $43
+      )
       RETURNING *;
     `;
     const propValues = [
       owner_id,
-      status || 'Available',
+      status || 'Pending Verification',
       category,
-      furnishing_status,
+      finishing_state || 'Completely Finished',
+      brand_name || null,
+      total_units || 1,
+      sector_tag || 'Residential',
+      agent_involvement || 'Self-Managed',
+      furnishing_status || null,
       title,
       description,
       rent_price,
-      rent_period || 'Year',
+      rent_period || 'Yearly',
+      service_charge || 0.00,
+      caution_fee || 0.00,
+      legal_fee_percent || 5.00,
+      agency_fee_percent || 0.00,
+      early_bird_discount_percent || 0.00,
+      is_caution_waived || false,
       total_beds || 0,
       total_baths || 0,
+      total_kitchens || 0,
+      total_stores || 0,
       address_street,
       address_city,
       address_lga,
       address_state,
       main_image_url,
       gallery_urls || [],
-      total_kitchens || 0,
-      total_stores || 0,
       landmark_name || null,
       landmark_type || null,
       size_sqm || null,
       parking_spaces || null,
       year_built || null,
       floor_number || null,
+      meter_type || 'Existing',
+      meter_debt_amount || 0.00,
+      meter_receipt_url || null,
+      proof_of_ownership_type || null,
+      proof_of_ownership_url || null,
+      proof_of_ownership_docs || [],
+      video_url || null,
+      has_video || false,
     ];
     const propResult = await client.query(propQuery, propValues);
     const savedProperty = propResult.rows[0];
 
     if (visually_verified_amenities && visually_verified_amenities.length > 0) {
       for (const amenity of visually_verified_amenities) {
+        const amenityName = typeof amenity === 'string' ? amenity : amenity.amenity_name;
+        const verificationUrl = typeof amenity === 'string' ? null : amenity.verification_url;
+        const mediaType = typeof amenity === 'string' ? null : amenity.media_type;
         await client.query(
           `INSERT INTO properties_amenities (property_id, amenity_name, verification_url, media_type) VALUES ($1, $2, $3, $4)`,
           [
             savedProperty.property_id,
-            amenity.amenity_name,
-            amenity.verification_url,
-            amenity.media_type,
+            amenityName,
+            verificationUrl,
+            mediaType,
           ],
         );
       }
@@ -9098,7 +9164,7 @@ app.get('/api/agents/list', async (req, res) => {
   }
 });
 
-// 4. Assign property to an agent
+// 4. Assign property to a Tier-4 verified agent (Post-Admin Audit)
 app.post('/api/agents/assign-property', async (req, res) => {
   try {
     const { agentId, propertyId, ownerId, commissionOverride } = req.body;
@@ -9106,23 +9172,215 @@ app.post('/api/agents/assign-property', async (req, res) => {
       return res.status(400).json({ success: false, error: 'Agent ID, Property ID, and Owner ID are required' });
     }
 
+    // Tier 4 & Admin Verification Check
+    const agentCheck = await pool.query(
+      `SELECT a.*, u.kyc_tier, u.kyc_status, u.is_agent, u.is_service_provider
+       FROM agents a
+       JOIN users u ON a.user_id = u.user_id
+       WHERE a.agent_id = $1`,
+      [agentId]
+    );
+
+    if (agentCheck.rows.length === 0) {
+      return res.status(404).json({ success: false, error: 'Selected agent profile not found.' });
+    }
+
+    const agentData = agentCheck.rows[0];
+    if (agentData.verification_status !== 'approved') {
+      return res.status(400).json({ success: false, error: 'Selected agent is not approved by Admin oversight.' });
+    }
+
+    if ((agentData.kyc_tier || 1) < 4 && agentData.kyc_status !== 'Approved') {
+      return res.status(400).json({ success: false, error: 'System Gate Failure: Agent must be Tier 4 Verified to manage viewing delegations.' });
+    }
+
     const result = await pool.query(
-      `INSERT INTO agent_assignments (agent_id, property_id, owner_id, commission_override, status)
-       VALUES ($1, $2, $3, $4, 'active')
+      `INSERT INTO agent_assignments (agent_id, property_id, owner_id, commission_override, status, assigned_at)
+       VALUES ($1, $2, $3, $4, 'pending_acceptance', CURRENT_TIMESTAMP)
        ON CONFLICT (agent_id, property_id)
-       DO UPDATE SET status = 'active', commission_override = EXCLUDED.commission_override, assigned_at = CURRENT_TIMESTAMP
+       DO UPDATE SET status = 'pending_acceptance', commission_override = EXCLUDED.commission_override, assigned_at = CURRENT_TIMESTAMP
        RETURNING *`,
       [agentId, propertyId, ownerId, commissionOverride || null]
     );
 
-    const agentRes = await pool.query(`SELECT user_id FROM agents WHERE agent_id = $1`, [agentId]);
-    if (agentRes.rows.length > 0) {
-      await sendPushToUser(agentRes.rows[0].user_id, '💼 Property Assigned', 'A property owner has assigned a property to your agency for management.');
-    }
+    // Update Property Status
+    await pool.query(
+      `UPDATE properties SET status = 'agent_delegated_pending_acceptance' WHERE property_id = $1`,
+      [propertyId]
+    );
+
+    // Send Push Notification to Agent
+    await sendPushToUser(
+      agentData.user_id,
+      '🏢 Property Viewing Delegation Offer',
+      'A property owner has selected you to represent their property. Tap to review limited details and accept/decline.',
+      { screen: 'AgentPropertyPreview', assignmentId: result.rows[0].assignment_id, propertyId }
+    );
 
     res.json({ success: true, assignment: result.rows[0] });
   } catch (err) {
     console.error('Assign property error:', err);
+    res.status(500).json({ success: false, error: err.message });
+  }
+});
+
+// 4b. Agent Limited Detail Preview (Street address masked prior to acceptance)
+app.get('/api/agents/assignment-preview/:assignmentId', async (req, res) => {
+  try {
+    const { assignmentId } = req.params;
+    const result = await pool.query(
+      `SELECT aa.*,
+              p.title as property_title,
+              p.category,
+              p.sector_tag,
+              p.rent_price,
+              p.rent_period,
+              p.agency_fee_percent,
+              p.main_image_url,
+              p.gallery_urls,
+              p.address_city,
+              p.address_lga,
+              p.address_state,
+              p.landmark_name,
+              p.total_beds,
+              p.total_baths,
+              '[Masked until agreement signed]' as address_street,
+              u.name as owner_name,
+              u.email as owner_email
+       FROM agent_assignments aa
+       JOIN properties p ON aa.property_id = p.property_id
+       JOIN users u ON aa.owner_id = u.user_id
+       WHERE aa.assignment_id = $1`,
+      [assignmentId]
+    );
+
+    if (result.rows.length === 0) {
+      return res.status(404).json({ success: false, error: 'Assignment record not found.' });
+    }
+
+    res.json({ success: true, preview: result.rows[0] });
+  } catch (err) {
+    console.error('Fetch assignment preview error:', err);
+    res.status(500).json({ success: false, error: err.message });
+  }
+});
+
+// 4c. Agent Respond to Delegation (Accept or Decline)
+app.post('/api/agents/respond-assignment', async (req, res) => {
+  try {
+    const { assignmentId, response, declineReason } = req.body;
+    if (!assignmentId || !response) {
+      return res.status(400).json({ success: false, error: 'Assignment ID and response (accept/decline) are required.' });
+    }
+
+    const currentAss = await pool.query(`SELECT * FROM agent_assignments WHERE assignment_id = $1`, [assignmentId]);
+    if (currentAss.rows.length === 0) {
+      return res.status(404).json({ success: false, error: 'Assignment not found.' });
+    }
+    const assignment = currentAss.rows[0];
+
+    if (response === 'accept') {
+      const updated = await pool.query(
+        `UPDATE agent_assignments
+         SET status = 'accepted_pending_signature', accepted_at = CURRENT_TIMESTAMP
+         WHERE assignment_id = $1 RETURNING *`,
+        [assignmentId]
+      );
+
+      // Notify Owner
+      await sendPushToUser(
+        assignment.owner_id,
+        '🤝 Agent Accepted Delegation!',
+        'The selected Propadi Agent accepted your viewing delegation. Please proceed to digitally sign the agency contract.',
+        { screen: 'DigitalContractSign', assignmentId }
+      );
+
+      res.json({ success: true, assignment: updated.rows[0], message: 'Delegation accepted. Proceeding to digital contract signing.' });
+    } else {
+      const updated = await pool.query(
+        `UPDATE agent_assignments
+         SET status = 'declined', declined_at = CURRENT_TIMESTAMP, decline_reason = $1
+         WHERE assignment_id = $2 RETURNING *`,
+        [declineReason || 'Agent unavailable', assignmentId]
+      );
+
+      // Revert Property status to approved_pending_agent
+      await pool.query(
+        `UPDATE properties SET status = 'approved_pending_agent' WHERE property_id = $1`,
+        [assignment.property_id]
+      );
+
+      // Notify Owner
+      await sendPushToUser(
+        assignment.owner_id,
+        'ℹ️ Agent Delegation Update',
+        `The selected agent declined the offer: ${declineReason || 'Agent unavailable'}. You can now select another verified agent.`,
+        { screen: 'SelectPropadiAgent', propertyId: assignment.property_id }
+      );
+
+      res.json({ success: true, assignment: updated.rows[0], message: 'Delegation declined.' });
+    }
+  } catch (err) {
+    console.error('Respond assignment error:', err);
+    res.status(500).json({ success: false, error: err.message });
+  }
+});
+
+// 4d. Digital Agreement Signing (Owner & Agent Co-signing)
+app.post('/api/agreements/sign-owner-agent-contract', async (req, res) => {
+  try {
+    const { assignmentId, signerRole, signerId } = req.body;
+    if (!assignmentId || !signerRole || !signerId) {
+      return res.status(400).json({ success: false, error: 'Assignment ID, signerRole (owner/agent), and signerId are required.' });
+    }
+
+    const currentAss = await pool.query(`SELECT * FROM agent_assignments WHERE assignment_id = $1`, [assignmentId]);
+    if (currentAss.rows.length === 0) {
+      return res.status(404).json({ success: false, error: 'Assignment record not found.' });
+    }
+
+    let updateQuery = '';
+    if (signerRole === 'owner') {
+      updateQuery = `UPDATE agent_assignments SET owner_signed_at = CURRENT_TIMESTAMP WHERE assignment_id = $1 RETURNING *`;
+    } else {
+      updateQuery = `UPDATE agent_assignments SET agent_signed_at = CURRENT_TIMESTAMP WHERE assignment_id = $1 RETURNING *`;
+    }
+
+    const updatedRes = await pool.query(updateQuery, [assignmentId]);
+    const updated = updatedRes.rows[0];
+
+    // Check if BOTH owner and agent have signed
+    if (updated.owner_signed_at && updated.agent_signed_at) {
+      // Activate assignment & publish property!
+      await pool.query(`UPDATE agent_assignments SET status = 'active' WHERE assignment_id = $1`, [assignmentId]);
+      await pool.query(`UPDATE properties SET status = 'Available' WHERE property_id = $1`, [updated.property_id]);
+
+      // Notify Owner & Agent
+      await sendPushToUser(
+        updated.owner_id,
+        '🎉 Contract Signed & Property Published!',
+        'Both parties have signed the representation contract. Your listing is now public!',
+        { screen: 'PropertyDetails', propertyId: updated.property_id }
+      );
+
+      const agentRes = await pool.query(`SELECT user_id FROM agents WHERE agent_id = $1`, [updated.agent_id]);
+      if (agentRes.rows.length > 0) {
+        await sendPushToUser(
+          agentRes.rows[0].user_id,
+          '🎉 Contract Fully Executed!',
+          'You are now officially authorized to represent and conduct viewings for this property.',
+          { screen: 'AgentDashboard' }
+        );
+      }
+    }
+
+    res.json({
+      success: true,
+      assignment: updated,
+      isFullySigned: !!(updated.owner_signed_at && updated.agent_signed_at),
+    });
+  } catch (err) {
+    console.error('Sign owner-agent contract error:', err);
     res.status(500).json({ success: false, error: err.message });
   }
 });
@@ -9157,7 +9415,7 @@ app.get('/api/agents/assignments/agent/:agentId', async (req, res) => {
        FROM agent_assignments aa
        JOIN properties p ON aa.property_id = p.property_id
        JOIN users u ON aa.owner_id = u.user_id
-       WHERE aa.agent_id = $1 AND aa.status = 'active'
+       WHERE aa.agent_id = $1
        ORDER BY aa.assigned_at DESC`,
       [agentId]
     );
