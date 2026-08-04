@@ -94,6 +94,8 @@ const pool = new Pool({
       ADD COLUMN IF NOT EXISTS rejection_reason TEXT,
       ADD COLUMN IF NOT EXISTS created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP;
 
+      ALTER TABLE agents ALTER COLUMN agent_id SET DEFAULT gen_random_uuid();
+
       CREATE UNIQUE INDEX IF NOT EXISTS idx_agents_user_id ON agents(user_id);
 
 
@@ -9119,8 +9121,8 @@ app.post('/api/agents/register', async (req, res) => {
     }
 
     const result = await pool.query(
-      `INSERT INTO agents (user_id, agency_name, cac_registration_number, license_number, operating_state, commission_rate, verification_status)
-       VALUES ($1, $2, $3, $4, $5, $6, 'pending')
+      `INSERT INTO agents (agent_id, user_id, agency_name, cac_registration_number, license_number, operating_state, commission_rate, verification_status)
+       VALUES (gen_random_uuid(), $1, $2, $3, $4, $5, $6, 'pending')
        ON CONFLICT (user_id) 
        DO UPDATE SET 
          agency_name = EXCLUDED.agency_name,

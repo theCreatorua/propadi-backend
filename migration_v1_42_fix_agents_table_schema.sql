@@ -1,4 +1,4 @@
--- Migration v1.42: Ensure agents table schema and columns exist
+-- Migration v1.42: Ensure agents table schema, agent_id default and columns exist
 CREATE TABLE IF NOT EXISTS public.agents (
   agent_id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
   user_id UUID NOT NULL REFERENCES public.users(user_id) ON DELETE CASCADE UNIQUE,
@@ -23,6 +23,9 @@ ADD COLUMN IF NOT EXISTS commission_rate NUMERIC(5,2) DEFAULT 5.00,
 ADD COLUMN IF NOT EXISTS verification_status VARCHAR(50) DEFAULT 'pending',
 ADD COLUMN IF NOT EXISTS rejection_reason TEXT,
 ADD COLUMN IF NOT EXISTS created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP;
+
+-- Set default for agent_id if legacy table lacked default
+ALTER TABLE public.agents ALTER COLUMN agent_id SET DEFAULT gen_random_uuid();
 
 -- Ensure unique index on user_id for ON CONFLICT resolution
 CREATE UNIQUE INDEX IF NOT EXISTS idx_agents_user_id ON public.agents(user_id);
