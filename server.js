@@ -83,6 +83,20 @@ const pool = new Pool({
         created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
       );
 
+      ALTER TABLE agents
+      ADD COLUMN IF NOT EXISTS user_id UUID REFERENCES users(user_id) ON DELETE CASCADE,
+      ADD COLUMN IF NOT EXISTS agency_name VARCHAR(255),
+      ADD COLUMN IF NOT EXISTS cac_registration_number VARCHAR(100),
+      ADD COLUMN IF NOT EXISTS license_number VARCHAR(100),
+      ADD COLUMN IF NOT EXISTS operating_state VARCHAR(100) DEFAULT 'Lagos',
+      ADD COLUMN IF NOT EXISTS commission_rate NUMERIC(5,2) DEFAULT 5.00,
+      ADD COLUMN IF NOT EXISTS verification_status VARCHAR(50) DEFAULT 'pending',
+      ADD COLUMN IF NOT EXISTS rejection_reason TEXT,
+      ADD COLUMN IF NOT EXISTS created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP;
+
+      CREATE UNIQUE INDEX IF NOT EXISTS idx_agents_user_id ON agents(user_id);
+
+
       CREATE TABLE IF NOT EXISTS agent_assignments (
         assignment_id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
         agent_id UUID NOT NULL REFERENCES agents(agent_id) ON DELETE CASCADE,
