@@ -1385,7 +1385,7 @@ app.put('/api/tenancies/:id/sign', async (req, res) => {
   try {
     const { id } = req.params;
     const result = await pool.query(
-      `UPDATE tenancies SET renter_signature_date=CURRENT_TIMESTAMP, status='Signed' WHERE tenancy_id=$1 RETURNING *`,
+      `UPDATE tenancies SET renter_signature_date=CURRENT_TIMESTAMP, owner_signature_date=COALESCE(owner_signature_date, CURRENT_TIMESTAMP), status='Signed' WHERE tenancy_id=$1 RETURNING *`,
       [id],
     );
     res.json({ success: true, tenancy: result.rows[0] });
