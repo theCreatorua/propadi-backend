@@ -8907,18 +8907,44 @@ app.post('/api/paystack/create-subaccount', async (req, res) => {
     }
 
     const subaccountCode = data.data.subaccount_code;
+    const purpose = role || 'general';
 
-    // Update Users table
+    // Ensure user_bank_accounts table exists
     await pool.query(
-      `UPDATE users 
-       SET bank_name = $1, bank_code = $2, account_number = $3, account_name = $4, 
-           paystack_subaccount_code = $5, is_bank_verified = TRUE 
-       WHERE user_id = $6`,
-      [bank_name, bank_code, account_number, account_name, subaccountCode, user.id]
+      `CREATE TABLE IF NOT EXISTS public.user_bank_accounts (
+        account_id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+        user_id UUID NOT NULL REFERENCES public.users(user_id) ON DELETE CASCADE,
+        account_purpose VARCHAR(50) NOT NULL,
+        bank_name VARCHAR(100) NOT NULL,
+        bank_code VARCHAR(20) NOT NULL,
+        account_number VARCHAR(20) NOT NULL,
+        account_name VARCHAR(255) NOT NULL,
+        paystack_subaccount_code VARCHAR(100) NOT NULL,
+        is_verified BOOLEAN DEFAULT TRUE,
+        created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
+        UNIQUE (user_id, account_purpose)
+      );`
     );
 
-    // If provider or agency role, also update respective tables
-    if (role === 'provider') {
+    // Upsert into user_bank_accounts for the specific purpose tag
+    await pool.query(
+      `INSERT INTO user_bank_accounts (user_id, account_purpose, bank_name, bank_code, account_number, account_name, paystack_subaccount_code, is_verified)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, TRUE)
+       ON CONFLICT (user_id, account_purpose)
+       DO UPDATE SET bank_name = EXCLUDED.bank_name, bank_code = EXCLUDED.bank_code, account_number = EXCLUDED.account_number, account_name = EXCLUDED.account_name, paystack_subaccount_code = EXCLUDED.paystack_subaccount_code, is_verified = TRUE, created_at = CURRENT_TIMESTAMP`,
+      [user.id, purpose, bank_name, bank_code, account_number, account_name, subaccountCode]
+    );
+
+    // Sync to respective legacy table columns for backward compatibility
+    if (purpose === 'landlord' || purpose === 'owner') {
+      await pool.query(
+        `UPDATE users 
+         SET bank_name = $1, bank_code = $2, account_number = $3, account_name = $4, 
+             paystack_subaccount_code = $5, is_bank_verified = TRUE 
+         WHERE user_id = $6`,
+        [bank_name, bank_code, account_number, account_name, subaccountCode, user.id]
+      );
+    } else if (purpose === 'provider' || purpose === 'service_provider') {
       await pool.query(
         `UPDATE service_providers 
          SET bank_name = $1, bank_code = $2, account_number = $3, account_name = $4, 
@@ -8926,7 +8952,7 @@ app.post('/api/paystack/create-subaccount', async (req, res) => {
          WHERE provider_id = $6`,
         [bank_name, bank_code, account_number, account_name, subaccountCode, user.id]
       );
-    } else if (role === 'agency' || role === 'agent') {
+    } else if (purpose === 'agency' || purpose === 'agent') {
       await pool.query(
         `ALTER TABLE agents 
          ADD COLUMN IF NOT EXISTS paystack_subaccount_code VARCHAR(100),
@@ -8942,6 +8968,14 @@ app.post('/api/paystack/create-subaccount', async (req, res) => {
          WHERE user_id = $6`,
         [subaccountCode, bank_name, bank_code, account_number, account_name, user.id]
       );
+    } else {
+      // General Payouts: Update users table if no landlord subaccount is present
+      await pool.query(
+        `UPDATE users 
+         SET bank_name = COALESCE(bank_name, $1), bank_code = COALESCE(bank_code, $2), account_number = COALESCE(account_number, $3), account_name = COALESCE(account_name, $4), paystack_subaccount_code = COALESCE(paystack_subaccount_code, $5), is_bank_verified = TRUE 
+         WHERE user_id = $6`,
+        [bank_name, bank_code, account_number, account_name, subaccountCode, user.id]
+      );
     }
 
     res.json({
@@ -8950,6 +8984,7 @@ app.post('/api/paystack/create-subaccount', async (req, res) => {
       subaccount_code: subaccountCode,
       account_name,
       bank_name,
+      purpose,
     });
   } catch (err) {
     console.error('Create subaccount error:', err);
@@ -8957,7 +8992,43 @@ app.post('/api/paystack/create-subaccount', async (req, res) => {
   }
 });
 
-// 4. Fetch Bank Details & Subaccount Info for User
+// 4a. Fetch All Purpose Subaccounts for User
+app.get('/api/paystack/subaccounts/:userId', async (req, res) => {
+  try {
+    const { userId } = req.params;
+    
+    await pool.query(
+      `CREATE TABLE IF NOT EXISTS public.user_bank_accounts (
+        account_id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+        user_id UUID NOT NULL REFERENCES public.users(user_id) ON DELETE CASCADE,
+        account_purpose VARCHAR(50) NOT NULL,
+        bank_name VARCHAR(100) NOT NULL,
+        bank_code VARCHAR(20) NOT NULL,
+        account_number VARCHAR(20) NOT NULL,
+        account_name VARCHAR(255) NOT NULL,
+        paystack_subaccount_code VARCHAR(100) NOT NULL,
+        is_verified BOOLEAN DEFAULT TRUE,
+        created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
+        UNIQUE (user_id, account_purpose)
+      );`
+    );
+
+    const result = await pool.query(
+      `SELECT account_id, account_purpose as purpose, bank_name, bank_code, account_number, account_name, paystack_subaccount_code as subaccount_code, is_verified, created_at
+       FROM user_bank_accounts
+       WHERE user_id = $1
+       ORDER BY created_at ASC`,
+      [userId]
+    );
+
+    res.json({ success: true, accounts: result.rows });
+  } catch (err) {
+    console.error('Fetch user subaccounts list error:', err);
+    res.status(500).json({ success: false, error: err.message });
+  }
+});
+
+// 4b. Fetch Legacy Primary Subaccount Info for User
 app.get('/api/paystack/subaccount/:userId', async (req, res) => {
   try {
     const { userId } = req.params;
