@@ -123,6 +123,8 @@ const pool = new Pool({
       ADD COLUMN IF NOT EXISTS decline_reason TEXT,
       ADD COLUMN IF NOT EXISTS contract_terms JSONB;
 
+      CREATE UNIQUE INDEX IF NOT EXISTS idx_agent_assignments_agent_property ON agent_assignments (agent_id, property_id);
+
       CREATE TABLE IF NOT EXISTS property_views (
         view_id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
         property_id UUID NOT NULL REFERENCES properties(property_id) ON DELETE CASCADE,
