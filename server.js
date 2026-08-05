@@ -9502,6 +9502,71 @@ app.get('/api/agents/assignments/owner/:ownerId', async (req, res) => {
   }
 });
 
+// 5b. Admin Oversight: List all property agency delegations
+app.get('/api/admin/assignments', async (req, res) => {
+  try {
+    const result = await pool.query(
+      `SELECT aa.*,
+              a.agency_name,
+              a.cac_registration_number,
+              a.license_number,
+              a.operating_state,
+              u_agent.name as agent_user_name,
+              u_agent.email as agent_email,
+              u_agent.phone_number as agent_phone,
+              u_owner.name as owner_name,
+              u_owner.email as owner_email,
+              p.title as property_title,
+              p.category as property_category,
+              p.total_units as property_units,
+              p.rent_price,
+              p.address_city,
+              p.address_state
+       FROM agent_assignments aa
+       JOIN agents a ON aa.agent_id = a.agent_id
+       JOIN users u_agent ON a.user_id = u_agent.user_id
+       JOIN users u_owner ON aa.owner_id = u_owner.user_id
+       JOIN properties p ON aa.property_id = p.property_id
+       ORDER BY aa.assigned_at DESC`
+    );
+    res.json({ success: true, assignments: result.rows });
+  } catch (err) {
+    console.error('Fetch admin assignments error:', err);
+    res.status(500).json({ success: false, error: err.message });
+  }
+});
+
+// 5c. Admin Oversight: Force revoke agency delegation
+app.post('/api/admin/assignments/:assignmentId/revoke', async (req, res) => {
+  try {
+    const { assignmentId } = req.params;
+    const { reason } = req.body;
+
+    const result = await pool.query(
+      `UPDATE agent_assignments
+       SET status = 'revoked', decline_reason = $1
+       WHERE assignment_id = $2
+       RETURNING *`,
+      [reason || 'Revoked by System Admin', assignmentId]
+    );
+
+    if (result.rows.length === 0) {
+      return res.status(404).json({ success: false, error: 'Assignment not found' });
+    }
+
+    // Revert property status to audited_ready_for_listing
+    await pool.query(
+      `UPDATE properties SET status = 'audited_ready_for_listing' WHERE property_id = $1`,
+      [result.rows[0].property_id]
+    );
+
+    res.json({ success: true, assignment: result.rows[0] });
+  } catch (err) {
+    console.error('Admin revoke assignment error:', err);
+    res.status(500).json({ success: false, error: err.message });
+  }
+});
+
 // 6. Get assignments for Agent
 app.get('/api/agents/assignments/agent/:agentId', async (req, res) => {
   try {
