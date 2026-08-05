@@ -9122,9 +9122,24 @@ app.post('/api/agents/register', async (req, res) => {
       return res.status(400).json({ success: false, error: 'User ID and Agency Name are required' });
     }
 
+    // Check existing agent status to preserve approval on operational updates
+    const existing = await pool.query(`SELECT * FROM agents WHERE user_id = $1`, [userId]);
+    let nextStatus = 'pending';
+
+    if (existing.rows.length > 0) {
+      const prev = existing.rows[0];
+      const cacChanged = (prev.cac_registration_number || '') !== (cacNumber || '');
+      const licenseChanged = (prev.license_number || '') !== (licenseNumber || '');
+
+      // If approved and core legal credentials didn't change, retain approval!
+      if (prev.verification_status === 'approved' && !cacChanged && !licenseChanged) {
+        nextStatus = 'approved';
+      }
+    }
+
     const result = await pool.query(
       `INSERT INTO agents (agent_id, user_id, agency_name, cac_registration_number, license_number, operating_state, commission_rate, verification_status)
-       VALUES (gen_random_uuid(), $1, $2, $3, $4, $5, $6, 'pending')
+       VALUES (gen_random_uuid(), $1, $2, $3, $4, $5, $6, $7)
        ON CONFLICT (user_id) 
        DO UPDATE SET 
          agency_name = EXCLUDED.agency_name,
@@ -9132,12 +9147,19 @@ app.post('/api/agents/register', async (req, res) => {
          license_number = EXCLUDED.license_number,
          operating_state = EXCLUDED.operating_state,
          commission_rate = EXCLUDED.commission_rate,
-         verification_status = 'pending'
+         verification_status = $7
        RETURNING *`,
-      [userId, agencyName, cacNumber || null, licenseNumber || null, operatingState || 'Lagos', commissionRate || 5.00]
+      [userId, agencyName, cacNumber || null, licenseNumber || null, operatingState || 'Lagos', commissionRate || 5.00, nextStatus]
     );
 
-    res.json({ success: true, agent: result.rows[0], message: 'Agent registration submitted for admin approval.' });
+    const isUpdatedWithoutStatusReset = nextStatus === 'approved';
+    res.json({
+      success: true,
+      agent: result.rows[0],
+      message: isUpdatedWithoutStatusReset
+        ? 'Agency settings updated successfully.'
+        : 'Agent registration submitted for admin approval.',
+    });
   } catch (err) {
     console.error('Register agent error:', err);
     res.status(500).json({ success: false, error: err.message });
