@@ -95,8 +95,10 @@ const pool = new Pool({
       ADD COLUMN IF NOT EXISTS created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP;
 
       ALTER TABLE agents ALTER COLUMN agent_id SET DEFAULT gen_random_uuid();
+      ALTER TABLE agents DROP CONSTRAINT IF EXISTS agents_agent_id_fkey;
 
       CREATE UNIQUE INDEX IF NOT EXISTS idx_agents_user_id ON agents(user_id);
+
 
 
       CREATE TABLE IF NOT EXISTS agent_assignments (

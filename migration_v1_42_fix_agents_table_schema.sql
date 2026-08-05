@@ -1,4 +1,4 @@
--- Migration v1.42: Ensure agents table schema, agent_id default and columns exist
+-- Migration v1.42: Ensure agents table schema, agent_id default, drop legacy FK constraint, and columns exist
 CREATE TABLE IF NOT EXISTS public.agents (
   agent_id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
   user_id UUID NOT NULL REFERENCES public.users(user_id) ON DELETE CASCADE UNIQUE,
@@ -26,6 +26,9 @@ ADD COLUMN IF NOT EXISTS created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIM
 
 -- Set default for agent_id if legacy table lacked default
 ALTER TABLE public.agents ALTER COLUMN agent_id SET DEFAULT gen_random_uuid();
+
+-- Drop invalid legacy foreign key constraint linking agent_id directly to users table
+ALTER TABLE public.agents DROP CONSTRAINT IF EXISTS agents_agent_id_fkey;
 
 -- Ensure unique index on user_id for ON CONFLICT resolution
 CREATE UNIQUE INDEX IF NOT EXISTS idx_agents_user_id ON public.agents(user_id);
