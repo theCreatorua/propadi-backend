@@ -8917,7 +8917,7 @@ app.post('/api/paystack/create-subaccount', async (req, res) => {
       [bank_name, bank_code, account_number, account_name, subaccountCode, user.id]
     );
 
-    // If provider role, also update service_providers table
+    // If provider or agency role, also update respective tables
     if (role === 'provider') {
       await pool.query(
         `UPDATE service_providers 
@@ -8925,6 +8925,13 @@ app.post('/api/paystack/create-subaccount', async (req, res) => {
              paystack_subaccount_code = $5 
          WHERE provider_id = $6`,
         [bank_name, bank_code, account_number, account_name, subaccountCode, user.id]
+      );
+    } else if (role === 'agency' || role === 'agent') {
+      await pool.query(
+        `UPDATE agents 
+         SET paystack_subaccount_code = $1 
+         WHERE user_id = $2`,
+        [subaccountCode, user.id]
       );
     }
 
@@ -9463,7 +9470,23 @@ app.get('/api/agents/assignments/owner/:ownerId', async (req, res) => {
   try {
     const { ownerId } = req.params;
     const result = await pool.query(
-      `SELECT aa.*, a.agency_name, a.commission_rate as default_commission, u.name as agent_user_name, p.title as property_title, p.address_city, p.address_state, p.rent_price, p.main_image_url
+      `SELECT aa.*, 
+              a.agency_name, 
+              a.cac_registration_number, 
+              a.license_number, 
+              a.operating_state, 
+              a.verification_status as agency_verification_status, 
+              a.commission_rate as default_commission, 
+              u.name as agent_user_name, 
+              u.email as agent_email, 
+              u.phone_number as agent_phone, 
+              p.title as property_title, 
+              p.category as property_category, 
+              p.total_units as property_units, 
+              p.address_city, 
+              p.address_state, 
+              p.rent_price, 
+              p.main_image_url
        FROM agent_assignments aa
        JOIN agents a ON aa.agent_id = a.agent_id
        JOIN users u ON a.user_id = u.user_id
