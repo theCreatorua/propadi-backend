@@ -114,6 +114,8 @@ const pool = new Pool({
 
       ALTER TABLE agent_assignments
       ADD COLUMN IF NOT EXISTS owner_id UUID REFERENCES users(user_id) ON DELETE CASCADE,
+      ADD COLUMN IF NOT EXISTS commission_override NUMERIC(5,2),
+      ADD COLUMN IF NOT EXISTS commission_rate NUMERIC(5,2) DEFAULT 5.00,
       ADD COLUMN IF NOT EXISTS accepted_at TIMESTAMPTZ,
       ADD COLUMN IF NOT EXISTS declined_at TIMESTAMPTZ,
       ADD COLUMN IF NOT EXISTS owner_signed_at TIMESTAMPTZ,
@@ -9234,13 +9236,14 @@ app.post('/api/agents/assign-property', async (req, res) => {
       return res.status(400).json({ success: false, error: 'System Gate Failure: Agent must be Tier 4 Verified to manage viewing delegations.' });
     }
 
+    const commValue = commissionOverride ? parseFloat(commissionOverride) : 5.00;
     const result = await pool.query(
-      `INSERT INTO agent_assignments (agent_id, property_id, owner_id, commission_override, status, assigned_at)
-       VALUES ($1, $2, $3, $4, 'pending_acceptance', CURRENT_TIMESTAMP)
+      `INSERT INTO agent_assignments (agent_id, property_id, owner_id, commission_override, commission_rate, status, assigned_at)
+       VALUES ($1, $2, $3, $4, $4, 'pending_acceptance', CURRENT_TIMESTAMP)
        ON CONFLICT (agent_id, property_id)
-       DO UPDATE SET status = 'pending_acceptance', commission_override = EXCLUDED.commission_override, assigned_at = CURRENT_TIMESTAMP
+       DO UPDATE SET status = 'pending_acceptance', commission_override = EXCLUDED.commission_override, commission_rate = EXCLUDED.commission_rate, assigned_at = CURRENT_TIMESTAMP
        RETURNING *`,
-      [agentId, propertyId, ownerId, commissionOverride || null]
+      [agentId, propertyId, ownerId, commValue]
     );
 
     // Update Property Status
