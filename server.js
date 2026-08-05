@@ -9304,6 +9304,17 @@ app.post('/api/agents/assign-property', async (req, res) => {
 app.get('/api/agents/assignment-preview/:assignmentId', async (req, res) => {
   try {
     const { assignmentId } = req.params;
+
+    // Ensure agents table has required paystack subaccount columns
+    await pool.query(
+      `ALTER TABLE agents 
+       ADD COLUMN IF NOT EXISTS paystack_subaccount_code VARCHAR(100),
+       ADD COLUMN IF NOT EXISTS bank_name VARCHAR(100),
+       ADD COLUMN IF NOT EXISTS bank_code VARCHAR(20),
+       ADD COLUMN IF NOT EXISTS account_number VARCHAR(20),
+       ADD COLUMN IF NOT EXISTS account_name VARCHAR(255);`
+    );
+
     const result = await pool.query(
       `SELECT aa.*,
               p.title as property_title,
@@ -9364,6 +9375,15 @@ app.post('/api/agents/respond-assignment', async (req, res) => {
     if (!assignmentId || !response) {
       return res.status(400).json({ success: false, error: 'Assignment ID and response (accept/decline) are required.' });
     }
+
+    await pool.query(
+      `ALTER TABLE agents 
+       ADD COLUMN IF NOT EXISTS paystack_subaccount_code VARCHAR(100),
+       ADD COLUMN IF NOT EXISTS bank_name VARCHAR(100),
+       ADD COLUMN IF NOT EXISTS bank_code VARCHAR(20),
+       ADD COLUMN IF NOT EXISTS account_number VARCHAR(20),
+       ADD COLUMN IF NOT EXISTS account_name VARCHAR(255);`
+    );
 
     const currentAss = await pool.query(
       `SELECT aa.*, ag.user_id as agent_user_id,
