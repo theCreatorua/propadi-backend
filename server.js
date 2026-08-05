@@ -9567,6 +9567,37 @@ app.post('/api/admin/assignments/:assignmentId/revoke', async (req, res) => {
   }
 });
 
+// 5d. Owner Revoke Agency Delegation
+app.post('/api/agents/assignments/:assignmentId/revoke', async (req, res) => {
+  try {
+    const { assignmentId } = req.params;
+    const { reason } = req.body;
+
+    const result = await pool.query(
+      `UPDATE agent_assignments
+       SET status = 'revoked', decline_reason = $1
+       WHERE assignment_id = $2
+       RETURNING *`,
+      [reason || 'Revoked by Property Owner', assignmentId]
+    );
+
+    if (result.rows.length === 0) {
+      return res.status(404).json({ success: false, error: 'Assignment not found' });
+    }
+
+    // Revert property status to audited_ready_for_listing
+    await pool.query(
+      `UPDATE properties SET status = 'audited_ready_for_listing' WHERE property_id = $1`,
+      [result.rows[0].property_id]
+    );
+
+    res.json({ success: true, assignment: result.rows[0] });
+  } catch (err) {
+    console.error('Owner revoke assignment error:', err);
+    res.status(500).json({ success: false, error: err.message });
+  }
+});
+
 // 6. Get assignments for Agent
 app.get('/api/agents/assignments/agent/:agentId', async (req, res) => {
   try {
