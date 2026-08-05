@@ -9466,6 +9466,35 @@ app.get('/api/agents/assignments/agent/:agentId', async (req, res) => {
   }
 });
 
+// 6b. Get Tenant Applications for Delegated Agent Properties
+app.get('/api/agents/applications/agent/:agentId', async (req, res) => {
+  try {
+    const { agentId } = req.params;
+    const result = await pool.query(
+      `SELECT app.*, 
+              p.title as property_title, 
+              p.address_city, 
+              p.address_state, 
+              p.rent_price, 
+              p.main_image_url,
+              u.name as applicant_name,
+              u.email as applicant_email,
+              u.phone_number as applicant_phone
+       FROM rental_applications app
+       JOIN properties p ON app.property_id = p.property_id
+       JOIN agent_assignments aa ON p.property_id = aa.property_id
+       JOIN users u ON app.applicant_id = u.user_id
+       WHERE aa.agent_id = $1 AND aa.status = 'active'
+       ORDER BY app.created_at DESC`,
+      [agentId]
+    );
+    res.json({ success: true, applications: result.rows });
+  } catch (err) {
+    console.error('Fetch agent tenant applications error:', err);
+    res.status(500).json({ success: false, error: err.message });
+  }
+});
+
 // 7. Update assignment status (accept/revoke)
 app.post('/api/agents/assignments/:id/status', async (req, res) => {
   try {
