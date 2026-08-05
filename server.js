@@ -9051,7 +9051,7 @@ app.get('/api/paystack/subaccount/:userId', async (req, res) => {
   }
 });
 
-// 5. Initialize Paystack Split Payment
+// 5. Initialize Paystack Multi-Split Payment (Owner, Agency, Propadi Platform)
 app.post('/api/payments/initialize-split', async (req, res) => {
   try {
     const authHeader = req.headers.authorization;
@@ -9061,64 +9061,161 @@ app.post('/api/payments/initialize-split', async (req, res) => {
     if (error || !user) return res.status(401).json({ success: false, error: 'Invalid token' });
 
     const { type, amount, recipient_id, tenancy_id, service_id, property_id, title } = req.body;
-    if (!type || !amount || !recipient_id) {
-      return res.status(400).json({ success: false, error: 'Type, amount, and recipient_id are required' });
+    if (!type || !amount) {
+      return res.status(400).json({ success: false, error: 'Type and amount are required' });
     }
 
-    // Lookup Recipient's Subaccount Code
-    const recipientRes = await pool.query(
-      `SELECT paystack_subaccount_code, bank_name, account_name FROM users WHERE user_id = $1`,
-      [recipient_id]
+    // Ensure transactions table has Phase 3 columns
+    await pool.query(
+      `ALTER TABLE transactions
+       ADD COLUMN IF NOT EXISTS owner_share_amount NUMERIC(12, 2),
+       ADD COLUMN IF NOT EXISTS agency_share_amount NUMERIC(12, 2),
+       ADD COLUMN IF NOT EXISTS propadi_fee_amount NUMERIC(12, 2),
+       ADD COLUMN IF NOT EXISTS caution_deposit_amount NUMERIC(12, 2),
+       ADD COLUMN IF NOT EXISTS owner_subaccount_code VARCHAR(100),
+       ADD COLUMN IF NOT EXISTS agency_subaccount_code VARCHAR(100),
+       ADD COLUMN IF NOT EXISTS paystack_split_code VARCHAR(100);`
     );
-    let subaccountCode = recipientRes.rows[0]?.paystack_subaccount_code;
 
-    // Fallback to service_providers table if not in users
-    if (!subaccountCode) {
-      const spRes = await pool.query(
-        `SELECT paystack_subaccount_code FROM service_providers WHERE provider_id = $1`,
-        [recipient_id]
+    let ownerSubaccountCode = null;
+    let agencySubaccountCode = null;
+    let agencyCommissionRate = 0;
+    let ownerId = recipient_id;
+
+    // Determine Property Owner & Appointed Agency Subaccounts
+    if (property_id) {
+      const propRes = await pool.query(
+        `SELECT p.user_id as owner_id, u.paystack_subaccount_code as owner_subaccount,
+                aa.agent_id, aa.commission_rate, ag.paystack_subaccount_code as agency_subaccount,
+                u_agent.paystack_subaccount_code as user_agent_subaccount
+         FROM properties p
+         JOIN users u ON p.user_id = u.user_id
+         LEFT JOIN agent_assignments aa ON p.property_id = aa.property_id AND aa.status IN ('active', 'accepted_pending_signature')
+         LEFT JOIN agents ag ON aa.agent_id = ag.agent_id
+         LEFT JOIN users u_agent ON ag.user_id = u_agent.user_id
+         WHERE p.property_id = $1`,
+        [property_id]
       );
-      subaccountCode = spRes.rows[0]?.paystack_subaccount_code;
+
+      if (propRes.rows.length > 0) {
+        const pRow = propRes.rows[0];
+        ownerId = ownerId || pRow.owner_id;
+        ownerSubaccountCode = pRow.owner_subaccount;
+        if (pRow.agent_id) {
+          agencySubaccountCode = pRow.agency_subaccount || pRow.user_agent_subaccount;
+          agencyCommissionRate = parseFloat(pRow.commission_rate) || 5.00;
+        }
+      }
     }
 
-    if (!subaccountCode) {
+    // Fallback Owner lookup if recipient_id provided without property_id
+    if (!ownerSubaccountCode && ownerId) {
+      const recipientRes = await pool.query(
+        `SELECT paystack_subaccount_code FROM users WHERE user_id = $1`,
+        [ownerId]
+      );
+      ownerSubaccountCode = recipientRes.rows[0]?.paystack_subaccount_code;
+
+      if (!ownerSubaccountCode) {
+        const spRes = await pool.query(
+          `SELECT paystack_subaccount_code FROM service_providers WHERE provider_id = $1`,
+          [ownerId]
+        );
+        ownerSubaccountCode = spRes.rows[0]?.paystack_subaccount_code;
+      }
+    }
+
+    if (!ownerSubaccountCode) {
       return res.status(400).json({
         success: false,
-        error: 'The recipient (Landlord / Provider) has not setup their verified bank payout account yet.',
+        error: 'Property Owner / Recipient has not linked their verified bank payout account yet.',
       });
     }
 
-    // Calculate Propadi Platform Commission
+    // Calculate Financial Breakdown
+    const totalAmount = parseFloat(amount);
     let platformCommission = 0;
+    let agencyShare = 0;
+    let ownerShare = totalAmount;
+
     if (type === 'rent') {
-      platformCommission = amount * 0.02; // 2.0% platform fee for rent
+      platformCommission = totalAmount * 0.02; // 2.0% platform fee
+      if (agencySubaccountCode && agencyCommissionRate > 0) {
+        agencyShare = totalAmount * (agencyCommissionRate / 100);
+      }
+      ownerShare = totalAmount - platformCommission - agencyShare;
     } else if (type === 'service_request') {
-      platformCommission = amount * 0.10; // 10% commission for maintenance/service jobs
+      platformCommission = totalAmount * 0.10; // 10% maintenance fee
+      ownerShare = totalAmount - platformCommission;
     } else if (type === 'legal_fee') {
       platformCommission = 3500; // Flat N3,500 legal binding fee
+      ownerShare = Math.max(0, totalAmount - platformCommission);
     }
 
-    const totalKobo = Math.round(parseFloat(amount) * 100);
-    const commissionKobo = Math.round(platformCommission * 100);
+    const totalKobo = Math.round(totalAmount * 100);
+    const platformCommissionKobo = Math.round(platformCommission * 100);
+    const agencyShareKobo = Math.round(agencyShare * 100);
+    const ownerShareKobo = Math.round(ownerShare * 100);
     const reference = `PROPADI_${Date.now()}_${Math.floor(Math.random() * 1000)}`;
+
+    let splitCode = null;
+
+    // Create Paystack Dynamic Multi-Split if Agency is present
+    if (agencySubaccountCode && agencyShare > 0) {
+      try {
+        const splitRes = await fetch('https://api.paystack.co/split', {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            Authorization: `Bearer ${process.env.PAYSTACK_SECRET_KEY}`,
+          },
+          body: JSON.stringify({
+            name: `Propadi Multi-Split ${reference}`,
+            type: 'flat',
+            currency: 'NGN',
+            subaccounts: [
+              { subaccount: ownerSubaccountCode, share: ownerShareKobo },
+              { subaccount: agencySubaccountCode, share: agencyShareKobo },
+            ],
+            bearer_type: 'all',
+          }),
+        });
+
+        const splitData = await splitRes.json();
+        if (splitData.status && splitData.data?.split_code) {
+          splitCode = splitData.data.split_code;
+        }
+      } catch (splitErr) {
+        console.error('Paystack split creation fallback:', splitErr);
+      }
+    }
 
     const paystackPayload = {
       email: user.email,
       amount: totalKobo,
-      subaccount: subaccountCode,
-      transaction_charge: commissionKobo,
-      bearer: 'subaccount',
       reference,
       metadata: {
         type,
         tenancy_id: tenancy_id || null,
         service_id: service_id || null,
         property_id: property_id || null,
-        recipient_id,
+        recipient_id: ownerId,
         payer_id: user.id,
+        owner_share: ownerShare,
+        agency_share: agencyShare,
         platform_commission: platformCommission,
+        owner_subaccount_code: ownerSubaccountCode,
+        agency_subaccount_code: agencySubaccountCode || null,
       },
     };
+
+    if (splitCode) {
+      paystackPayload.split_code = splitCode;
+    } else {
+      paystackPayload.subaccount = ownerSubaccountCode;
+      paystackPayload.transaction_charge = platformCommissionKobo;
+      paystackPayload.bearer = 'subaccount';
+    }
 
     const paystackRes = await fetch('https://api.paystack.co/transaction/initialize', {
       method: 'POST',
@@ -9134,12 +9231,29 @@ app.post('/api/payments/initialize-split', async (req, res) => {
       return res.status(400).json({ success: false, error: data.message || 'Failed to initialize payment' });
     }
 
-    // Insert pending transaction log
+    // Insert pending transaction log with itemized shares
     await pool.query(
       `INSERT INTO transactions 
-       (user_id, type, title, amount, status, subaccount_code, platform_commission, reference, property_ref, created_at)
-       VALUES ($1, $2, $3, $4, 'Pending', $5, $6, $7, $8, NOW())`,
-      [user.id, type, title || `Payment for ${type}`, amount, subaccountCode, platformCommission, reference, property_id || null]
+       (user_id, type, title, amount, status, subaccount_code, platform_commission, 
+        owner_share_amount, agency_share_amount, propadi_fee_amount, 
+        owner_subaccount_code, agency_subaccount_code, paystack_split_code, reference, property_ref, created_at)
+       VALUES ($1, $2, $3, $4, 'Pending', $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, NOW())`,
+      [
+        user.id,
+        type,
+        title || `Payment for ${type}`,
+        totalAmount,
+        ownerSubaccountCode,
+        platformCommission,
+        ownerShare,
+        agencyShare,
+        platformCommission,
+        ownerSubaccountCode,
+        agencySubaccountCode || null,
+        splitCode || null,
+        reference,
+        property_id || null,
+      ]
     );
 
     res.json({
@@ -9147,7 +9261,13 @@ app.post('/api/payments/initialize-split', async (req, res) => {
       authorization_url: data.data.authorization_url,
       access_code: data.data.access_code,
       reference,
-      platform_commission: platformCommission,
+      breakdown: {
+        total_amount: totalAmount,
+        owner_share: ownerShare,
+        agency_share: agencyShare,
+        platform_fee: platformCommission,
+        split_code: splitCode,
+      },
     });
   } catch (err) {
     console.error('Initialize split payment error:', err);
@@ -9173,12 +9293,23 @@ app.post('/api/paystack/webhook', async (req, res) => {
       const paidAmount = amount / 100;
       const paystackFee = (event.data.fees || 0) / 100;
 
-      // Update Transaction status
+      // Update Transaction status & itemized breakdown
       await pool.query(
         `UPDATE transactions 
-         SET status = 'Completed', paystack_fee = $1 
-         WHERE reference = $2 OR (user_id = $3 AND amount = $4 AND status = 'Pending')`,
-        [paystackFee, reference, metadata?.payer_id, paidAmount]
+         SET status = 'Completed', paystack_fee = $1,
+             owner_share_amount = COALESCE($2, owner_share_amount),
+             agency_share_amount = COALESCE($3, agency_share_amount),
+             propadi_fee_amount = COALESCE($4, propadi_fee_amount)
+         WHERE reference = $5 OR (user_id = $6 AND amount = $7 AND status = 'Pending')`,
+        [
+          paystackFee,
+          metadata?.owner_share || null,
+          metadata?.agency_share || null,
+          metadata?.platform_commission || null,
+          reference,
+          metadata?.payer_id,
+          paidAmount,
+        ]
       );
 
       // Handle Rent Payment
@@ -9189,9 +9320,29 @@ app.post('/api/paystack/webhook', async (req, res) => {
            WHERE tenancy_id = $2`,
           [reference, metadata.tenancy_id]
         );
-        // Push notification to Landlord & Renter
+
+        // Push notification to Property Owner & Appointed Agency
         if (metadata?.recipient_id) {
-          await sendPushToUser(metadata.recipient_id, '💰 Rent Received', `Rent payment of ₦${paidAmount.toLocaleString()} has been processed to your bank account via Paystack.`);
+          await sendPushToUser(
+            metadata.recipient_id,
+            '💰 Rent Received',
+            `Rent payment of ₦${paidAmount.toLocaleString()} has been processed and routed via Paystack Multi-Split.`
+          );
+        }
+
+        if (metadata?.agency_subaccount_code) {
+          // Find Agency User ID to send Push Notification
+          const agencyUserRes = await pool.query(
+            `SELECT user_id FROM agents WHERE paystack_subaccount_code = $1 LIMIT 1`,
+            [metadata.agency_subaccount_code]
+          );
+          if (agencyUserRes.rows.length > 0) {
+            await sendPushToUser(
+              agencyUserRes.rows[0].user_id,
+              '🎉 Agency Commission Settled',
+              `Your agency commission of ₦${parseFloat(metadata.agency_share || 0).toLocaleString()} has been credited to your linked business bank account!`
+            );
+          }
         }
       }
 
