@@ -125,6 +125,21 @@ const pool = new Pool({
 
       CREATE UNIQUE INDEX IF NOT EXISTS idx_agent_assignments_agent_property ON agent_assignments (agent_id, property_id);
 
+      ALTER TABLE agent_assignments DROP CONSTRAINT IF EXISTS agent_assignments_status_check;
+
+      ALTER TABLE agent_assignments
+      ADD CONSTRAINT agent_assignments_status_check CHECK (
+        status IN (
+          'pending_acceptance',
+          'accepted_pending_signature',
+          'active',
+          'declined',
+          'terminated',
+          'revoked',
+          'pending'
+        )
+      );
+
       CREATE TABLE IF NOT EXISTS property_views (
         view_id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
         property_id UUID NOT NULL REFERENCES properties(property_id) ON DELETE CASCADE,

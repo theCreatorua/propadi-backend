@@ -14,7 +14,7 @@ ADD COLUMN IF NOT EXISTS contract_terms JSONB;
 -- Ensure UNIQUE index exists for ON CONFLICT (agent_id, property_id)
 CREATE UNIQUE INDEX IF NOT EXISTS idx_agent_assignments_agent_property ON public.agent_assignments (agent_id, property_id);
 
--- Drop status check constraint if it restricts Phase 2 statuses
+-- Drop old status check constraint if it restricts Phase 2 statuses
 ALTER TABLE public.agent_assignments DROP CONSTRAINT IF EXISTS agent_assignments_status_check;
 
 ALTER TABLE public.agent_assignments
@@ -24,6 +24,8 @@ ADD CONSTRAINT agent_assignments_status_check CHECK (
     'accepted_pending_signature',
     'active',
     'declined',
-    'terminated'
+    'terminated',
+    'revoked',
+    'pending'
   )
 );
