@@ -9382,7 +9382,9 @@ app.post('/api/agents/respond-assignment', async (req, res) => {
        ADD COLUMN IF NOT EXISTS bank_name VARCHAR(100),
        ADD COLUMN IF NOT EXISTS bank_code VARCHAR(20),
        ADD COLUMN IF NOT EXISTS account_number VARCHAR(20),
-       ADD COLUMN IF NOT EXISTS account_name VARCHAR(255);`
+       ADD COLUMN IF NOT EXISTS account_name VARCHAR(255);
+       
+       ALTER TABLE agent_assignments ALTER COLUMN status TYPE VARCHAR(50);`
     );
 
     const currentAss = await pool.query(
