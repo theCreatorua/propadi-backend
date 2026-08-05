@@ -8928,10 +8928,19 @@ app.post('/api/paystack/create-subaccount', async (req, res) => {
       );
     } else if (role === 'agency' || role === 'agent') {
       await pool.query(
+        `ALTER TABLE agents 
+         ADD COLUMN IF NOT EXISTS paystack_subaccount_code VARCHAR(100),
+         ADD COLUMN IF NOT EXISTS bank_name VARCHAR(100),
+         ADD COLUMN IF NOT EXISTS bank_code VARCHAR(20),
+         ADD COLUMN IF NOT EXISTS account_number VARCHAR(20),
+         ADD COLUMN IF NOT EXISTS account_name VARCHAR(255);`
+      );
+
+      await pool.query(
         `UPDATE agents 
-         SET paystack_subaccount_code = $1 
-         WHERE user_id = $2`,
-        [subaccountCode, user.id]
+         SET paystack_subaccount_code = $1, bank_name = $2, bank_code = $3, account_number = $4, account_name = $5 
+         WHERE user_id = $6`,
+        [subaccountCode, bank_name, bank_code, account_number, account_name, user.id]
       );
     }
 
@@ -9326,10 +9335,13 @@ app.get('/api/agents/assignment-preview/:assignmentId', async (req, res) => {
               p.is_caution_waived,
               '[Masked until agreement signed]' as address_street,
               u.name as owner_name,
-              u.email as owner_email
+              u.email as owner_email,
+              (COALESCE(ag.paystack_subaccount_code, u_agent.paystack_subaccount_code) IS NOT NULL AND COALESCE(ag.paystack_subaccount_code, u_agent.paystack_subaccount_code) != '') as agent_has_business_bank
        FROM agent_assignments aa
        JOIN properties p ON aa.property_id = p.property_id
        JOIN users u ON aa.owner_id = u.user_id
+       LEFT JOIN agents ag ON aa.agent_id = ag.agent_id
+       LEFT JOIN users u_agent ON ag.user_id = u_agent.user_id
        WHERE aa.assignment_id = $1`,
       [assignmentId]
     );
@@ -9353,13 +9365,30 @@ app.post('/api/agents/respond-assignment', async (req, res) => {
       return res.status(400).json({ success: false, error: 'Assignment ID and response (accept/decline) are required.' });
     }
 
-    const currentAss = await pool.query(`SELECT * FROM agent_assignments WHERE assignment_id = $1`, [assignmentId]);
+    const currentAss = await pool.query(
+      `SELECT aa.*, ag.user_id as agent_user_id,
+              COALESCE(ag.paystack_subaccount_code, u_agent.paystack_subaccount_code) as subaccount_code
+       FROM agent_assignments aa
+       JOIN agents ag ON aa.agent_id = ag.agent_id
+       JOIN users u_agent ON ag.user_id = u_agent.user_id
+       WHERE aa.assignment_id = $1`,
+      [assignmentId]
+    );
     if (currentAss.rows.length === 0) {
       return res.status(404).json({ success: false, error: 'Assignment not found.' });
     }
     const assignment = currentAss.rows[0];
 
     if (response === 'accept') {
+      // Require agency business payout bank account before accepting delegation
+      if (!assignment.subaccount_code || assignment.subaccount_code.trim() === '') {
+        return res.status(400).json({
+          success: false,
+          requires_bank_setup: true,
+          error: 'Business Payout Account Required: Please link your Agency Corporate Bank Account before accepting property delegations.',
+        });
+      }
+
       const updated = await pool.query(
         `UPDATE agent_assignments
          SET status = 'accepted_pending_signature', accepted_at = CURRENT_TIMESTAMP
