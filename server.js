@@ -2012,7 +2012,7 @@ app.get('/api/tenancies/expiring/owner/:ownerId', async (req, res) => {
   try {
     const { ownerId } = req.params;
     const result = await pool.query(
-      `SELECT t.tenancy_id, t.property_id, t.renter_id, t.rent_amount, t.lease_start_date, t.lease_end_date,
+      `SELECT t.tenancy_id, t.property_id, t.renter_id, t.rent_amount, t.rent_period, t.lease_start_date, t.lease_end_date,
               t.payment_status, t.status as tenancy_status, p.title as property_title, p.address_street,
               p.address_city, p.main_image_url, COALESCE(u.name, 'Valued Occupant') as renter_name,
               u.email as renter_email, u.phone as renter_phone,
@@ -2023,7 +2023,7 @@ app.get('/api/tenancies/expiring/owner/:ownerId', async (req, res) => {
        LEFT JOIN users u ON t.renter_id = u.user_id
        LEFT JOIN tenancies r ON r.renewal_of_tenancy_id = t.tenancy_id
        WHERE (t.owner_id = $1 OR p.owner_id = $1 OR p.user_id = $1)
-         AND (t.renewal_of_tenancy_id IS NULL OR CAST(t.renewal_of_tenancy_id AS VARCHAR) = '' OR t.renewal_of_tenancy_id = '00000000-0000-0000-0000-000000000000')
+         AND t.renewal_of_tenancy_id IS NULL
        ORDER BY t.lease_end_date ASC NULLS LAST`,
       [ownerId],
     );
@@ -2040,7 +2040,7 @@ app.get('/api/tenancies/expiring/renter/:renterId', async (req, res) => {
   try {
     const { renterId } = req.params;
     const result = await pool.query(
-      `SELECT t.tenancy_id, t.property_id, t.owner_id, t.rent_amount, t.lease_start_date, t.lease_end_date,
+      `SELECT t.tenancy_id, t.property_id, t.owner_id, t.rent_amount, t.rent_period, t.lease_start_date, t.lease_end_date,
               t.payment_status, p.title as property_title, p.address_street, p.address_city, p.main_image_url,
               p.service_charge, COALESCE(o.name, 'Property Owner') as owner_name, o.email as owner_email, o.phone as owner_phone,
               r.tenancy_id as renewal_tenancy_id, r.rent_amount as new_rent_amount, r.lease_start_date as new_lease_start,
@@ -2049,8 +2049,8 @@ app.get('/api/tenancies/expiring/renter/:renterId', async (req, res) => {
        LEFT JOIN properties p ON t.property_id = p.property_id
        LEFT JOIN users o ON (t.owner_id = o.user_id OR p.owner_id = o.user_id OR p.user_id = o.user_id)
        LEFT JOIN tenancies r ON r.renewal_of_tenancy_id = t.tenancy_id
-       WHERE (t.renter_id = $1 OR t.application_id IN (SELECT application_id FROM rental_applications WHERE applicant_id = $1))
-         AND (t.renewal_of_tenancy_id IS NULL OR CAST(t.renewal_of_tenancy_id AS VARCHAR) = '' OR t.renewal_of_tenancy_id = '00000000-0000-0000-0000-000000000000')
+       WHERE (t.renter_id = $1 OR t.application_id IN (SELECT application_id FROM applications WHERE renter_id = $1))
+         AND t.renewal_of_tenancy_id IS NULL
        ORDER BY t.lease_end_date ASC NULLS LAST`,
       [renterId],
     );
