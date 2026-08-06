@@ -60,7 +60,17 @@ const pool = new Pool({
       ADD COLUMN IF NOT EXISTS brand_name VARCHAR(255),
       ADD COLUMN IF NOT EXISTS total_units INTEGER DEFAULT 1,
       ADD COLUMN IF NOT EXISTS agent_involvement VARCHAR(50) DEFAULT 'Self-Managed',
-      ADD COLUMN IF NOT EXISTS proof_of_ownership_docs TEXT[];
+      ADD COLUMN IF NOT EXISTS proof_of_ownership_docs TEXT[],
+      ADD COLUMN IF NOT EXISTS service_charge NUMERIC(12, 2) DEFAULT 0.00,
+      ADD COLUMN IF NOT EXISTS caution_fee NUMERIC(12, 2) DEFAULT 0.00,
+      ADD COLUMN IF NOT EXISTS legal_fee_percent NUMERIC(5, 2) DEFAULT 5.00,
+      ADD COLUMN IF NOT EXISTS agency_fee_percent NUMERIC(5, 2) DEFAULT 0.00,
+      ADD COLUMN IF NOT EXISTS early_bird_discount_percent NUMERIC(5, 2) DEFAULT 5.00,
+      ADD COLUMN IF NOT EXISTS is_caution_waived BOOLEAN DEFAULT FALSE;
+
+      UPDATE properties
+      SET early_bird_discount_percent = 5.00
+      WHERE early_bird_discount_percent IS NULL OR early_bird_discount_percent = 0;
 
       CREATE TABLE IF NOT EXISTS saved_properties (
         saved_id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
