@@ -9047,6 +9047,44 @@ app.get('/api/paystack/subaccount/:userId', async (req, res) => {
     });
   } catch (err) {
     console.error('Fetch subaccount error:', err);
+// 4c. Delete / Unlink Purpose Payout Bank Account
+app.delete('/api/paystack/subaccount/:userId/:purpose', async (req, res) => {
+  try {
+    const authHeader = req.headers.authorization;
+    if (!authHeader) return res.status(401).json({ success: false, error: 'Unauthorized' });
+    const token = authHeader.split(' ')[1];
+    const { data: { user }, error } = await supabase.auth.getUser(token);
+    if (error || !user || user.id !== req.params.userId) {
+      return res.status(401).json({ success: false, error: 'Unauthorized' });
+    }
+
+    const { userId, purpose } = req.params;
+    await pool.query(
+      `DELETE FROM user_bank_accounts WHERE user_id = $1 AND account_purpose = $2`,
+      [userId, purpose]
+    );
+
+    // Clear legacy table columns if purpose matches
+    if (purpose === 'landlord' || purpose === 'owner') {
+      await pool.query(
+        `UPDATE users SET bank_name = NULL, bank_code = NULL, account_number = NULL, account_name = NULL, paystack_subaccount_code = NULL, is_bank_verified = FALSE WHERE user_id = $1`,
+        [userId]
+      );
+    } else if (purpose === 'agency' || purpose === 'agent') {
+      await pool.query(
+        `UPDATE agents SET bank_name = NULL, bank_code = NULL, account_number = NULL, account_name = NULL, paystack_subaccount_code = NULL WHERE user_id = $1`,
+        [userId]
+      );
+    } else if (purpose === 'service_provider' || purpose === 'provider') {
+      await pool.query(
+        `UPDATE service_providers SET bank_name = NULL, bank_code = NULL, account_number = NULL, account_name = NULL, paystack_subaccount_code = NULL WHERE provider_id = $1`,
+        [userId]
+      );
+    }
+
+    res.json({ success: true, message: 'Purpose payout account unlinked successfully.' });
+  } catch (err) {
+    console.error('Delete subaccount error:', err);
     res.status(500).json({ success: false, error: err.message });
   }
 });
