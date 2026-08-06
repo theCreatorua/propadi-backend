@@ -80,6 +80,27 @@ const pool = new Pool({
         UNIQUE(user_id, property_id)
       );
 
+      CREATE TABLE IF NOT EXISTS periodic_safety_checks (
+        check_id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+        tenancy_id UUID NOT NULL REFERENCES tenancies(tenancy_id) ON DELETE CASCADE,
+        renter_id UUID NOT NULL REFERENCES users(user_id) ON DELETE CASCADE,
+        property_id UUID NOT NULL REFERENCES properties(property_id) ON DELETE CASCADE,
+        owner_id UUID NOT NULL REFERENCES users(user_id) ON DELETE CASCADE,
+        overall_condition VARCHAR(50) NOT NULL,
+        plumbing_status VARCHAR(50) DEFAULT 'Good',
+        electrical_status VARCHAR(50) DEFAULT 'Good',
+        ac_repair_status VARCHAR(50) DEFAULT 'Good',
+        painting_status VARCHAR(50) DEFAULT 'Good',
+        cleaning_status VARCHAR(50) DEFAULT 'Good',
+        general_repairs_status VARCHAR(50) DEFAULT 'Good',
+        damp_mold_status VARCHAR(50) DEFAULT 'None',
+        structural_roof_status VARCHAR(50) DEFAULT 'Good',
+        notes TEXT,
+        photo_evidence_urls TEXT[],
+        severity_level VARCHAR(20) DEFAULT 'normal',
+        created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
+      );
+
       CREATE TABLE IF NOT EXISTS agents (
         agent_id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
         user_id UUID NOT NULL REFERENCES users(user_id) ON DELETE CASCADE UNIQUE,
@@ -8816,6 +8837,164 @@ app.post('/api/cron/check-safety-pulses', async (req, res) => {
     res.json({ success: true, processed });
   } catch (err) {
     console.error('Safety pulse cron error:', err);
+    res.status(500).json({ success: false, error: err.message });
+  }
+});
+
+// ==========================================
+// PHASE 4: OCCUPANT SAFETY & PERIODIC MAINTENANCE CHECK API
+// ==========================================
+
+// 1. Spool all active signed tenancies for a Renter
+app.get('/api/tenancies/active/renter/:renterId', async (req, res) => {
+  try {
+    const { renterId } = req.params;
+    const result = await pool.query(
+      `SELECT t.tenancy_id, t.property_id, t.owner_id, t.rent_amount, t.rent_period, t.status as tenancy_status, t.payment_status,
+              p.title as property_title, p.address_street, p.address_city, p.address_state, p.main_image_url, p.category,
+              u_owner.name as owner_name, u_owner.email as owner_email, u_owner.phone_number as owner_phone
+       FROM tenancies t
+       JOIN properties p ON t.property_id = p.property_id
+       JOIN users u_owner ON t.owner_id = u_owner.user_id
+       WHERE t.renter_id = $1 
+         AND (LOWER(t.status) IN ('signed', 'active') OR LOWER(t.payment_status) = 'paid')
+       ORDER BY t.lease_end_date ASC`,
+      [renterId]
+    );
+    res.json({ success: true, tenancies: result.rows });
+  } catch (err) {
+    console.error('Fetch active tenancies error:', err);
+    res.status(500).json({ success: false, error: err.message });
+  }
+});
+
+// 2. Submit Periodic Property Condition & Safety Health Check
+app.post('/api/safety/periodic-check', async (req, res) => {
+  try {
+    const {
+      tenancy_id,
+      renter_id,
+      property_id,
+      owner_id,
+      overall_condition,
+      plumbing_status,
+      electrical_status,
+      ac_repair_status,
+      painting_status,
+      cleaning_status,
+      general_repairs_status,
+      damp_mold_status,
+      structural_roof_status,
+      notes,
+      photo_evidence_urls,
+      severity_level,
+    } = req.body;
+
+    if (!tenancy_id || !renter_id || !property_id || !owner_id || !overall_condition) {
+      return res.status(400).json({ success: false, error: 'Missing required inspection fields' });
+    }
+
+    const result = await pool.query(
+      `INSERT INTO periodic_safety_checks (
+        tenancy_id, renter_id, property_id, owner_id, overall_condition,
+        plumbing_status, electrical_status, ac_repair_status, painting_status,
+        cleaning_status, general_repairs_status, damp_mold_status,
+        structural_roof_status, notes, photo_evidence_urls, severity_level
+       ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16)
+       RETURNING *`,
+      [
+        tenancy_id,
+        renter_id,
+        property_id,
+        owner_id,
+        overall_condition,
+        plumbing_status || 'Good',
+        electrical_status || 'Good',
+        ac_repair_status || 'Good',
+        painting_status || 'Good',
+        cleaning_status || 'Good',
+        general_repairs_status || 'Good',
+        damp_mold_status || 'None',
+        structural_roof_status || 'Good',
+        notes || null,
+        photo_evidence_urls || [],
+        severity_level || 'normal',
+      ]
+    );
+
+    const checkRecord = result.rows[0];
+
+    // Push notification to Landlord
+    try {
+      const isUrgent = severity_level === 'emergency' || overall_condition === 'Urgent Repairs Needed';
+      const notifTitle = isUrgent ? '🚨 Urgent Property Health Check' : '📋 Periodic Property Health Check';
+      const notifBody = isUrgent
+        ? `Tenant submitted an URGENT periodic condition check for your property. Immediate attention required.`
+        : `Tenant submitted a routine periodic condition check. Overall state: ${overall_condition}.`;
+
+      await sendPushToUser(owner_id, notifTitle, notifBody, {
+        screen: 'Maintenance',
+        check_id: checkRecord.check_id,
+      });
+
+      if (isUrgent) {
+        // Also alert admins
+        const adminUsers = await pool.query('SELECT user_id FROM users WHERE is_admin = TRUE');
+        for (const admin of adminUsers.rows) {
+          await sendPushToUser(admin.user_id, '🚨 High Severity Property Inspection', `Urgent repairs flagged by renter for property. Check Admin Oversight.`, {
+            screen: 'AdminMaintenance',
+            check_id: checkRecord.check_id,
+          });
+        }
+      }
+    } catch (pushErr) {
+      console.error('Push notification error on periodic check:', pushErr);
+    }
+
+    res.json({ success: true, check: checkRecord, message: 'Periodic property health check submitted successfully.' });
+  } catch (err) {
+    console.error('Periodic safety check submission error:', err);
+    res.status(500).json({ success: false, error: err.message });
+  }
+});
+
+// 3. Admin Oversight: Fetch all periodic property health checks
+app.get('/api/admin/safety-checks', requireAdmin, async (req, res) => {
+  try {
+    const { severity, limit = 50, offset = 0 } = req.query;
+    let query = `
+      SELECT psc.*,
+             p.title as property_title, p.address_street, p.address_city, p.address_state,
+             u_renter.name as renter_name, u_renter.email as renter_email, u_renter.phone_number as renter_phone,
+             u_owner.name as owner_name, u_owner.email as owner_email, u_owner.phone_number as owner_phone
+      FROM periodic_safety_checks psc
+      JOIN properties p ON psc.property_id = p.property_id
+      JOIN users u_renter ON psc.renter_id = u_renter.user_id
+      JOIN users u_owner ON psc.owner_id = u_owner.user_id
+      WHERE 1=1
+    `;
+    const values = [];
+    let paramIndex = 1;
+
+    if (severity && severity !== 'all') {
+      query += ` AND psc.severity_level = $${paramIndex}`;
+      values.push(severity);
+      paramIndex++;
+    }
+
+    query += ` ORDER BY psc.created_at DESC LIMIT $${paramIndex} OFFSET $${paramIndex + 1}`;
+    values.push(parseInt(limit), parseInt(offset));
+
+    const result = await pool.query(query, values);
+    const countResult = await pool.query('SELECT COUNT(*) as total FROM periodic_safety_checks');
+
+    res.json({
+      success: true,
+      checks: result.rows,
+      total: parseInt(countResult.rows[0].total),
+    });
+  } catch (err) {
+    console.error('Admin fetch periodic safety checks error:', err);
     res.status(500).json({ success: false, error: err.message });
   }
 });
