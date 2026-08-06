@@ -9299,6 +9299,304 @@ app.get('/api/properties/:id/occupant-reviews', async (req, res) => {
   }
 });
 
+// ==========================================
+// PHASE 5: TENANCY TERMINATION & EARLY LEASE VACATE ENGINE
+// ==========================================
+
+// Create tenancy_terminations table schema
+(async () => {
+  try {
+    await pool.query(`
+      CREATE TABLE IF NOT EXISTS tenancy_terminations (
+        termination_id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+        tenancy_id UUID REFERENCES tenancies(tenancy_id) ON DELETE CASCADE,
+        property_id UUID REFERENCES properties(property_id) ON DELETE CASCADE,
+        renter_id UUID REFERENCES users(user_id) ON DELETE CASCADE,
+        owner_id UUID REFERENCES users(user_id) ON DELETE CASCADE,
+        vacate_reason TEXT NOT NULL,
+        target_vacate_date DATE NOT NULL,
+        notice_period_days INTEGER DEFAULT 30,
+        occupied_months INTEGER DEFAULT 0,
+        unexpired_months INTEGER DEFAULT 0,
+        occupied_rent_amount NUMERIC(12,2) DEFAULT 0.00,
+        unexpired_rent_amount NUMERIC(12,2) DEFAULT 0.00,
+        early_exit_fee NUMERIC(12,2) DEFAULT 0.00,
+        damage_deduction_amount NUMERIC(12,2) DEFAULT 0.00,
+        damage_deduction_reason TEXT,
+        caution_deposit_refund_amount NUMERIC(12,2) DEFAULT 0.00,
+        total_renter_payout NUMERIC(12,2) DEFAULT 0.00,
+        settlement_mode VARCHAR(50) DEFAULT 'relist_replacement',
+        renter_bank_code VARCHAR(50),
+        renter_account_number VARCHAR(50),
+        renter_account_name VARCHAR(100),
+        renter_notes TEXT,
+        move_out_photo_urls TEXT[] DEFAULT '{}',
+        status VARCHAR(50) DEFAULT 'pending_owner_review',
+        created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
+        resolved_at TIMESTAMP WITH TIME ZONE
+      );
+    `);
+    console.log('Phase 5 tenancy_terminations table ready.');
+  } catch (err) {
+    console.error('Error creating tenancy_terminations table:', err);
+  }
+})();
+
+// 1. Submit Early Lease Termination Request (Renter)
+app.post('/api/tenancies/terminate-request', async (req, res) => {
+  try {
+    const {
+      tenancy_id,
+      renter_id,
+      vacate_reason,
+      target_vacate_date,
+      notice_period_days,
+      renter_bank_code,
+      renter_account_number,
+      renter_account_name,
+      renter_notes,
+      move_out_photo_urls,
+    } = req.body;
+
+    if (!tenancy_id || !renter_id || !vacate_reason || !target_vacate_date) {
+      return res.status(400).json({ success: false, error: 'Missing required termination fields.' });
+    }
+
+    // Fetch active tenancy details
+    const tenancyRes = await pool.query(
+      `SELECT t.*, p.title as property_title, p.caution_deposit
+       FROM tenancies t
+       JOIN properties p ON t.property_id = p.property_id
+       WHERE t.tenancy_id = $1 AND t.renter_id = $2`,
+      [tenancy_id, renter_id]
+    );
+
+    if (tenancyRes.rows.length === 0) {
+      return res.status(404).json({ success: false, error: 'Active tenancy not found.' });
+    }
+
+    const tenancy = tenancyRes.rows[0];
+    const annualRent = parseFloat(tenancy.rent_amount || 0);
+
+    // Calculate occupied vs unexpired months
+    const startDate = new Date(tenancy.lease_start_date || tenancy.created_at || Date.now());
+    const vacateDate = new Date(target_vacate_date);
+    
+    let occupiedMonths = Math.max(1, Math.round((vacateDate.getTime() - startDate.getTime()) / (1000 * 60 * 60 * 24 * 30.43)));
+    occupiedMonths = Math.min(12, occupiedMonths);
+    const unexpiredMonths = Math.max(0, 12 - occupiedMonths);
+
+    const occupiedRent = Math.round((occupiedMonths / 12) * annualRent * 100) / 100;
+    const unexpiredRent = Math.round((unexpiredMonths / 12) * annualRent * 100) / 100;
+    const cautionDeposit = parseFloat(tenancy.caution_deposit || 0);
+
+    // Insert termination record
+    const insertRes = await pool.query(
+      `INSERT INTO tenancy_terminations (
+        tenancy_id, property_id, renter_id, owner_id, vacate_reason, target_vacate_date,
+        notice_period_days, occupied_months, unexpired_months, occupied_rent_amount,
+        unexpired_rent_amount, caution_deposit_refund_amount, total_renter_payout,
+        renter_bank_code, renter_account_number, renter_account_name, renter_notes,
+        move_out_photo_urls, status
+      ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, 'pending_owner_review')
+      RETURNING *`,
+      [
+        tenancy.tenancy_id,
+        tenancy.property_id,
+        renter_id,
+        tenancy.owner_id,
+        vacate_reason,
+        target_vacate_date,
+        notice_period_days || 30,
+        occupiedMonths,
+        unexpiredMonths,
+        occupiedRent,
+        unexpiredRent,
+        cautionDeposit,
+        unexpiredRent + cautionDeposit,
+        renter_bank_code || '',
+        renter_account_number || '',
+        renter_account_name || '',
+        renter_notes || '',
+        move_out_photo_urls || [],
+      ]
+    );
+
+    // Update tenancy status
+    await pool.query(
+      `UPDATE tenancies SET status = 'termination_requested' WHERE tenancy_id = $1`,
+      [tenancy.tenancy_id]
+    );
+
+    // Notify Landlord
+    await sendPushToUser(
+      tenancy.owner_id,
+      '📋 Early Tenancy Termination Request',
+      `Tenant has submitted an early vacate request for "${tenancy.property_title}". Tap to review settlement terms.`,
+      { screen: 'LandlordTenancySettlement', termination_id: insertRes.rows[0].termination_id }
+    );
+
+    res.json({ success: true, termination: insertRes.rows[0] });
+  } catch (err) {
+    console.error('Terminate request error:', err);
+    res.status(500).json({ success: false, error: err.message });
+  }
+});
+
+// 2. Fetch Active Termination Requests for Renter
+app.get('/api/tenancies/terminations/renter/:renterId', async (req, res) => {
+  try {
+    const { renterId } = req.params;
+    const result = await pool.query(
+      `SELECT term.*, p.title as property_title, p.main_image_url, u_owner.name as owner_name
+       FROM tenancy_terminations term
+       JOIN properties p ON term.property_id = p.property_id
+       JOIN users u_owner ON term.owner_id = u_owner.user_id
+       WHERE term.renter_id = $1
+       ORDER BY term.created_at DESC`,
+      [renterId]
+    );
+    res.json({ success: true, terminations: result.rows });
+  } catch (err) {
+    console.error('Renter terminations fetch error:', err);
+    res.status(500).json({ success: false, error: err.message });
+  }
+});
+
+// 3. Fetch Pending Early Vacate Requests for Landlord
+app.get('/api/tenancies/terminations/owner/:ownerId', async (req, res) => {
+  try {
+    const { ownerId } = req.params;
+    const result = await pool.query(
+      `SELECT term.*, p.title as property_title, p.main_image_url, p.caution_deposit,
+              u_renter.name as renter_name, u_renter.email as renter_email, u_renter.phone_number as renter_phone
+       FROM tenancy_terminations term
+       JOIN properties p ON term.property_id = p.property_id
+       JOIN users u_renter ON term.renter_id = u_renter.user_id
+       WHERE term.owner_id = $1
+       ORDER BY term.created_at DESC`,
+      [ownerId]
+    );
+    res.json({ success: true, terminations: result.rows });
+  } catch (err) {
+    console.error('Landlord terminations fetch error:', err);
+    res.status(500).json({ success: false, error: err.message });
+  }
+});
+
+// 4. Landlord Settlement & Audit Approval
+app.post('/api/tenancies/terminations/settle', async (req, res) => {
+  try {
+    const {
+      termination_id,
+      owner_id,
+      settlement_mode, // 'relist_replacement', 'immediate_payout', 'deduct_notice_fee'
+      early_exit_fee,
+      damage_deduction_amount,
+      damage_deduction_reason,
+    } = req.body;
+
+    const termRes = await pool.query(
+      `SELECT term.*, p.title as property_title, p.caution_deposit
+       FROM tenancy_terminations term
+       JOIN properties p ON term.property_id = p.property_id
+       WHERE term.termination_id = $1 AND term.owner_id = $2`,
+      [termination_id, owner_id]
+    );
+
+    if (termRes.rows.length === 0) {
+      return res.status(404).json({ success: false, error: 'Termination record not found.' });
+    }
+
+    const term = termRes.rows[0];
+    const exitFee = parseFloat(early_exit_fee || 0);
+    const damageDeduction = parseFloat(damage_deduction_amount || 0);
+    const unexpiredRent = parseFloat(term.unexpired_rent_amount || 0);
+    const cautionDeposit = parseFloat(term.caution_deposit_refund_amount || term.caution_deposit || 0);
+
+    const netCautionDeposit = Math.max(0, cautionDeposit - damageDeduction);
+    const netUnexpiredRent = Math.max(0, unexpiredRent - exitFee);
+    const totalPayout = netCautionDeposit + netUnexpiredRent;
+
+    let newStatus = 'relisted_pending_new_tenant';
+    if (settlement_mode === 'immediate_payout') {
+      newStatus = 'completed';
+    }
+
+    // Update termination record
+    const updateRes = await pool.query(
+      `UPDATE tenancy_terminations
+       SET settlement_mode = $1,
+           early_exit_fee = $2,
+           damage_deduction_amount = $3,
+           damage_deduction_reason = $4,
+           caution_deposit_refund_amount = $5,
+           total_renter_payout = $6,
+           status = $7,
+           resolved_at = CURRENT_TIMESTAMP
+       WHERE termination_id = $8
+       RETURNING *`,
+      [
+        settlement_mode || 'relist_replacement',
+        exitFee,
+        damageDeduction,
+        damage_deduction_reason || '',
+        netCautionDeposit,
+        totalPayout,
+        newStatus,
+        termination_id,
+      ]
+    );
+
+    // If relist_replacement mode: Re-list property back on Propadi marketplace
+    await pool.query(
+      `UPDATE properties SET is_available = true, is_published = true WHERE property_id = $1`,
+      [term.property_id]
+    );
+
+    // If immediate_payout: Mark tenancy terminated
+    if (settlement_mode === 'immediate_payout') {
+      await pool.query(
+        `UPDATE tenancies SET status = 'terminated' WHERE tenancy_id = $1`,
+        [term.tenancy_id]
+      );
+    }
+
+    // Notify Renter
+    await sendPushToUser(
+      term.renter_id,
+      '🤝 Vacate Settlement Approved',
+      `Landlord has approved settlement terms for "${term.property_title}". Net payout: ₦${totalPayout.toLocaleString()}. Mode: ${settlement_mode}.`,
+      { screen: 'TenancyTerminationDetails', termination_id }
+    );
+
+    res.json({ success: true, termination: updateRes.rows[0] });
+  } catch (err) {
+    console.error('Settle termination error:', err);
+    res.status(500).json({ success: false, error: err.message });
+  }
+});
+
+// 5. Admin Termination & Dispute Hub Endpoint
+app.get('/api/admin/tenancy-terminations', async (req, res) => {
+  try {
+    const result = await pool.query(
+      `SELECT term.*, p.title as property_title, p.address_city,
+              u_renter.name as renter_name, u_renter.email as renter_email,
+              u_owner.name as owner_name, u_owner.email as owner_email
+       FROM tenancy_terminations term
+       JOIN properties p ON term.property_id = p.property_id
+       JOIN users u_renter ON term.renter_id = u_renter.user_id
+       JOIN users u_owner ON term.owner_id = u_owner.user_id
+       ORDER BY term.created_at DESC`
+    );
+    res.json({ success: true, terminations: result.rows });
+  } catch (err) {
+    console.error('Admin terminations error:', err);
+    res.status(500).json({ success: false, error: err.message });
+  }
+});
+
 
 
 // ==========================================
