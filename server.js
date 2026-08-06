@@ -2014,15 +2014,17 @@ app.get('/api/tenancies/expiring/owner/:ownerId', async (req, res) => {
     const result = await pool.query(
       `SELECT t.tenancy_id, t.property_id, t.renter_id, t.rent_amount, t.lease_start_date, t.lease_end_date,
               t.payment_status, t.status as tenancy_status, p.title as property_title, p.address_street,
-              p.address_city, p.main_image_url, u.name as renter_name, u.email as renter_email, u.phone as renter_phone,
+              p.address_city, p.main_image_url, COALESCE(u.name, 'Valued Occupant') as renter_name,
+              u.email as renter_email, u.phone as renter_phone,
               r.tenancy_id as renewal_tenancy_id, r.rent_amount as renewal_rent_amount, r.renewal_status,
               r.date_created as renewal_date_created
        FROM tenancies t
-       JOIN properties p ON t.property_id = p.property_id
-       JOIN users u ON t.renter_id = u.user_id
+       LEFT JOIN properties p ON t.property_id = p.property_id
+       LEFT JOIN users u ON t.renter_id = u.user_id
        LEFT JOIN tenancies r ON r.renewal_of_tenancy_id = t.tenancy_id
-       WHERE t.owner_id = $1 AND (t.renewal_of_tenancy_id IS NULL OR t.renewal_of_tenancy_id = '00000000-0000-0000-0000-000000000000')
-       ORDER BY t.lease_end_date ASC`,
+       WHERE (t.owner_id = $1 OR p.owner_id = $1 OR p.user_id = $1)
+         AND (t.renewal_of_tenancy_id IS NULL OR CAST(t.renewal_of_tenancy_id AS VARCHAR) = '' OR t.renewal_of_tenancy_id = '00000000-0000-0000-0000-000000000000')
+       ORDER BY t.lease_end_date ASC NULLS LAST`,
       [ownerId],
     );
 
@@ -2040,15 +2042,16 @@ app.get('/api/tenancies/expiring/renter/:renterId', async (req, res) => {
     const result = await pool.query(
       `SELECT t.tenancy_id, t.property_id, t.owner_id, t.rent_amount, t.lease_start_date, t.lease_end_date,
               t.payment_status, p.title as property_title, p.address_street, p.address_city, p.main_image_url,
-              p.service_charge, o.name as owner_name, o.email as owner_email, o.phone as owner_phone,
+              p.service_charge, COALESCE(o.name, 'Property Owner') as owner_name, o.email as owner_email, o.phone as owner_phone,
               r.tenancy_id as renewal_tenancy_id, r.rent_amount as new_rent_amount, r.lease_start_date as new_lease_start,
               r.lease_end_date as new_lease_end, r.renewal_status, r.date_created as offer_date
        FROM tenancies t
-       JOIN properties p ON t.property_id = p.property_id
-       JOIN users o ON t.owner_id = o.user_id
+       LEFT JOIN properties p ON t.property_id = p.property_id
+       LEFT JOIN users o ON (t.owner_id = o.user_id OR p.owner_id = o.user_id OR p.user_id = o.user_id)
        LEFT JOIN tenancies r ON r.renewal_of_tenancy_id = t.tenancy_id
-       WHERE t.renter_id = $1 AND (t.renewal_of_tenancy_id IS NULL OR t.renewal_of_tenancy_id = '00000000-0000-0000-0000-000000000000')
-       ORDER BY t.lease_end_date ASC`,
+       WHERE (t.renter_id = $1 OR t.application_id IN (SELECT application_id FROM rental_applications WHERE applicant_id = $1))
+         AND (t.renewal_of_tenancy_id IS NULL OR CAST(t.renewal_of_tenancy_id AS VARCHAR) = '' OR t.renewal_of_tenancy_id = '00000000-0000-0000-0000-000000000000')
+       ORDER BY t.lease_end_date ASC NULLS LAST`,
       [renterId],
     );
 
