@@ -70,7 +70,7 @@ const pool = new Pool({
 
       UPDATE properties
       SET early_bird_discount_percent = 0.00
-      WHERE early_bird_discount_percent IS NULL;
+      WHERE early_bird_discount_percent IS NULL OR early_bird_discount_percent = 5.00;
 
       CREATE TABLE IF NOT EXISTS saved_properties (
         saved_id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
