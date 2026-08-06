@@ -1940,7 +1940,7 @@ app.post('/api/tenancies/:id/renew', async (req, res) => {
     await client.query('BEGIN');
 
     const origResult = await client.query(
-      `SELECT t.renter_id, COALESCE(t.owner_id, p.owner_id, p.user_id) as owner_id, t.property_id, t.rent_amount, t.lease_end_date, t.payment_status
+      `SELECT t.renter_id, COALESCE(t.owner_id, p.owner_id) as owner_id, t.property_id, t.rent_amount, t.lease_end_date, t.payment_status
        FROM tenancies t
        LEFT JOIN properties p ON t.property_id = p.property_id
        WHERE t.tenancy_id = $1 FOR UPDATE`,
@@ -2026,7 +2026,7 @@ app.get('/api/tenancies/expiring/owner/:ownerId', async (req, res) => {
        LEFT JOIN properties p ON t.property_id = p.property_id
        LEFT JOIN users u ON t.renter_id = u.user_id
        LEFT JOIN tenancies r ON r.renewal_of_tenancy_id = t.tenancy_id
-       WHERE (t.owner_id = $1 OR p.owner_id = $1 OR p.user_id = $1)
+       WHERE (t.owner_id = $1 OR p.owner_id = $1)
          AND t.renewal_of_tenancy_id IS NULL
        ORDER BY t.tenancy_id, r.date_created DESC`,
       [ownerId],
@@ -2052,7 +2052,7 @@ app.get('/api/tenancies/expiring/renter/:renterId', async (req, res) => {
               r.lease_end_date as new_lease_end, r.renewal_status, r.date_created as offer_date
        FROM tenancies t
        LEFT JOIN properties p ON t.property_id = p.property_id
-       LEFT JOIN users o ON (t.owner_id = o.user_id OR p.owner_id = o.user_id OR p.user_id = o.user_id)
+       LEFT JOIN users o ON (t.owner_id = o.user_id OR p.owner_id = o.user_id)
        LEFT JOIN tenancies r ON r.renewal_of_tenancy_id = t.tenancy_id
        WHERE (t.renter_id = $1 OR t.application_id IN (SELECT application_id FROM applications WHERE renter_id = $1))
          AND t.renewal_of_tenancy_id IS NULL
@@ -10026,11 +10026,11 @@ app.post('/api/payments/initialize-split', async (req, res) => {
     // Determine Property Owner & Appointed Agency Subaccounts
     if (property_id) {
       const propRes = await pool.query(
-        `SELECT p.user_id as owner_id, u.paystack_subaccount_code as owner_subaccount,
+        `SELECT p.owner_id as owner_id, u.paystack_subaccount_code as owner_subaccount,
                 aa.agent_id, aa.commission_rate, ag.paystack_subaccount_code as agency_subaccount,
                 u_agent.paystack_subaccount_code as user_agent_subaccount
          FROM properties p
-         JOIN users u ON p.user_id = u.user_id
+         JOIN users u ON p.owner_id = u.user_id
          LEFT JOIN agent_assignments aa ON p.property_id = aa.property_id AND aa.status IN ('active', 'accepted_pending_signature')
          LEFT JOIN agents ag ON aa.agent_id = ag.agent_id
          LEFT JOIN users u_agent ON ag.user_id = u_agent.user_id
