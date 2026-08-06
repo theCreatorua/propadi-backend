@@ -8856,7 +8856,91 @@ app.post('/api/cron/check-safety-pulses', async (req, res) => {
   }
 });
 
-// POST /api/cron/check-periodic-safety – Automated 14-day periodic safety reminder & overdue escalation cron
+// Internal Helper for 14-Day Periodic Safety Reminders & Overdue Escalation
+async function runPeriodicSafetyCheckInternal() {
+  let processed = 0;
+  let overdueAlerts = 0;
+  let warningReminders = 0;
+
+  // 1. Fetch active tenancies with overdue 2-week safety check
+  const overdueTenancies = await pool.query(
+    `SELECT t.tenancy_id, t.renter_id, t.owner_id, t.property_id, t.next_safety_check_due, t.missed_safety_checks_count,
+            p.title as property_title, u_renter.name as renter_name, u_owner.name as owner_name
+     FROM tenancies t
+     JOIN properties p ON t.property_id = p.property_id
+     JOIN users u_renter ON t.renter_id = u_renter.user_id
+     JOIN users u_owner ON t.owner_id = u_owner.user_id
+     WHERE (LOWER(t.status) IN ('signed', 'active') OR LOWER(t.payment_status) = 'paid')
+       AND COALESCE(t.next_safety_check_due, CURRENT_TIMESTAMP) < CURRENT_TIMESTAMP`
+  );
+
+  for (const tenancy of overdueTenancies.rows) {
+    // Increment missed check count
+    await pool.query(
+      `UPDATE tenancies SET missed_safety_checks_count = missed_safety_checks_count + 1 WHERE tenancy_id = $1`,
+      [tenancy.tenancy_id]
+    );
+
+    // Penalise Renter Propadi Trust Score (-3 pts for overdue checkup)
+    await pool.query(
+      `UPDATE users SET renter_score = GREATEST(0, renter_score - 3) WHERE user_id = $1`,
+      [tenancy.renter_id]
+    );
+
+    // Notify Renter
+    await sendPushToUser(
+      tenancy.renter_id,
+      '🚨 Overdue Periodic Safety Check',
+      `Your 2-week property health checkup for "${tenancy.property_title}" is overdue. Please perform checkup to protect your Propadi Trust Score.`,
+      { screen: 'PeriodicHealthCheck', tenancy_id: tenancy.tenancy_id }
+    );
+
+    // Notify Landlord
+    await sendPushToUser(
+      tenancy.owner_id,
+      '🚨 Overdue Occupant Safety Inspection',
+      `Tenant ${tenancy.renter_name} has missed their 2-week periodic safety checkup for "${tenancy.property_title}". You can send an urgent nudge from your Dashboard.`,
+      { screen: 'Dashboard' }
+    );
+
+    overdueAlerts++;
+    processed++;
+  }
+
+  // 2. Fetch active tenancies with 2-week check due in 3 days (Warning reminders)
+  const upcomingTenancies = await pool.query(
+    `SELECT t.tenancy_id, t.renter_id, t.property_id, t.next_safety_check_due,
+            p.title as property_title,
+            GREATEST(1, ROUND(EXTRACT(EPOCH FROM (t.next_safety_check_due - CURRENT_TIMESTAMP)) / 86400)) as days_left
+     FROM tenancies t
+     JOIN properties p ON t.property_id = p.property_id
+     WHERE (LOWER(t.status) IN ('signed', 'active') OR LOWER(t.payment_status) = 'paid')
+       AND t.next_safety_check_due >= CURRENT_TIMESTAMP
+       AND t.next_safety_check_due <= (CURRENT_TIMESTAMP + INTERVAL '3 days')`
+  );
+
+  for (const tenancy of upcomingTenancies.rows) {
+    await sendPushToUser(
+      tenancy.renter_id,
+      '⏳ Upcoming Periodic Safety Check',
+      `Your 2-week periodic property health check for "${tenancy.property_title}" is due in ${tenancy.days_left} day(s). Tap to perform checkup.`,
+      { screen: 'PeriodicHealthCheck', tenancy_id: tenancy.tenancy_id }
+    );
+    warningReminders++;
+    processed++;
+  }
+
+  return { processed, overdueAlerts, warningReminders };
+}
+
+// Internal Self-Executing Cron Interval (Runs every 12 hours)
+setInterval(() => {
+  runPeriodicSafetyCheckInternal().catch((err) =>
+    console.error('Automated background periodic safety check error:', err)
+  );
+}, 12 * 60 * 60 * 1000);
+
+// POST /api/cron/check-periodic-safety – Webhook Trigger for External Cron Services
 app.post('/api/cron/check-periodic-safety', async (req, res) => {
   const secretKey = req.headers['x-cron-secret'];
   if (secretKey !== process.env.CRON_SECRET && req.query.secret !== process.env.CRON_SECRET) {
@@ -8864,79 +8948,8 @@ app.post('/api/cron/check-periodic-safety', async (req, res) => {
   }
 
   try {
-    let processed = 0;
-    let overdueAlerts = 0;
-    let warningReminders = 0;
-
-    // 1. Fetch active tenancies with overdue 2-week safety check
-    const overdueTenancies = await pool.query(
-      `SELECT t.tenancy_id, t.renter_id, t.owner_id, t.property_id, t.next_safety_check_due, t.missed_safety_checks_count,
-              p.title as property_title, u_renter.name as renter_name, u_owner.name as owner_name
-       FROM tenancies t
-       JOIN properties p ON t.property_id = p.property_id
-       JOIN users u_renter ON t.renter_id = u_renter.user_id
-       JOIN users u_owner ON t.owner_id = u_owner.user_id
-       WHERE (LOWER(t.status) IN ('signed', 'active') OR LOWER(t.payment_status) = 'paid')
-         AND COALESCE(t.next_safety_check_due, CURRENT_TIMESTAMP) < CURRENT_TIMESTAMP`
-    );
-
-    for (const tenancy of overdueTenancies.rows) {
-      // Increment missed check count
-      await pool.query(
-        `UPDATE tenancies SET missed_safety_checks_count = missed_safety_checks_count + 1 WHERE tenancy_id = $1`,
-        [tenancy.tenancy_id]
-      );
-
-      // Penalise Renter Propadi Trust Score (-3 pts for overdue checkup)
-      await pool.query(
-        `UPDATE users SET renter_score = GREATEST(0, renter_score - 3) WHERE user_id = $1`,
-        [tenancy.renter_id]
-      );
-
-      // Notify Renter
-      await sendPushToUser(
-        tenancy.renter_id,
-        '🚨 Overdue Periodic Safety Check',
-        `Your 2-week property health checkup for "${tenancy.property_title}" is overdue. Please perform checkup to protect your Propadi Trust Score.`,
-        { screen: 'PeriodicHealthCheck', tenancy_id: tenancy.tenancy_id }
-      );
-
-      // Notify Landlord
-      await sendPushToUser(
-        tenancy.owner_id,
-        '🚨 Overdue Occupant Safety Inspection',
-        `Tenant ${tenancy.renter_name} has missed their 2-week periodic safety checkup for "${tenancy.property_title}". You can send an urgent nudge from your Dashboard.`,
-        { screen: 'Dashboard' }
-      );
-
-      overdueAlerts++;
-      processed++;
-    }
-
-    // 2. Fetch active tenancies with 2-week check due in 3 days (Warning reminders)
-    const upcomingTenancies = await pool.query(
-      `SELECT t.tenancy_id, t.renter_id, t.property_id, t.next_safety_check_due,
-              p.title as property_title,
-              GREATEST(1, ROUND(EXTRACT(EPOCH FROM (t.next_safety_check_due - CURRENT_TIMESTAMP)) / 86400)) as days_left
-       FROM tenancies t
-       JOIN properties p ON t.property_id = p.property_id
-       WHERE (LOWER(t.status) IN ('signed', 'active') OR LOWER(t.payment_status) = 'paid')
-         AND t.next_safety_check_due >= CURRENT_TIMESTAMP
-         AND t.next_safety_check_due <= (CURRENT_TIMESTAMP + INTERVAL '3 days')`
-    );
-
-    for (const tenancy of upcomingTenancies.rows) {
-      await sendPushToUser(
-        tenancy.renter_id,
-        '⏳ Upcoming Periodic Safety Check',
-        `Your 2-week periodic property health check for "${tenancy.property_title}" is due in ${tenancy.days_left} day(s). Tap to perform checkup.`,
-        { screen: 'PeriodicHealthCheck', tenancy_id: tenancy.tenancy_id }
-      );
-      warningReminders++;
-      processed++;
-    }
-
-    res.json({ success: true, processed, overdueAlerts, warningReminders });
+    const result = await runPeriodicSafetyCheckInternal();
+    res.json({ success: true, ...result });
   } catch (err) {
     console.error('Periodic safety cron error:', err);
     res.status(500).json({ success: false, error: err.message });
