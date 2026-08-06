@@ -9047,6 +9047,10 @@ app.get('/api/paystack/subaccount/:userId', async (req, res) => {
     });
   } catch (err) {
     console.error('Fetch subaccount error:', err);
+    res.status(500).json({ success: false, error: err.message });
+  }
+});
+
 // 4c. Delete / Unlink Purpose Payout Bank Account
 app.delete('/api/paystack/subaccount/:userId/:purpose', async (req, res) => {
   try {
