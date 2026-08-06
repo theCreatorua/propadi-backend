@@ -2092,6 +2092,35 @@ app.post('/api/tenancies/:id/decline-renewal', async (req, res) => {
   }
 });
 
+// POST /api/tenancies/:id/request-renewal-offer – Renter requests renewal offer from owner
+app.post('/api/tenancies/:id/request-renewal-offer', async (req, res) => {
+  try {
+    const { id } = req.params;
+    const tenancyQuery = await pool.query(
+      `SELECT t.owner_id, u.name as renter_name, p.title as property_title
+       FROM tenancies t
+       JOIN users u ON t.renter_id = u.user_id
+       JOIN properties p ON t.property_id = p.property_id
+       WHERE t.tenancy_id = $1`,
+      [id],
+    );
+    if (tenancyQuery.rows.length === 0) return res.status(404).json({ success: false, error: 'Tenancy not found' });
+    const { owner_id, renter_name, property_title } = tenancyQuery.rows[0];
+
+    await sendPushToUser(
+      owner_id,
+      '🔔 Lease Renewal Requested',
+      `Tenant ${renter_name} has requested a lease renewal offer for "${property_title}".`,
+      { screen: 'LandlordLeaseRenewals', tenancy_id: id },
+    );
+
+    res.json({ success: true, message: 'Renewal offer request sent to Property Owner.' });
+  } catch (err) {
+    console.error('Request renewal offer error:', err);
+    res.status(500).json({ success: false, error: 'Failed to send request' });
+  }
+});
+
 // GET /api/admin/renewals – Admin Oversight of platform lease renewals
 app.get('/api/admin/renewals', async (req, res) => {
   try {
