@@ -1929,98 +1929,133 @@ app.get('/api/tenant-wallet/:userId', async (req, res) => {
 });
 
 // ==========================================
-// RENEWAL SYSTEM
+// RENEWAL SYSTEM (PHASE 6)
 // ==========================================
 
 app.post('/api/tenancies/:id/renew', async (req, res) => {
   const client = await pool.connect();
   try {
     const { id } = req.params;
-    const { new_rent_amount } = req.body;
+    const { new_rent_amount, duration_months, owner_notes } = req.body;
     await client.query('BEGIN');
+
     const origResult = await client.query(
       `SELECT renter_id, owner_id, property_id, rent_amount, lease_end_date, payment_status FROM tenancies WHERE tenancy_id = $1 FOR UPDATE`,
       [id],
     );
+
     if (origResult.rows.length === 0) {
       await client.query('ROLLBACK');
-      return res
-        .status(404)
-        .json({ success: false, error: 'Tenancy not found' });
+      return res.status(404).json({ success: false, error: 'Tenancy not found' });
     }
+
     const orig = origResult.rows[0];
-    if (orig.payment_status !== 'Paid') {
-      await client.query('ROLLBACK');
-      return res
-        .status(400)
-        .json({ success: false, error: 'Only paid tenancies can be renewed' });
-    }
-    const newRent = new_rent_amount
-      ? parseFloat(new_rent_amount)
-      : parseFloat(orig.rent_amount);
-    const newStart = new Date(orig.lease_end_date);
+    const newRent = new_rent_amount ? parseFloat(new_rent_amount) : parseFloat(orig.rent_amount);
+    const months = duration_months ? parseInt(duration_months) : 12;
+
+    const newStart = new Date(orig.lease_end_date || Date.now());
     newStart.setDate(newStart.getDate() + 1);
     const newEnd = new Date(newStart);
-    newEnd.setFullYear(newEnd.getFullYear() + 1);
-    const insertResult = await client.query(
-      `INSERT INTO tenancies (property_id, renter_id, owner_id, rent_amount, rent_period, lease_start_date, lease_end_date, status, payment_status, renewal_of_tenancy_id, renewal_status)
-       VALUES ($1,$2,$3,$4,$5,$6,$7,'Draft','Pending',$8,'Pending') RETURNING *`,
-      [
-        orig.property_id,
-        orig.renter_id,
-        orig.owner_id,
-        newRent,
-        'Per Annum',
-        newStart,
-        newEnd,
-        id,
-      ],
+    newEnd.setMonth(newEnd.getMonth() + months);
+
+    // Check if a pending renewal already exists
+    const existingRenewal = await client.query(
+      `SELECT tenancy_id FROM tenancies WHERE renewal_of_tenancy_id = $1 AND renewal_status = 'Pending'`,
+      [id],
     );
-    const newTenancy = insertResult.rows[0];
+
+    let newTenancy;
+    if (existingRenewal.rows.length > 0) {
+      const existingId = existingRenewal.rows[0].tenancy_id;
+      const updateRes = await client.query(
+        `UPDATE tenancies SET rent_amount = $1, lease_start_date = $2, lease_end_date = $3 WHERE tenancy_id = $4 RETURNING *`,
+        [newRent, newStart, newEnd, existingId],
+      );
+      newTenancy = updateRes.rows[0];
+    } else {
+      const insertResult = await client.query(
+        `INSERT INTO tenancies (property_id, renter_id, owner_id, rent_amount, rent_period, lease_start_date, lease_end_date, status, payment_status, renewal_of_tenancy_id, renewal_status)
+         VALUES ($1, $2, $3, $4, 'Per Annum', $5, $6, 'Draft', 'Unpaid', $7, 'Pending') RETURNING *`,
+        [orig.property_id, orig.renter_id, orig.owner_id, newRent, newStart, newEnd, id],
+      );
+      newTenancy = insertResult.rows[0];
+    }
+
     await client.query('COMMIT');
-    const propertyTitleQuery = await pool.query(
-      'SELECT title FROM properties WHERE property_id = $1',
-      [orig.property_id],
-    );
+
+    const propertyTitleQuery = await pool.query('SELECT title FROM properties WHERE property_id = $1', [orig.property_id]);
     const propTitle = propertyTitleQuery.rows[0]?.title || 'your property';
+
     await sendPushToUser(
       orig.renter_id,
-      '📄 Lease Renewal Offer',
-      `You have a renewal offer for ${propTitle}. Accept to sign and pay.`,
+      '📄 Lease Renewal Offer Received',
+      `You have received a lease renewal offer for ${propTitle}. Open to review terms and complete renewal.`,
       { screen: 'Tenancy', tenancy_id: newTenancy.tenancy_id },
     );
+
     res.json({
       success: true,
-      message: 'Renewal offer created.',
+      message: 'Lease renewal offer issued successfully.',
       tenancy: newTenancy,
     });
   } catch (err) {
     await client.query('ROLLBACK');
     console.error('Renewal creation error:', err);
-    res
-      .status(500)
-      .json({ success: false, error: 'Could not create renewal offer' });
+    res.status(500).json({ success: false, error: 'Could not create renewal offer' });
   } finally {
     client.release();
   }
 });
 
-app.get('/api/tenancies/renewals/:userId', async (req, res) => {
+// GET /api/tenancies/expiring/owner/:ownerId – Fetch expiring tenancies & active renewal offers for Owner
+app.get('/api/tenancies/expiring/owner/:ownerId', async (req, res) => {
   try {
-    const { userId } = req.params;
+    const { ownerId } = req.params;
     const result = await pool.query(
-      `SELECT t.*, p.title as property_title, p.address_street, p.address_city, o.name as owner_name
+      `SELECT t.tenancy_id, t.property_id, t.renter_id, t.rent_amount, t.lease_start_date, t.lease_end_date,
+              t.payment_status, t.status as tenancy_status, p.title as property_title, p.address_street,
+              p.address_city, p.main_image_url, u.name as renter_name, u.email as renter_email, u.phone as renter_phone,
+              r.tenancy_id as renewal_tenancy_id, r.rent_amount as renewal_rent_amount, r.renewal_status,
+              r.date_created as renewal_date_created
+       FROM tenancies t
+       JOIN properties p ON t.property_id = p.property_id
+       JOIN users u ON t.renter_id = u.user_id
+       LEFT JOIN tenancies r ON r.renewal_of_tenancy_id = t.tenancy_id
+       WHERE t.owner_id = $1 AND (t.renewal_of_tenancy_id IS NULL OR t.renewal_of_tenancy_id = '00000000-0000-0000-0000-000000000000')
+       ORDER BY t.lease_end_date ASC`,
+      [ownerId],
+    );
+
+    res.json({ success: true, expiring_tenancies: result.rows });
+  } catch (err) {
+    console.error('Fetch owner expiring tenancies error:', err);
+    res.status(500).json({ success: false, error: 'Failed to fetch expiring tenancies' });
+  }
+});
+
+// GET /api/tenancies/expiring/renter/:renterId – Fetch active tenancies & renewal offers for Renter
+app.get('/api/tenancies/expiring/renter/:renterId', async (req, res) => {
+  try {
+    const { renterId } = req.params;
+    const result = await pool.query(
+      `SELECT t.tenancy_id, t.property_id, t.owner_id, t.rent_amount, t.lease_start_date, t.lease_end_date,
+              t.payment_status, p.title as property_title, p.address_street, p.address_city, p.main_image_url,
+              p.service_charge, o.name as owner_name, o.email as owner_email, o.phone as owner_phone,
+              r.tenancy_id as renewal_tenancy_id, r.rent_amount as new_rent_amount, r.lease_start_date as new_lease_start,
+              r.lease_end_date as new_lease_end, r.renewal_status, r.date_created as offer_date
        FROM tenancies t
        JOIN properties p ON t.property_id = p.property_id
        JOIN users o ON t.owner_id = o.user_id
-       WHERE t.renter_id = $1 AND t.renewal_of_tenancy_id IS NOT NULL AND t.renewal_status = 'Pending'
-       ORDER BY t.date_created DESC`,
-      [userId],
+       LEFT JOIN tenancies r ON r.renewal_of_tenancy_id = t.tenancy_id
+       WHERE t.renter_id = $1 AND (t.renewal_of_tenancy_id IS NULL OR t.renewal_of_tenancy_id = '00000000-0000-0000-0000-000000000000')
+       ORDER BY t.lease_end_date ASC`,
+      [renterId],
     );
-    res.json({ success: true, renewals: result.rows });
+
+    res.json({ success: true, renter_tenancies: result.rows });
   } catch (err) {
-    console.error('Renewal fetch error:', err);
-    res.status(500).json({ success: false, error: 'Failed to fetch renewals' });
+    console.error('Fetch renter expiring tenancies error:', err);
+    res.status(500).json({ success: false, error: 'Failed to fetch renter lease details' });
   }
 });
 
@@ -2028,17 +2063,56 @@ app.post('/api/tenancies/:id/accept-renewal', async (req, res) => {
   try {
     const { id } = req.params;
     const result = await pool.query(
-      `UPDATE tenancies SET renewal_status = 'Accepted' WHERE tenancy_id = $1 RETURNING *`,
+      `UPDATE tenancies SET renewal_status = 'Accepted', status = 'Signed', renter_signature_date = CURRENT_TIMESTAMP WHERE tenancy_id = $1 RETURNING *`,
       [id],
     );
     if (result.rows.length === 0)
-      return res
-        .status(404)
-        .json({ success: false, error: 'Renewal not found' });
+      return res.status(404).json({ success: false, error: 'Renewal offer not found' });
     res.json({ success: true, tenancy: result.rows[0] });
   } catch (err) {
     console.error('Accept renewal error:', err);
     res.status(500).json({ success: false, error: 'Failed to accept renewal' });
+  }
+});
+
+app.post('/api/tenancies/:id/decline-renewal', async (req, res) => {
+  try {
+    const { id } = req.params;
+    const { decline_reason } = req.body;
+    const result = await pool.query(
+      `UPDATE tenancies SET renewal_status = 'Declined' WHERE tenancy_id = $1 RETURNING *`,
+      [id],
+    );
+    if (result.rows.length === 0)
+      return res.status(404).json({ success: false, error: 'Renewal offer not found' });
+    res.json({ success: true, tenancy: result.rows[0] });
+  } catch (err) {
+    console.error('Decline renewal error:', err);
+    res.status(500).json({ success: false, error: 'Failed to decline renewal' });
+  }
+});
+
+// GET /api/admin/renewals – Admin Oversight of platform lease renewals
+app.get('/api/admin/renewals', async (req, res) => {
+  try {
+    const result = await pool.query(
+      `SELECT r.tenancy_id as renewal_id, r.renewal_of_tenancy_id, r.rent_amount as new_rent,
+              r.renewal_status, r.date_created, r.payment_status, p.title as property_title,
+              t.rent_amount as old_rent, t.lease_end_date as original_expiry,
+              u_renter.name as renter_name, u_renter.email as renter_email,
+              u_owner.name as owner_name, u_owner.email as owner_email
+       FROM tenancies r
+       JOIN tenancies t ON r.renewal_of_tenancy_id = t.tenancy_id
+       JOIN properties p ON r.property_id = p.property_id
+       JOIN users u_renter ON r.renter_id = u_renter.user_id
+       JOIN users u_owner ON r.owner_id = u_owner.user_id
+       ORDER BY r.date_created DESC`,
+    );
+
+    res.json({ success: true, renewals: result.rows });
+  } catch (err) {
+    console.error('Admin renewals fetch error:', err);
+    res.status(500).json({ success: false, error: 'Failed to fetch admin renewals' });
   }
 });
 
