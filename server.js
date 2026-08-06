@@ -9102,9 +9102,10 @@ app.post('/api/payments/initialize-split', async (req, res) => {
     const { data: { user }, error } = await supabase.auth.getUser(token);
     if (error || !user) return res.status(401).json({ success: false, error: 'Invalid token' });
 
-    const { type, amount, recipient_id, tenancy_id, service_id, property_id, title } = req.body;
-    if (!type || !amount) {
-      return res.status(400).json({ success: false, error: 'Type and amount are required' });
+    const { type, amount, base_rent, agency_fee, legal_fee, caution_deposit, service_charge, recipient_id, tenancy_id, service_id, property_id, title } = req.body;
+    const baseRentAmount = parseFloat(base_rent || amount || 0);
+    if (!type || baseRentAmount <= 0) {
+      return res.status(400).json({ success: false, error: 'Type and positive rent amount are required' });
     }
 
     // Ensure transactions table has Phase 3 columns
@@ -9121,7 +9122,7 @@ app.post('/api/payments/initialize-split', async (req, res) => {
 
     let ownerSubaccountCode = null;
     let agencySubaccountCode = null;
-    let agencyCommissionRate = 0;
+    let agencyCommissionRate = 5.00;
     let ownerId = recipient_id;
 
     // Determine Property Owner & Appointed Agency Subaccounts
@@ -9174,36 +9175,33 @@ app.post('/api/payments/initialize-split', async (req, res) => {
       });
     }
 
-    // Calculate Financial Breakdown
-    const totalAmount = parseFloat(amount);
-    let platformCommission = 0;
-    let agencyShare = 0;
-    let ownerShare = totalAmount;
+    // Multi-Party Revenue Sharing Formula
+    let grossAgencyFee = agency_fee ? parseFloat(agency_fee) : baseRentAmount * (agencyCommissionRate / 100);
+    let grossLegalFee = legal_fee ? parseFloat(legal_fee) : baseRentAmount * 0.05;
+    let cautionDepositFee = caution_deposit ? parseFloat(caution_deposit) : 0;
+    let serviceChargeFee = service_charge ? parseFloat(service_charge) : 0;
 
-    if (type === 'rent') {
-      platformCommission = totalAmount * 0.02; // 2.0% platform fee
-      if (agencySubaccountCode && agencyCommissionRate > 0) {
-        agencyShare = totalAmount * (agencyCommissionRate / 100);
-      }
-      ownerShare = totalAmount - platformCommission - agencyShare;
-    } else if (type === 'service_request') {
-      platformCommission = totalAmount * 0.10; // 10% maintenance fee
-      ownerShare = totalAmount - platformCommission;
-    } else if (type === 'legal_fee') {
-      platformCommission = 3500; // Flat N3,500 legal binding fee
-      ownerShare = Math.max(0, totalAmount - platformCommission);
-    }
+    let propadiFromAgency = grossAgencyFee * 0.05; // 5% of Agency Fee
+    let propadiFromLegal = grossLegalFee * 0.05; // 5% of Legal Fee
+    let propadiFromOwner = baseRentAmount * 0.025; // 2.5% of Base Rent
+    let totalPropadiPlatformFee = propadiFromAgency + propadiFromLegal + propadiFromOwner;
 
-    const totalKobo = Math.round(totalAmount * 100);
-    const platformCommissionKobo = Math.round(platformCommission * 100);
-    const agencyShareKobo = Math.round(agencyShare * 100);
-    const ownerShareKobo = Math.round(ownerShare * 100);
+    let netAgencyShare = Math.max(0, grossAgencyFee - propadiFromAgency);
+    let netLegalShare = Math.max(0, grossLegalFee - propadiFromLegal);
+    let netOwnerShare = Math.max(0, (baseRentAmount - propadiFromOwner) + serviceChargeFee);
+
+    let grossTenantCheckout = baseRentAmount + grossAgencyFee + grossLegalFee + cautionDepositFee + serviceChargeFee;
+
+    const totalKobo = Math.round(grossTenantCheckout * 100);
+    const ownerShareKobo = Math.round(netOwnerShare * 100);
+    const agencyShareKobo = Math.round(netAgencyShare * 100);
+    const propadiFeeKobo = Math.round(totalPropadiPlatformFee * 100);
+
     const reference = `PROPADI_${Date.now()}_${Math.floor(Math.random() * 1000)}`;
-
     let splitCode = null;
 
-    // Create Paystack Dynamic Multi-Split if Agency is present
-    if (agencySubaccountCode && agencyShare > 0) {
+    // Create Paystack Multi-Split Payload with bearer_type: 'all' (enforcing shared Paystack charges)
+    if (agencySubaccountCode && netAgencyShare > 0) {
       try {
         const splitRes = await fetch('https://api.paystack.co/split', {
           method: 'POST',
@@ -9212,7 +9210,7 @@ app.post('/api/payments/initialize-split', async (req, res) => {
             Authorization: `Bearer ${process.env.PAYSTACK_SECRET_KEY}`,
           },
           body: JSON.stringify({
-            name: `Propadi Multi-Split ${reference}`,
+            name: `Propadi Shared Multi-Split ${reference}`,
             type: 'flat',
             currency: 'NGN',
             subaccounts: [
@@ -9228,7 +9226,7 @@ app.post('/api/payments/initialize-split', async (req, res) => {
           splitCode = splitData.data.split_code;
         }
       } catch (splitErr) {
-        console.error('Paystack split creation fallback:', splitErr);
+        console.error('Paystack split creation error:', splitErr);
       }
     }
 
@@ -9243,9 +9241,14 @@ app.post('/api/payments/initialize-split', async (req, res) => {
         property_id: property_id || null,
         recipient_id: ownerId,
         payer_id: user.id,
-        owner_share: ownerShare,
-        agency_share: agencyShare,
-        platform_commission: platformCommission,
+        base_rent: baseRentAmount,
+        gross_checkout: grossTenantCheckout,
+        owner_share: netOwnerShare,
+        agency_share: netAgencyShare,
+        legal_share: netLegalShare,
+        caution_deposit: cautionDepositFee,
+        service_charge: serviceChargeFee,
+        platform_commission: totalPropadiPlatformFee,
         owner_subaccount_code: ownerSubaccountCode,
         agency_subaccount_code: agencySubaccountCode || null,
       },
@@ -9255,8 +9258,8 @@ app.post('/api/payments/initialize-split', async (req, res) => {
       paystackPayload.split_code = splitCode;
     } else {
       paystackPayload.subaccount = ownerSubaccountCode;
-      paystackPayload.transaction_charge = platformCommissionKobo;
-      paystackPayload.bearer = 'subaccount';
+      paystackPayload.transaction_charge = propadiFeeKobo;
+      paystackPayload.bearer = 'all';
     }
 
     const paystackRes = await fetch('https://api.paystack.co/transaction/initialize', {
@@ -9273,23 +9276,24 @@ app.post('/api/payments/initialize-split', async (req, res) => {
       return res.status(400).json({ success: false, error: data.message || 'Failed to initialize payment' });
     }
 
-    // Insert pending transaction log with itemized shares
+    // Insert pending transaction log with itemized multi-party shares
     await pool.query(
       `INSERT INTO transactions 
        (user_id, type, title, amount, status, subaccount_code, platform_commission, 
-        owner_share_amount, agency_share_amount, propadi_fee_amount, 
+        owner_share_amount, agency_share_amount, propadi_fee_amount, caution_deposit_amount,
         owner_subaccount_code, agency_subaccount_code, paystack_split_code, reference, property_ref, created_at)
-       VALUES ($1, $2, $3, $4, 'Pending', $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, NOW())`,
+       VALUES ($1, $2, $3, $4, 'Pending', $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, NOW())`,
       [
         user.id,
         type,
         title || `Payment for ${type}`,
-        totalAmount,
+        grossTenantCheckout,
         ownerSubaccountCode,
-        platformCommission,
-        ownerShare,
-        agencyShare,
-        platformCommission,
+        totalPropadiPlatformFee,
+        netOwnerShare,
+        netAgencyShare,
+        totalPropadiPlatformFee,
+        cautionDepositFee,
         ownerSubaccountCode,
         agencySubaccountCode || null,
         splitCode || null,
@@ -9304,10 +9308,21 @@ app.post('/api/payments/initialize-split', async (req, res) => {
       access_code: data.data.access_code,
       reference,
       breakdown: {
-        total_amount: totalAmount,
-        owner_share: ownerShare,
-        agency_share: agencyShare,
-        platform_fee: platformCommission,
+        base_rent: baseRentAmount,
+        gross_agency_fee: grossAgencyFee,
+        gross_legal_fee: grossLegalFee,
+        caution_deposit: cautionDepositFee,
+        service_charge: serviceChargeFee,
+        total_tenant_checkout: grossTenantCheckout,
+        net_owner_payout: netOwnerShare,
+        net_agency_payout: netAgencyShare,
+        net_legal_payout: netLegalShare,
+        total_propadi_platform_fee: totalPropadiPlatformFee,
+        propadi_deduction_breakdown: {
+          from_agency: propadiFromAgency,
+          from_legal: propadiFromLegal,
+          from_owner: propadiFromOwner,
+        },
         split_code: splitCode,
       },
     });
