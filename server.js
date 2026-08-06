@@ -65,12 +65,12 @@ const pool = new Pool({
       ADD COLUMN IF NOT EXISTS caution_fee NUMERIC(12, 2) DEFAULT 0.00,
       ADD COLUMN IF NOT EXISTS legal_fee_percent NUMERIC(5, 2) DEFAULT 5.00,
       ADD COLUMN IF NOT EXISTS agency_fee_percent NUMERIC(5, 2) DEFAULT 0.00,
-      ADD COLUMN IF NOT EXISTS early_bird_discount_percent NUMERIC(5, 2) DEFAULT 5.00,
+      ADD COLUMN IF NOT EXISTS early_bird_discount_percent NUMERIC(5, 2) DEFAULT 0.00,
       ADD COLUMN IF NOT EXISTS is_caution_waived BOOLEAN DEFAULT FALSE;
 
       UPDATE properties
-      SET early_bird_discount_percent = 5.00
-      WHERE early_bird_discount_percent IS NULL OR early_bird_discount_percent = 0;
+      SET early_bird_discount_percent = 0.00
+      WHERE early_bird_discount_percent IS NULL;
 
       CREATE TABLE IF NOT EXISTS saved_properties (
         saved_id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
