@@ -2019,7 +2019,7 @@ app.get('/api/tenancies/expiring/owner/:ownerId', async (req, res) => {
               t.tenancy_id, t.property_id, t.renter_id, t.owner_id, t.rent_amount, t.rent_period, t.lease_start_date, t.lease_end_date,
               t.payment_status, t.status as tenancy_status, p.title as property_title, p.address_street,
               p.address_city, p.main_image_url, COALESCE(u.name, 'Valued Occupant') as renter_name,
-              u.email as renter_email, u.phone as renter_phone,
+              u.email as renter_email, u.phone_number as renter_phone,
               r.tenancy_id as renewal_tenancy_id, r.rent_amount as renewal_rent_amount, r.renewal_status,
               r.date_created as renewal_date_created
        FROM tenancies t
@@ -2047,7 +2047,7 @@ app.get('/api/tenancies/expiring/renter/:renterId', async (req, res) => {
       `SELECT DISTINCT ON (t.tenancy_id)
               t.tenancy_id, t.property_id, t.owner_id, t.renter_id, t.rent_amount, t.rent_period, t.lease_start_date, t.lease_end_date,
               t.payment_status, p.title as property_title, p.address_street, p.address_city, p.main_image_url,
-              p.service_charge, COALESCE(o.name, 'Property Owner') as owner_name, o.email as owner_email, o.phone as owner_phone,
+              p.service_charge, COALESCE(o.name, 'Property Owner') as owner_name, o.email as owner_email, o.phone_number as owner_phone,
               r.tenancy_id as renewal_tenancy_id, r.rent_amount as new_rent_amount, r.lease_start_date as new_lease_start,
               r.lease_end_date as new_lease_end, r.renewal_status, r.date_created as offer_date
        FROM tenancies t
