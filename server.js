@@ -2054,7 +2054,7 @@ app.get('/api/tenancies/expiring/renter/:renterId', async (req, res) => {
        LEFT JOIN properties p ON t.property_id = p.property_id
        LEFT JOIN users o ON (t.owner_id = o.user_id OR p.owner_id = o.user_id OR p.user_id = o.user_id)
        LEFT JOIN tenancies r ON r.renewal_of_tenancy_id = t.tenancy_id
-       WHERE (t.renter_id::text = $1 OR t.application_id IN (SELECT application_id FROM applications WHERE renter_id::text = $1))
+       WHERE (t.renter_id::text = $1 OR t.application_id IN (SELECT application_id FROM applications WHERE renter_id::text = $1 OR user_id::text = $1))
          AND t.renewal_of_tenancy_id IS NULL
        ORDER BY t.tenancy_id, r.date_created DESC`,
       [renterId],
