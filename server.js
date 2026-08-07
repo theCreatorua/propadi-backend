@@ -104,7 +104,8 @@ const pool = new Pool({
       ALTER TABLE tenancies
       ADD COLUMN IF NOT EXISTS last_safety_check_at TIMESTAMP WITH TIME ZONE,
       ADD COLUMN IF NOT EXISTS next_safety_check_due TIMESTAMP WITH TIME ZONE DEFAULT (CURRENT_TIMESTAMP + INTERVAL '14 days'),
-      ADD COLUMN IF NOT EXISTS missed_safety_checks_count INTEGER DEFAULT 0;
+      ADD COLUMN IF NOT EXISTS missed_safety_checks_count INTEGER DEFAULT 0,
+      ADD COLUMN IF NOT EXISTS decline_reason TEXT;
 
       CREATE TABLE IF NOT EXISTS occupant_reviews (
         review_id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
@@ -2121,7 +2122,7 @@ app.get('/api/tenancies/expiring/owner/:ownerId', async (req, res) => {
               t.payment_status, t.status as tenancy_status, p.title as property_title, p.address_street,
               p.address_city, p.main_image_url, COALESCE(u.name, 'Valued Occupant') as renter_name,
               u.email as renter_email, u.phone_number as renter_phone,
-              r.tenancy_id as renewal_tenancy_id, r.rent_amount as renewal_rent_amount, r.renewal_status,
+              r.tenancy_id as renewal_tenancy_id, r.rent_amount as renewal_rent_amount, r.renewal_status, r.decline_reason,
               r.date_created as renewal_date_created
        FROM tenancies t
        LEFT JOIN properties p ON t.property_id = p.property_id
@@ -2150,7 +2151,7 @@ app.get('/api/tenancies/expiring/renter/:renterId', async (req, res) => {
               t.payment_status, p.title as property_title, p.address_street, p.address_city, p.main_image_url,
               p.service_charge, COALESCE(o.name, 'Property Owner') as owner_name, o.email as owner_email, o.phone_number as owner_phone,
               r.tenancy_id as renewal_tenancy_id, r.rent_amount as new_rent_amount, r.lease_start_date as new_lease_start,
-              r.lease_end_date as new_lease_end, r.renewal_status, r.date_created as offer_date
+              r.lease_end_date as new_lease_end, r.renewal_status, r.decline_reason, r.date_created as offer_date
        FROM tenancies t
        LEFT JOIN properties p ON t.property_id = p.property_id
        LEFT JOIN users o ON (t.owner_id = o.user_id OR p.owner_id = o.user_id)
