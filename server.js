@@ -173,57 +173,6 @@ const pool = new Pool({
 
       ALTER TABLE agent_assignments DROP CONSTRAINT IF EXISTS agent_assignments_status_check;
 
-      await client.query(`
-        CREATE OR REPLACE FUNCTION generate_propadi_tenancy_id()
-        RETURNS TRIGGER AS $$
-        DECLARE
-          parent_id VARCHAR(30);
-          new_id VARCHAR(30);
-          done BOOL := FALSE;
-          seq INT := 1;
-        BEGIN
-          -- 1. If propadi_tenancy_id is explicitly supplied by backend code, respect and use it
-          IF NEW.propadi_tenancy_id IS NOT NULL AND NEW.propadi_tenancy_id <> '' THEN
-            RETURN NEW;
-          END IF;
-
-          -- 2. If this is a renewal, try parent_id suffix (-R1, -R2...) or fresh unique PTN
-          IF NEW.renewal_of_tenancy_id IS NOT NULL THEN
-            SELECT propadi_tenancy_id INTO parent_id 
-            FROM public.tenancies 
-            WHERE tenancy_id = NEW.renewal_of_tenancy_id;
-            
-            IF parent_id IS NOT NULL THEN
-              WHILE NOT done LOOP
-                new_id := parent_id || '-R' || seq;
-                PERFORM 1 FROM public.tenancies WHERE propadi_tenancy_id = new_id;
-                IF NOT FOUND THEN
-                  done := TRUE;
-                ELSE
-                  seq := seq + 1;
-                END IF;
-              END LOOP;
-              NEW.propadi_tenancy_id := new_id;
-              RETURN NEW;
-            END IF;
-          END IF;
-
-          -- 3. Default: Generate unique ID format: PTN-XXXXXX (6 alphanumeric chars)
-          done := FALSE;
-          WHILE NOT done LOOP
-            new_id := 'PTN-' || UPPER(SUBSTRING(MD5(RANDOM()::TEXT || CLOCK_TIMESTAMP()::TEXT) FROM 1 FOR 6));
-            PERFORM 1 FROM public.tenancies WHERE propadi_tenancy_id = new_id;
-            IF NOT FOUND THEN
-              done := TRUE;
-            END IF;
-          END LOOP;
-
-          NEW.propadi_tenancy_id := new_id;
-          RETURN NEW;
-        END;
-        $$ LANGUAGE plpgsql;
-      `);
-
       ALTER TABLE agent_assignments
       ADD CONSTRAINT agent_assignments_status_check CHECK (
         status IN (
@@ -268,6 +217,58 @@ const pool = new Pool({
         created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
       );
     `);
+
+    await pool.query(`
+      CREATE OR REPLACE FUNCTION generate_propadi_tenancy_id()
+      RETURNS TRIGGER AS $$
+      DECLARE
+        parent_id VARCHAR(30);
+        new_id VARCHAR(30);
+        done BOOL := FALSE;
+        seq INT := 1;
+      BEGIN
+        -- 1. If propadi_tenancy_id is explicitly supplied by backend code, respect and use it
+        IF NEW.propadi_tenancy_id IS NOT NULL AND NEW.propadi_tenancy_id <> '' THEN
+          RETURN NEW;
+        END IF;
+
+        -- 2. If this is a renewal, try parent_id suffix (-R1, -R2...) or fresh unique PTN
+        IF NEW.renewal_of_tenancy_id IS NOT NULL THEN
+          SELECT propadi_tenancy_id INTO parent_id 
+          FROM public.tenancies 
+          WHERE tenancy_id = NEW.renewal_of_tenancy_id;
+          
+          IF parent_id IS NOT NULL THEN
+            WHILE NOT done LOOP
+              new_id := parent_id || '-R' || seq;
+              PERFORM 1 FROM public.tenancies WHERE propadi_tenancy_id = new_id;
+              IF NOT FOUND THEN
+                done := TRUE;
+              ELSE
+                seq := seq + 1;
+              END IF;
+            END LOOP;
+            NEW.propadi_tenancy_id := new_id;
+            RETURN NEW;
+          END IF;
+        END IF;
+
+        -- 3. Default: Generate unique ID format: PTN-XXXXXX (6 alphanumeric chars)
+        done := FALSE;
+        WHILE NOT done LOOP
+          new_id := 'PTN-' || UPPER(SUBSTRING(MD5(RANDOM()::TEXT || CLOCK_TIMESTAMP()::TEXT) FROM 1 FOR 6));
+          PERFORM 1 FROM public.tenancies WHERE propadi_tenancy_id = new_id;
+          IF NOT FOUND THEN
+            done := TRUE;
+          END IF;
+        END LOOP;
+
+        NEW.propadi_tenancy_id := new_id;
+        RETURN NEW;
+      END;
+      $$ LANGUAGE plpgsql;
+    `);
+
     console.log('✅ Paystack subaccount, agents, analytics, subscriptions & calendar schema migration verified.');
   } catch (err) {
     console.error('Error in startup schema migration:', err);
