@@ -1976,10 +1976,18 @@ app.post('/api/tenancies/:id/renew', async (req, res) => {
       );
       newTenancy = updateRes.rows[0];
     } else {
+      // Create a fresh renewal application record to satisfy unique application_id constraint on tenancies
+      const appRes = await client.query(
+        `INSERT INTO applications (property_id, renter_id, owner_id, proposed_rent, cover_letter, status)
+         VALUES ($1, $2, $3, $4, 'Automated Lease Renewal Offer', 'Approved') RETURNING application_id`,
+        [orig.property_id, orig.renter_id, orig.owner_id, newRent],
+      );
+      const renewalAppId = appRes.rows[0].application_id;
+
       const insertResult = await client.query(
         `INSERT INTO tenancies (application_id, property_id, renter_id, owner_id, rent_amount, rent_period, lease_start_date, lease_end_date, status, payment_status, renewal_of_tenancy_id, renewal_status)
          VALUES ($1, $2, $3, $4, $5, 'Per Annum', $6, $7, 'Draft', 'Unpaid', $8, 'Pending') RETURNING *`,
-        [orig.application_id, orig.property_id, orig.renter_id, orig.owner_id, newRent, newStart, newEnd, id],
+        [renewalAppId, orig.property_id, orig.renter_id, orig.owner_id, newRent, newStart, newEnd, id],
       );
       newTenancy = insertResult.rows[0];
     }
