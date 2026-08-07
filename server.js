@@ -1377,6 +1377,22 @@ app.get('/api/applications/owner/:owner_id', async (req, res) => {
   }
 });
 
+const generatePropadiTenancyId = async (clientOrPool) => {
+  let unique = false;
+  let code = '';
+  let attempts = 0;
+  while (!unique && attempts < 10) {
+    attempts++;
+    const cryptoHex = Math.random().toString(36).substring(2, 8).toUpperCase() + Math.random().toString(36).substring(2, 6).toUpperCase();
+    code = `PTN-${cryptoHex}`;
+    const check = await clientOrPool.query('SELECT tenancy_id FROM tenancies WHERE propadi_tenancy_id = $1', [code]);
+    if (check.rows.length === 0) {
+      unique = true;
+    }
+  }
+  return code;
+};
+
 app.put('/api/applications/:id', async (req, res) => {
   try {
     const { id } = req.params;
@@ -1396,9 +1412,12 @@ app.put('/api/applications/:id', async (req, res) => {
         start.setDate(start.getDate() + 14);
       const end = new Date(start);
       end.setFullYear(end.getFullYear() + 1);
+
+      const propadiTenancyId = await generatePropadiTenancyId(pool);
+
       await pool.query(
-        `INSERT INTO tenancies (application_id, property_id, renter_id, owner_id, rent_amount, rent_period, lease_start_date, lease_end_date, status, is_sight_unseen)
-         VALUES ($1, $2, $3, $4, $5, 'Per Annum', $6, $7, 'Draft', $8)`,
+        `INSERT INTO tenancies (application_id, property_id, renter_id, owner_id, rent_amount, rent_period, lease_start_date, lease_end_date, status, is_sight_unseen, propadi_tenancy_id)
+         VALUES ($1, $2, $3, $4, $5, 'Per Annum', $6, $7, 'Draft', $8, $9)`,
         [
           application.application_id,
           application.property_id,
@@ -1408,6 +1427,7 @@ app.put('/api/applications/:id', async (req, res) => {
           start.toISOString().split('T')[0],
           end.toISOString().split('T')[0],
           application.is_sight_unseen,
+          propadiTenancyId,
         ],
       );
     }
@@ -1983,11 +2003,12 @@ app.post('/api/tenancies/:id/renew', async (req, res) => {
         [orig.property_id, orig.renter_id, orig.owner_id, newRent],
       );
       const renewalAppId = appRes.rows[0].application_id;
+      const propadiTenancyId = await generatePropadiTenancyId(client);
 
       const insertResult = await client.query(
-        `INSERT INTO tenancies (application_id, property_id, renter_id, owner_id, rent_amount, rent_period, lease_start_date, lease_end_date, status, payment_status, renewal_of_tenancy_id, renewal_status)
-         VALUES ($1, $2, $3, $4, $5, 'Per Annum', $6, $7, 'Draft', 'Unpaid', $8, 'Pending') RETURNING *`,
-        [renewalAppId, orig.property_id, orig.renter_id, orig.owner_id, newRent, newStart, newEnd, id],
+        `INSERT INTO tenancies (application_id, property_id, renter_id, owner_id, rent_amount, rent_period, lease_start_date, lease_end_date, status, payment_status, renewal_of_tenancy_id, renewal_status, propadi_tenancy_id)
+         VALUES ($1, $2, $3, $4, $5, 'Per Annum', $6, $7, 'Draft', 'Unpaid', $8, 'Pending', $9) RETURNING *`,
+        [renewalAppId, orig.property_id, orig.renter_id, orig.owner_id, newRent, newStart, newEnd, id, propadiTenancyId],
       );
       newTenancy = insertResult.rows[0];
     }
