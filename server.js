@@ -2188,14 +2188,34 @@ app.post('/api/tenancies/:id/accept-renewal', async (req, res) => {
 app.post('/api/tenancies/:id/decline-renewal', async (req, res) => {
   try {
     const { id } = req.params;
-    const { decline_reason } = req.body;
-    const result = await pool.query(
-      `UPDATE tenancies SET renewal_status = 'Declined' WHERE tenancy_id = $1 RETURNING *`,
-      [id],
+    const { decline_reason } = req.body || {};
+    const reasonText = decline_reason && decline_reason.trim() ? decline_reason.trim() : 'Tenant declined proposed rate';
+    
+    let result = await pool.query(
+      `UPDATE tenancies SET renewal_status = 'Declined', decline_reason = $1 WHERE tenancy_id = $2 RETURNING *`,
+      [reasonText, id],
     );
+    
+    if (result.rows.length === 0) {
+      result = await pool.query(
+        `UPDATE tenancies SET renewal_status = 'Declined', decline_reason = $1 WHERE renewal_of_tenancy_id = $2 RETURNING *`,
+        [reasonText, id],
+      );
+    }
+    
     if (result.rows.length === 0)
       return res.status(404).json({ success: false, error: 'Renewal offer not found' });
-    res.json({ success: true, tenancy: result.rows[0] });
+      
+    const tenancy = result.rows[0];
+    const ownerId = tenancy.owner_id;
+    if (ownerId) {
+      await sendPushToUser(
+        ownerId,
+        '❌ Lease Renewal Offer Declined',
+        `Tenant declined the renewal offer. Reason: ${reasonText}. You can revise the offer or re-list the property.`
+      );
+    }
+    res.json({ success: true, tenancy });
   } catch (err) {
     console.error('Decline renewal error:', err);
     res.status(500).json({ success: false, error: 'Failed to decline renewal' });
