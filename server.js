@@ -1619,8 +1619,13 @@ app.put('/api/tenancies/:id/sign', async (req, res) => {
 app.post('/api/tenancies/:id/pay', async (req, res) => {
   try {
     const { id } = req.params;
+    const { e_sign_name } = req.body || {};
     const tenancyResult = await pool.query(
-      `SELECT t.rent_amount, u.email FROM tenancies t JOIN users u ON t.renter_id = u.user_id WHERE t.tenancy_id=$1`,
+      `SELECT t.tenancy_id, t.rent_amount, t.property_id, COALESCE(p.service_charge, 0) as service_charge, u.email 
+       FROM tenancies t 
+       LEFT JOIN properties p ON t.property_id = p.property_id 
+       JOIN users u ON t.renter_id = u.user_id 
+       WHERE t.tenancy_id=$1`,
       [id],
     );
     if (tenancyResult.rows.length === 0)
@@ -1628,10 +1633,17 @@ app.post('/api/tenancies/:id/pay', async (req, res) => {
         .status(404)
         .json({ success: false, error: 'Tenancy not found' });
     const tenancy = tenancyResult.rows[0];
-    const rentAmount = parseFloat(tenancy.rent_amount);
-    let gatewayFee = rentAmount * 0.015 + 100;
-    if (gatewayFee > 2000) gatewayFee = 2000;
-    const totalAmountKobo = Math.round((rentAmount + gatewayFee) * 100);
+    const rentAmount = parseFloat(tenancy.rent_amount) || 0;
+    const serviceCharge = parseFloat(tenancy.service_charge) || 0;
+    const propadiTechFee = 2500;
+    const subtotalPackage = rentAmount + serviceCharge + propadiTechFee;
+    
+    let paystackFee = subtotalPackage * 0.015 + 100;
+    if (paystackFee > 2000) paystackFee = 2000;
+    
+    const grossTotal = subtotalPackage + paystackFee;
+    const totalAmountKobo = Math.round(grossTotal * 100);
+
     const paystackResponse = await fetch(
       'https://api.paystack.co/transaction/initialize',
       {
@@ -1643,7 +1655,7 @@ app.post('/api/tenancies/:id/pay', async (req, res) => {
         body: JSON.stringify({
           email: tenancy.email,
           amount: totalAmountKobo,
-          metadata: { tenancy_id: id },
+          metadata: { tenancy_id: id, e_sign_name: e_sign_name || null },
           callback_url: 'propadi://paystack-return',
         }),
       },
@@ -1651,7 +1663,7 @@ app.post('/api/tenancies/:id/pay', async (req, res) => {
     const paystackData = await paystackResponse.json();
     if (paystackData.status) {
       await pool.query(
-        `UPDATE tenancies SET payment_reference = $1 WHERE tenancy_id = $2`,
+        `UPDATE tenancies SET payment_reference = $1, renter_signature_date = CURRENT_TIMESTAMP WHERE tenancy_id = $2`,
         [paystackData.data.reference, id],
       );
       res.json({
@@ -1662,6 +1674,7 @@ app.post('/api/tenancies/:id/pay', async (req, res) => {
       res.status(400).json({ success: false, error: paystackData.message });
     }
   } catch (err) {
+    console.error('Payment init error:', err);
     res
       .status(500)
       .json({ success: false, error: 'Payment initialization failed' });
@@ -1695,11 +1708,18 @@ app.post('/api/tenancies/:id/verify', async (req, res) => {
     if (verifyData.data.status === 'success') {
       await client.query('BEGIN');
 
-      // Update tenancy payment status
+      // Update tenancy payment status & activate renewal
       await client.query(
-        `UPDATE tenancies SET payment_status = 'Paid' WHERE tenancy_id = $1`,
+        `UPDATE tenancies SET payment_status = 'Paid', renewal_status = 'Accepted', status = 'Signed' WHERE tenancy_id = $1`,
         [id],
       );
+
+      if (tenancy.renewal_of_tenancy_id) {
+        await client.query(
+          `UPDATE tenancies SET status = 'Renewed' WHERE tenancy_id = $1`,
+          [tenancy.renewal_of_tenancy_id],
+        );
+      }
 
       const rentAmount = parseFloat(tenancy.rent_amount);
       let gatewayFee = rentAmount * 0.015 + 100;
