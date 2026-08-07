@@ -1940,10 +1940,10 @@ app.post('/api/tenancies/:id/renew', async (req, res) => {
     await client.query('BEGIN');
 
     const origResult = await client.query(
-      `SELECT t.renter_id, COALESCE(t.owner_id, p.owner_id) as owner_id, t.property_id, t.rent_amount, t.lease_end_date, t.payment_status
+      `SELECT t.application_id, t.renter_id, COALESCE(t.owner_id, p.owner_id) as owner_id, t.property_id, t.rent_amount, t.lease_end_date, t.payment_status
        FROM tenancies t
        LEFT JOIN properties p ON t.property_id = p.property_id
-       WHERE t.tenancy_id = $1 FOR UPDATE`,
+       WHERE t.tenancy_id = $1 FOR UPDATE OF t`,
       [id],
     );
 
@@ -1978,8 +1978,8 @@ app.post('/api/tenancies/:id/renew', async (req, res) => {
     } else {
       const insertResult = await client.query(
         `INSERT INTO tenancies (application_id, property_id, renter_id, owner_id, rent_amount, rent_period, lease_start_date, lease_end_date, status, payment_status, renewal_of_tenancy_id, renewal_status)
-         VALUES (NULL, $1, $2, $3, $4, 'Per Annum', $5, $6, 'Draft', 'Unpaid', $7, 'Pending') RETURNING *`,
-        [orig.property_id, orig.renter_id, orig.owner_id, newRent, newStart, newEnd, id],
+         VALUES ($1, $2, $3, $4, $5, 'Per Annum', $6, $7, 'Draft', 'Unpaid', $8, 'Pending') RETURNING *`,
+        [orig.application_id, orig.property_id, orig.renter_id, orig.owner_id, newRent, newStart, newEnd, id],
       );
       newTenancy = insertResult.rows[0];
     }
