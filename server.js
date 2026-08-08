@@ -1561,7 +1561,8 @@ app.get('/api/tenancies/:id', async (req, res) => {
     const { id } = req.params;
     const result = await pool.query(
       `SELECT t.*, p.title as property_title, p.address_street, p.address_city, p.address_state,
-              o.name as owner_name, o.email as owner_email,
+              o.name as owner_name, o.email as owner_email, o.paystack_subaccount_code as owner_subaccount_code,
+              (o.paystack_subaccount_code IS NOT NULL AND o.paystack_subaccount_code != '') as owner_has_payout_account,
               r.name as renter_name, r.email as renter_email, r.occupation, r.nok_full_name
        FROM tenancies t
        JOIN properties p ON t.property_id = p.property_id
@@ -1580,6 +1581,34 @@ app.get('/api/tenancies/:id', async (req, res) => {
     res
       .status(500)
       .json({ success: false, error: 'Failed to fetch agreement' });
+  }
+});
+
+// POST /api/tenancies/:id/remind-owner-payout – Remind property owner to link bank account
+app.post('/api/tenancies/:id/remind-owner-payout', async (req, res) => {
+  try {
+    const { id } = req.params;
+    const tenancyRes = await pool.query(
+      `SELECT t.owner_id, p.title as property_title, u.name as renter_name
+       FROM tenancies t
+       JOIN properties p ON t.property_id = p.property_id
+       LEFT JOIN users u ON t.renter_id = u.user_id
+       WHERE t.tenancy_id = $1`,
+      [id]
+    );
+    if (tenancyRes.rows.length === 0) return res.status(404).json({ success: false, error: 'Tenancy not found' });
+    const { owner_id, property_title, renter_name } = tenancyRes.rows[0];
+    if (owner_id) {
+      await sendPushToUser(
+        owner_id,
+        '🏦 Action Required: Link Payout Bank Account',
+        `Renter ${renter_name || 'Occupant'} is ready to pay rent for "${property_title}". Please link your verified bank account in Settings to enable automated Paystack checkout.`
+      );
+    }
+    res.json({ success: true, message: 'Reminder sent to Property Owner.' });
+  } catch (err) {
+    console.error('Remind owner payout error:', err);
+    res.status(500).json({ success: false, error: 'Failed to send reminder' });
   }
 });
 
