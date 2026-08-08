@@ -2178,15 +2178,16 @@ app.get('/api/tenancies/expiring/renter/:renterId', async (req, res) => {
     const result = await pool.query(
       `SELECT DISTINCT ON (t.tenancy_id)
               t.tenancy_id, t.property_id, t.owner_id, t.renter_id, t.rent_amount, t.rent_period, t.lease_start_date, t.lease_end_date,
-              t.payment_status, p.title as property_title, p.address_street, p.address_city, p.main_image_url,
+              t.payment_status, t.status as tenancy_status, p.title as property_title, p.address_street, p.address_city, p.main_image_url,
               p.service_charge, COALESCE(o.name, 'Property Owner') as owner_name, o.email as owner_email, o.phone_number as owner_phone,
               r.tenancy_id as renewal_tenancy_id, r.rent_amount as new_rent_amount, r.lease_start_date as new_lease_start,
-              r.lease_end_date as new_lease_end, r.renewal_status, r.decline_reason, r.date_created as offer_date
+              r.lease_end_date as new_lease_end, r.renewal_status, r.payment_status as renewal_payment_status,
+              r.status as renewal_tenancy_status, r.decline_reason, r.date_created as offer_date
        FROM tenancies t
        LEFT JOIN properties p ON t.property_id = p.property_id
        LEFT JOIN users o ON (t.owner_id = o.user_id OR p.owner_id = o.user_id)
        LEFT JOIN tenancies r ON r.renewal_of_tenancy_id = t.tenancy_id
-       WHERE (t.renter_id = $1 OR t.application_id IN (SELECT application_id FROM applications WHERE renter_id = $1))
+       WHERE (t.renter_id = $1 OR r.renter_id = $1 OR t.application_id IN (SELECT application_id FROM applications WHERE renter_id = $1))
          AND t.renewal_of_tenancy_id IS NULL
        ORDER BY t.tenancy_id, r.date_created DESC`,
       [renterId],
