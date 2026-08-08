@@ -2151,8 +2151,9 @@ app.get('/api/tenancies/expiring/owner/:ownerId', async (req, res) => {
               t.payment_status, t.status as tenancy_status, p.title as property_title, p.address_street,
               p.address_city, p.main_image_url, COALESCE(u.name, 'Valued Occupant') as renter_name,
               u.email as renter_email, u.phone_number as renter_phone,
-              r.tenancy_id as renewal_tenancy_id, r.rent_amount as renewal_rent_amount, r.renewal_status, r.decline_reason,
-              r.date_created as renewal_date_created
+              r.tenancy_id as renewal_tenancy_id, r.rent_amount as renewal_rent_amount, r.renewal_status,
+              r.payment_status as renewal_payment_status, r.status as renewal_tenancy_status,
+              r.decline_reason, r.date_created as renewal_date_created
        FROM tenancies t
        LEFT JOIN properties p ON t.property_id = p.property_id
        LEFT JOIN users u ON t.renter_id = u.user_id
